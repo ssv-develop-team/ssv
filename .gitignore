@@ -1,2 +1,38 @@
-.superpowers/
+# Build
+build/
+builddir/
+_build/
+install/
+.deps/
 .cache/
+.superpowers/
+
+# Compiled
+*.o
+*.so
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Output (future)
+output/
+evidence/
+
+# Models (too large for git)
+models/

@@ -1,0 +1,7 @@
+subdir('ssv-common')
+subdir('ssv-template')
+subdir('ssv-infer')
+subdir('ssv-track')
+subdir('ssv-pub')
+subdir('ssv-overlay')
+subdir('tests')
