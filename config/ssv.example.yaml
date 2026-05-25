@@ -1,0 +1,70 @@
+# Site Safety Vision - 运行时配置文件
+# 复制此文件为 ssv.default.yaml 或设置 SSV_CONFIG_PATH 环境变量
+#
+# 环境变量覆盖 (优先级高于 YAML):
+#   REDIS_HOST        → redis.host
+#   REDIS_PORT        → redis.port
+#   SSV_LOG_LEVEL     → logging.python_log_level
+#   SSV_DISPLAY_SINK  → display.sink
+
+# 配置版本号
+version: "1.0"
+
+# 日志配置
+logging:
+  # C++ GStreamer 插件的 GST_DEBUG 模式（如 "ssv*:5" 启用所有 SSV 插件 DEBUG 级别）
+  cpp_debug_level: "ssv*:4"
+  # Python agent 服务日志级别（DEBUG, INFO, WARNING, ERROR）
+  python_log_level: "INFO"
+
+# Redis 连接配置（M5 起使用）
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  # Redis Streams 键名，检测事件写入此流
+  stream_key: "ssv:events"
+  # 消费者组名称，agent 服务从此组消费事件
+  consumer_group: "ssv-agent"
+
+# 视频源配置（M2 起使用）
+sources: []
+#  示例：
+#  - name: "camera-01"
+#    type: "rtsp"
+#    uri: "rtsp://192.168.1.100:554/stream"
+#  - name: "test-video"
+#    type: "file"
+#    uri: "/path/to/video.mp4"
+
+# 显示配置（M2 起使用）
+display:
+  # 是否开启 GStreamer 本地显示窗口
+  enabled: false
+  # 视频 sink 元素（autovideosink 自动选择，或指定 waylandsink/xvimagesink）
+  sink: "autovideosink"
+
+# Pipeline 配置（M2 起使用）
+pipeline:
+  # 分析帧率（每秒抽取多少帧进行分析）
+  analysis_fps: 5
+  # 分析帧宽度
+  frame_width: 640
+  # 分析帧高度
+  frame_height: 480
+
+# 推理配置（M3 起使用）
+inference:
+  # YOLO ONNX 模型文件路径
+  model_path: ""
+  # 检测置信度阈值
+  confidence_threshold: 0.5
+  # 推理设备（cpu, cuda:0, tensorrt 等）
+  device: "cpu"
+
+# Agent 配置（M6 起使用）
+agent:
+  # 状态机单次处理超时（秒）
+  state_machine_timeout: 300
+  # 工具调用最大重试次数
+  max_retries: 3

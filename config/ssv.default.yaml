@@ -1,0 +1,41 @@
+version: "1.0"
+
+logging:
+  cpp_debug_level: "ssv*:4"
+  python_log_level: "INFO"
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  stream_key: "ssv:events"
+  consumer_group: "ssv-agent"
+
+sources: []
+
+display:
+  enabled: false
+  sink: "autovideosink"
+
+pipeline:
+  analysis_fps: 5
+  frame_width: 640
+  frame_height: 480
+
+inference:
+  model_path: "models/yolov8n.onnx"
+  confidence_threshold: 0.5
+  device: "cpu"
+  target_class: "person"
+
+tracking:
+  enabled: true
+  frame_rate: 30
+  track_threshold: 0.5
+  track_buffer: 30
+  match_threshold: 0.3
+  mock_track: false
+
+agent:
+  state_machine_timeout: 300
+  max_retries: 3

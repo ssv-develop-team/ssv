@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Site Safety Vision — 项目入口脚本
+#
+# 用法: ./ssv <command> [args...]
+#
+# 命令:
+#   build                    编译 C++ GStreamer 插件
+#   clean                    删除 Meson 构建目录
+#   redis                    启动 Docker Redis (后台)
+#   test                     运行整套 GStreamer 测试用例 (无头)
+#   run                      运行整套 GStreamer 实时链路
+#   run --display            实时链路 + 视频观察窗口
+#   run --display --overlay  实时链路 + 视频观察窗口 + 检测框
+#   run --display --sink X   实时链路 + 指定视频 sink
+#   download-model           下载 YOLOv8n ONNX 模型
+#   agent                    启动 Python Agent 服务 (消费 Redis 事件)
+#   inspect                  查看插件详细信息
+#   stop                     停止所有后台服务
+#
+set -euo pipefail
+
+SCRIPTS_DIR="$(cd "$(dirname "$0")/scripts" && pwd)"
+
+usage() {
+    echo ""
+    echo "Site Safety Vision — 项目入口"
+    echo ""
+    echo "用法: ./ssv <command> [args...]"
+    echo ""
+    echo "命令:"
+    echo "  build                    编译 C++ GStreamer 插件"
+    echo "  clean                    删除 Meson 构建目录"
+    echo "  redis                    启动 Docker Redis (后台)"
+    echo "  test                     运行整套 GStreamer 测试用例 (无头)"
+    echo "  run                      运行整套 GStreamer 实时链路"
+    echo "  run --display            实时链路 + 视频观察窗口"
+    echo "  run --display --overlay  实时链路 + 视频观察窗口 + 检测框"
+    echo "  run --display --sink X   实时链路 + 指定视频 sink"
+    echo "  download-model           下载 YOLOv8n ONNX 模型"
+    echo "  agent                    启动 Agent (消费 Redis 事件并打印)"
+    echo "  inspect                  查看插件信息"
+    echo "  stop                     停止所有后台服务"
+    echo ""
+    echo "环境变量:"
+    echo "  SSV_CONFIG_PATH    配置文件路径 (默认: config/ssv.default.yaml)"
+    echo "  SSV_RTSP_URL       RTSP 视频源地址"
+    echo "  SSV_MODEL_PATH     YOLO 模型路径 (默认: models/yolov8n.onnx)"
+    echo "  GST_DEBUG          GStreamer 调试级别 (默认: ssv*:4)"
+    echo ""
+}
+
+case "${1:-}" in
+    build)    exec bash "$SCRIPTS_DIR/build.sh" ;;
+    clean)    exec bash "$SCRIPTS_DIR/clean.sh" ;;
+    redis)    exec bash "$SCRIPTS_DIR/redis.sh" ;;
+    test)     exec bash "$SCRIPTS_DIR/pipeline.sh" ;;
+    run)
+        shift
+        exec bash "$SCRIPTS_DIR/pipeline.sh" --run "$@"
+        ;;
+    download-model) exec bash "$SCRIPTS_DIR/download-model.sh" ;;
+    agent)    exec bash "$SCRIPTS_DIR/agent.sh" ;;
+    inspect)  exec bash "$SCRIPTS_DIR/inspect.sh" ;;
+    stop)     exec bash "$SCRIPTS_DIR/stop.sh" ;;
+    help|-h|--help|"")
+        usage
+        ;;
+    *)
+        echo "未知命令: $1" >&2
+        usage
+        exit 1
+        ;;
+esac
