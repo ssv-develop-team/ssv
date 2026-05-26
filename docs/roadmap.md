@@ -36,6 +36,7 @@ P0 是所有并行主线的共同起点，已经具备：
 - Python Agent 服务、配置加载、Redis Streams 消费基线。
 - Docker Redis 开发环境。
 - C++ 插件单元测试、Agent 单元测试和 CLI 脚本测试基线。
+- GitHub Actions CI 基线：PR 到 `main` 和 push 到 `main` 时运行 shell 语法检查与 `./ssv test`；CI 不依赖 RTSP、模型 smoke 或显示环境。
 
 P0 尚未完成但已识别的边界：
 
@@ -262,5 +263,7 @@ bash tests/ssv_cli_test.sh
 ./ssv test
 ./ssv run --display
 ```
+
+PR 合入 `main` 前至少要求 GitHub Actions CI 通过。当前 CI 覆盖 shell 语法、C++ 构建与 Meson 测试、CLI 脚本测试、Python Agent 测试；本地链路 smoke 和显示窗口验证仍保留为人工或集成节点验收项。
 
 每个主线 plan 必须说明本阶段需要运行哪些命令，以及哪些命令因本地环境缺失无法运行。
