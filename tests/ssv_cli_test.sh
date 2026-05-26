@@ -17,6 +17,7 @@ grep -q "run --display" <<<"$help_output" || fail "help does not list run --disp
 grep -q -- "--overlay" <<<"$help_output" || fail "help does not list --overlay"
 grep -q -- "--sink" <<<"$help_output" || fail "help does not list --sink"
 grep -q "  test" <<<"$help_output" || fail "help does not list test"
+grep -q "运行代码测试和链路冒烟测试后退出" <<<"$help_output" || fail "help does not describe test as exit-style"
 
 for legacy in "--m2" "--m2-mock" "--m3" "--m3-mock" "check" "all"; do
     if grep -q -- "$legacy" <<<"$help_output"; then
@@ -36,8 +37,11 @@ grep -q 'DISPLAY_OVERLAY' scripts/pipeline.sh || fail "display overlay is not co
 grep -q 'ssvoverlay' scripts/pipeline.sh || fail "display overlay mode does not enable detection overlay"
 grep -q 'video/x-raw,format=BGRx' scripts/pipeline.sh || fail "display overlay branch does not use display-friendly BGRx format"
 grep -q 'exec bash "$SCRIPTS_DIR/pipeline.sh" --run "$@"' ssv || fail "ssv does not pass run arguments through to pipeline script"
+grep -q 'exec bash "$SCRIPTS_DIR/test.sh"' ssv || fail "ssv does not dispatch test command to the test orchestrator"
 grep -q 'DISPLAY_SINK_OVERRIDE' scripts/pipeline.sh || fail "pipeline script does not use explicit display sink override"
 grep -q 'leaky=downstream' scripts/pipeline.sh || fail "display mode queues are not configured as leaky"
+grep -q -- '--smoke' scripts/pipeline.sh || fail "pipeline script does not accept smoke mode"
+grep -q -- '--skip-build' scripts/pipeline.sh || fail "pipeline script does not support skipping build for tests"
 grep -q '#include <thread>' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not use a worker thread"
 grep -q 'PROP_ASYNC_INFER' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not expose async inference"
 grep -q 'latest_frame' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not keep latest frame for async inference"

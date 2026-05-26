@@ -2,7 +2,7 @@
 
 安全帽佩戴视频监测分析系统。当前项目以 GStreamer C++ 插件承载实时视频分析链路，Redis Streams 作为实时链路和 Agent 复核链路之间的异步边界，Python 服务负责事件消费和后续智能复核编排。
 
-当前实现是开发期可运行基线：`./ssv` shell CLI 负责构建、运行、测试和本地依赖启动；实时链路由 `gst-launch-1.0` 拼接 C++ 插件运行。后续 roadmap 会新增 C++ pipeline runner，把长期运行时的 pipeline 构建、错误处理和状态观测迁入 C++。
+当前实现是开发期可运行基线：`./ssv` shell CLI 负责构建、测试、运行和本地依赖启动；实时链路由 `gst-launch-1.0` 拼接 C++ 插件运行。后续 roadmap 会新增 C++ pipeline runner，把长期运行时的 pipeline 构建、错误处理和状态观测迁入 C++。
 
 ## 架构概览
 
@@ -96,14 +96,14 @@ cp .env.example .env
 # 6. 启动本地 Redis
 ./ssv redis
 
-# 7. 运行无头短时链路检查
+# 7. 运行测试套件
 ./ssv test
 
 # 8. 打开显示窗口观察实时链路
 ./ssv run --display
 ```
 
-`./ssv test` 默认受 `SSV_CHECK_TIMEOUT` 控制，适合检查链路是否能启动并向 Redis 写入消息。`./ssv run` 是长期运行模式，按 `Ctrl+C` 退出；`./ssv run --display` 关闭视频窗口或中断进程后退出。
+`./ssv test` 先跑代码测试，再在 `SSV_RTSP_URL`、模型文件等条件满足时做一次有界链路冒烟测试，完成后退出。`SSV_CHECK_TIMEOUT` 只影响这一步 smoke。`./ssv run` 是长期运行模式，按 `Ctrl+C` 退出；`./ssv run --display` 关闭视频窗口或中断进程后退出。
 
 ## 命令
 
@@ -112,7 +112,7 @@ cp .env.example .env
 | `./ssv build` | 编译 C++ GStreamer 插件和测试 |
 | `./ssv clean` | 删除 Meson 构建目录 `build` |
 | `./ssv redis` | 启动 Docker Redis 开发环境 |
-| `./ssv test` | 运行无头短时 GStreamer 链路检查 |
+| `./ssv test` | 运行代码测试和链路冒烟测试后退出 |
 | `./ssv run` | 运行无头实时链路 |
 | `./ssv run --display` | 运行实时链路并打开视频窗口 |
 | `./ssv run --display --overlay` | 在显示窗口绘制检测框，当前用于调试 |
@@ -137,7 +137,7 @@ cp .env.example .env
 | `SSV_CONFIG_PATH` | YAML 配置文件路径 | `config/ssv.default.yaml` |
 | `SSV_RTSP_URL` | RTSP 视频源地址 | 无，必须设置 |
 | `SSV_MODEL_PATH` | YOLO ONNX 模型路径 | `models/yolov8n.onnx` |
-| `SSV_CHECK_TIMEOUT` | `./ssv test` 超时时间 | `30s` |
+| `SSV_CHECK_TIMEOUT` | `./ssv test` 中 smoke 阶段超时时间 | `30s` |
 | `GST_DEBUG` | GStreamer 调试级别 | `ssv*:4` |
 | `SSV_DISPLAY_SINK` | 显示 sink | 自动选择 |
 | `SSV_DISPLAY_OVERLAY` | 是否默认开启 overlay | `false` |
@@ -175,13 +175,13 @@ SSV_ONNXRUNTIME_ROOT=/path/to/onnxruntime ./ssv build
 
 如果插件没有被发现，先确认 `./ssv build` 成功。脚本会自动导出 `GST_PLUGIN_PATH` 和 `LD_LIBRARY_PATH`；手动运行 `gst-launch-1.0` 时需要自己设置这些路径，推荐优先通过 `./ssv run` 调试。
 
-### 无头链路检查
+### 测试套件
 
 ```bash
 SSV_CHECK_TIMEOUT=15s ./ssv test
 ```
 
-该命令会构建插件、检查模型、确保 Redis 运行，然后启动 RTSP 到分析分支的短时链路。退出码 `0` 表示链路按预期启动并在超时后结束。
+该命令会先跑构建、Meson 测试、CLI 测试和 Python Agent 测试；当 `SSV_RTSP_URL` 和模型文件都可用时，再跑一次短时链路冒烟测试。退出后返回统一结果码。
 
 ### 显示调试
 
@@ -219,7 +219,7 @@ GST_DEBUG="ssv*:5,*redis*:4" ./ssv test
 GST_DEBUG="ssvinfer:6,ssvtrack:5,ssvpub:5" ./ssv run
 ```
 
-常见排查顺序：先跑 `./ssv inspect` 确认插件注册，再跑 `./ssv test` 确认无头链路，再跑 `./ssv run --display` 排查显示分支。
+常见排查顺序：先跑 `./ssv inspect` 确认插件注册，再跑 `./ssv test` 确认代码测试和链路冒烟，再跑 `./ssv run --display` 排查显示分支。
 
 ## 测试
 

@@ -9,6 +9,10 @@ from ssv_agent.config import load_config
 
 def test_load_config_uses_yaml_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SSV_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("REDIS_HOST", raising=False)
+    monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.delenv("SSV_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SSV_DISPLAY_SINK", raising=False)
     path = tmp_path / "ssv.yaml"
     path.write_text(
         """

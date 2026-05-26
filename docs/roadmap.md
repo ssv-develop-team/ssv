@@ -2,7 +2,7 @@
 
 本路线图按团队并行协作重规划。当前仓库已经完成项目骨架和实时运行基线，后续不再按单人串行的 M2-M7 推进，而是拆成 4 条长期并行技术主线，加 1 条工程集成主线，并通过阶段性集成节点合流。
 
-当前实现形态：`./ssv` 和 `scripts/` 提供开发入口，`gst/` 中的 GStreamer C++ 插件承载实时视频分析节点，`Redis Streams` 是实时链路和 Agent 链路的异步边界，`agent/` 提供 Python Agent 服务基线。
+当前实现形态：`./ssv` 和 `scripts/` 提供开发入口，`gst/` 中的 GStreamer C++ 插件承载实时视频分析节点，`Redis Streams` 是实时链路和 Agent 链路的异步边界，`agent/` 提供 Python Agent 服务基线。`./ssv test` 作为测试编排入口，负责代码测试和链路冒烟验证，不承担常驻运行职责。
 
 ## 协作原则
 
@@ -10,7 +10,7 @@
 2. 主线之间通过配置、元数据、事件消息、证据路径和 Agent 输入输出解耦。
 3. 每条主线可以独立开分支、写 spec、写 plan、开发和测试。
 4. 涉及跨主线接口的改动必须先更新中文 spec，并在集成节点统一验收。
-5. 脚本继续承担构建、依赖检查、本地 Redis、调试入口等开发运维职责；长期运行时的 pipeline 构建、节点参数、错误处理和状态观测逐步迁入 C++ pipeline runner。
+5. 脚本继续承担构建、依赖检查、本地 Redis、调试入口和测试编排等开发运维职责；长期运行时的 pipeline 构建、节点参数、错误处理和状态观测逐步迁入 C++ pipeline runner。
 
 ## 文档约束
 
@@ -39,7 +39,7 @@ P0 是所有并行主线的共同起点，已经具备：
 
 P0 尚未完成但已识别的边界：
 
-- `scripts/pipeline.sh` 仍使用 `gst-launch-1.0` 拼接运行链路。
+- `scripts/pipeline.sh` 仍使用 `gst-launch-1.0` 拼接运行链路，`scripts/test.sh` 负责测试编排。
 - YAML 配置已存在，但部分运行参数仍由 `.env` 和脚本环境变量覆盖。
 - 事件判定、证据输出、完整 Agent 状态机尚未完成。
 
@@ -258,7 +258,7 @@ cd agent && uv run --extra dev pytest
 # CLI 脚本
 bash tests/ssv_cli_test.sh
 
-# 本地链路，依赖 RTSP、模型和 Redis
+# 测试套件；链路冒烟依赖 RTSP、模型和 Redis
 ./ssv test
 ./ssv run --display
 ```

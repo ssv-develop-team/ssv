@@ -1,22 +1,31 @@
 #!/bin/bash
-# scripts/pipeline.sh — 测试 / 运行整套 GStreamer 链路
+# scripts/pipeline.sh — 运行整套 GStreamer 链路 / 有界 smoke
 #   用法:
-#     ./ssv test            RTSP → 推理 → 跟踪 → Redis → fakesink
 #     ./ssv run             RTSP → 推理 → 跟踪 → Redis
 #     ./ssv run --display   同一链路额外打开视频观察窗口
+#     ./ssv test            由 scripts/test.sh 调用的有界 smoke 路径
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 cd "$SSV_ROOT"
 
-MODE="test"
+MODE="run"
 DISPLAY=false
 DISPLAY_OVERLAY="${SSV_DISPLAY_OVERLAY:-false}"
 DISPLAY_SINK_OVERRIDE=""
+SKIP_BUILD=false
 
 case "${1:-}" in
     "") ;;
     --run)
         MODE="run"
+        shift
+        ;;
+    --smoke|--test)
+        MODE="smoke"
+        shift
+        ;;
+    --skip-build)
+        SKIP_BUILD=true
         shift
         ;;
     *)
@@ -45,6 +54,10 @@ while [ "$#" -gt 0 ]; do
             DISPLAY_SINK_OVERRIDE="$2"
             shift 2
             ;;
+        --skip-build)
+            SKIP_BUILD=true
+            shift
+            ;;
         *)
             ssv_error "未知 test/run 参数: $1"
             exit 1
@@ -58,13 +71,16 @@ ssv_require_command "gst-launch-1.0" \
     "sudo apt-get install gstreamer1.0-tools" \
     "Debian/Ubuntu"
 
-if [ "$MODE" = "test" ]; then
+if [ "$MODE" = "smoke" ]; then
     ssv_require_command "timeout" \
         "sudo apt-get install coreutils" \
         "Debian/Ubuntu"
 fi
 
-bash "$SSV_ROOT/scripts/build.sh"
+if [ "$SKIP_BUILD" = false ]; then
+    bash "$SSV_ROOT/scripts/build.sh"
+fi
+
 export_ssv_plugin_path
 
 RTSP_URL="${SSV_RTSP_URL:-}"
@@ -189,12 +205,12 @@ if [ "$DISPLAY" = true ]; then
                  ! fakesink sync=false
     fi
 else
-    if [ "$MODE" = "test" ]; then
-        ssv_info "模式: 测试用例 (timeout: $CHECK_TIMEOUT)"
+    if [ "$MODE" = "smoke" ]; then
+        ssv_info "模式: 链路冒烟测试 (timeout: $CHECK_TIMEOUT)"
     else
         ssv_info "模式: 实时链路无头运行"
     fi
-    if [ "$MODE" = "test" ]; then
+    if [ "$MODE" = "smoke" ]; then
         set +e
         GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
         timeout --foreground "$CHECK_TIMEOUT" \
@@ -207,7 +223,7 @@ else
         if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
             exit "$status"
         fi
-        ssv_info "测试用例完成"
+        ssv_info "链路冒烟测试完成"
     else
         GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
         gst-launch-1.0 \

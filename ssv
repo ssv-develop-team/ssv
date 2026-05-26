@@ -8,7 +8,7 @@
 #   build                    编译 C++ GStreamer 插件
 #   clean                    删除 Meson 构建目录
 #   redis                    启动 Docker Redis (后台)
-#   test                     运行整套 GStreamer 测试用例 (无头)
+#   test                     运行代码测试和链路冒烟测试后退出
 #   run                      运行整套 GStreamer 实时链路
 #   run --display            实时链路 + 视频观察窗口
 #   run --display --overlay  实时链路 + 视频观察窗口 + 检测框
@@ -32,7 +32,7 @@ usage() {
     echo "  build                    编译 C++ GStreamer 插件"
     echo "  clean                    删除 Meson 构建目录"
     echo "  redis                    启动 Docker Redis (后台)"
-    echo "  test                     运行整套 GStreamer 测试用例 (无头)"
+    echo "  test                     运行代码测试和链路冒烟测试后退出"
     echo "  run                      运行整套 GStreamer 实时链路"
     echo "  run --display            实时链路 + 视频观察窗口"
     echo "  run --display --overlay  实时链路 + 视频观察窗口 + 检测框"
@@ -54,7 +54,7 @@ case "${1:-}" in
     build)    exec bash "$SCRIPTS_DIR/build.sh" ;;
     clean)    exec bash "$SCRIPTS_DIR/clean.sh" ;;
     redis)    exec bash "$SCRIPTS_DIR/redis.sh" ;;
-    test)     exec bash "$SCRIPTS_DIR/pipeline.sh" ;;
+    test)     exec bash "$SCRIPTS_DIR/test.sh" ;;
     run)
         shift
         exec bash "$SCRIPTS_DIR/pipeline.sh" --run "$@"
