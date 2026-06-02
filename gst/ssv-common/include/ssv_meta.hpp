@@ -6,12 +6,12 @@
 #include <string>
 #include <vector>
 
-/// Single detection result from inference.
+/// Single detection result in original-frame normalized coordinates.
 struct SsvDetection {
-    char class_name[32];   ///< e.g. "person"
-    float confidence;      ///< [0, 1]
-    float x1, y1, x2, y2; ///< bounding box in normalized [0, 1] coordinates
-    int class_id = -1;     ///< YOLO class index (0=person, etc.), -1 = unset
+    char class_name[32];   ///< Short label name, e.g. "person"
+    float confidence;      ///< finite [0, 1]
+    float x1, y1, x2, y2; ///< original-frame normalized bbox, [0, 1], left-top/right-bottom
+    int class_id = -1;     ///< model class index, -1 = unset
     int track_id = -1;     ///< assigned by ssvtrack, -1 = not tracked
 };
 
@@ -21,6 +21,12 @@ struct SsvFrameDetections {
     char source_id[64] = {};
     std::vector<SsvDetection> detections;
 };
+
+/// Normalizes one detection in-place.
+///
+/// Returns false when the detection violates the public metadata contract and
+/// must be dropped before reaching tracking, overlay, or publishing.
+bool ssv_normalize_detection(SsvDetection &det);
 
 struct SsvOverlayFrame {
     guint64 frame_id = 0;
