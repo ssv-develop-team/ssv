@@ -75,8 +75,7 @@ void SsvDetectionStore::set_tracked(SsvFrameDetections det) {
 
 SsvFrameDetections SsvDetectionStore::take() {
     std::lock_guard<std::mutex> lock(mtx_);
-    // Accept both HAS_TRACKS (M3 pipeline with ssvtrack) and
-    // HAS_DETECTIONS (M2 pipeline without ssvtrack, backward compat).
+    // Accept both tracked pipeline output and direct detection output for backward compat.
     if (state_ != State::HAS_TRACKS && state_ != State::HAS_DETECTIONS)
         return {};
     state_ = State::EMPTY;

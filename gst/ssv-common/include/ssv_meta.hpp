@@ -36,7 +36,7 @@ struct SsvOverlayFrame {
 
 /// Thread-safe singleton for passing detections between plugins.
 ///
-/// Three-state model (M3):
+/// Three-state model for inference, tracking, publishing, and overlay:
 ///   EMPTY ──set()──→ HAS_DETECTIONS ──take_for_tracking()──→ EMPTY
 ///     ↑                                        │
 ///     │                           set_tracked()│
