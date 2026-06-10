@@ -1,3 +1,5 @@
+"""Agent CLI 入口 —— 加载配置并启动服务。"""
+
 from __future__ import annotations
 
 import argparse
@@ -27,12 +29,26 @@ def main() -> None:
         default=None,
         help="Override log level (DEBUG, INFO, WARNING, ERROR)",
     )
+    parser.add_argument(
+        "--mock-provider",
+        action="store_true",
+        default=True,
+        help="Use mock provider for review (default: True, for development)",
+    )
+    parser.add_argument(
+        "--no-mock",
+        action="store_true",
+        default=False,
+        help="Disable mock provider (use real model API)",
+    )
     args = parser.parse_args()
 
     config_path = args.config or os.environ.get("SSV_CONFIG_PATH")
     if config_path is None:
-        # Default: look relative to agent package
-        candidate = Path(__file__).resolve().parent.parent.parent.parent / "config" / "ssv.default.yaml"
+        candidate = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "config" / "ssv.default.yaml"
+        )
         if candidate.exists():
             config_path = str(candidate)
 
@@ -41,4 +57,5 @@ def main() -> None:
     log_level = args.log_level or cfg.logging.python_log_level
     setup_logging(log_level)
 
-    run(cfg)
+    mock = not args.no_mock
+    run(cfg, mock_provider=mock)

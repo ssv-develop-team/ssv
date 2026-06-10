@@ -1,10 +1,19 @@
+"""Redis Streams 事件消费者 —— 纯 I/O 层，不包含业务逻辑。
+
+职责:
+  - 创建/确认 consumer group
+  - 从 Redis Streams 拉取事件
+  - ACK 已处理事件
+  - 发布复核结果到独立 Stream
+
+业务逻辑（解析、状态机、回写）由 service.py 负责。
+"""
+
 from __future__ import annotations
 
-import json
-import signal
-import time
-
 import structlog
+from typing import Callable
+
 from redis import Redis
 
 from ssv_agent.config import SsvConfig
@@ -13,9 +22,11 @@ logger = structlog.get_logger()
 
 
 class EventConsumer:
-    """Minimal Redis Streams consumer that reads detection events and logs them.
+    """Redis Streams 消费者（纯 I/O）。
 
-    M2 scope: consume and print.  Full state-machine orchestration arrives in M6.
+    用法:
+        consumer = EventConsumer(config)
+        consumer.start(handler_callback)
     """
 
     def __init__(self, config: SsvConfig) -> None:
@@ -29,20 +40,31 @@ class EventConsumer:
             decode_responses=True,
         )
 
+    @property
+    def redis_client(self) -> Redis:
+        """获取底层 Redis 客户端（供 ResultWriter 复用）。"""
+        return self._redis
+
     def _ensure_group(self) -> None:
-        """Create the consumer group if it does not exist."""
+        """创建 consumer group（如果不存在）。"""
         try:
-            self._redis.xgroup_create(self._stream, self._group, id="0", mkstream=True)
+            self._redis.xgroup_create(
+                self._stream, self._group, id="0", mkstream=True
+            )
             logger.info("created consumer group", group=self._group, stream=self._stream)
         except Exception:
-            # Group already exists — that's fine.
-            pass
+            pass  # 已存在
 
-    def start(self) -> None:
-        """Blocking consumer loop.  Returns on SIGINT/SIGTERM."""
+    def start(self, handler: Callable[[str, dict[str, str]], None]) -> None:
+        """启动阻塞式消费循环。
+
+        Args:
+            handler: 事件处理回调，签名为 (msg_id, fields) -> None。
+                     业务逻辑由回调负责，consumer 只负责拉取和 ACK。
+        """
         self._running = True
         self._ensure_group()
-        consumer_name = "ssv-agent-0"
+        consumer_name = "ssv-agent-1"
 
         logger.info(
             "event consumer started",
@@ -58,58 +80,25 @@ class EventConsumer:
                     consumer_name,
                     {self._stream: ">"},
                     count=10,
-                    block=1000,  # 1 s
+                    block=1000,
                 )
             except Exception as exc:
                 logger.warning("redis read error", error=str(exc))
-                time.sleep(2)
                 continue
 
             for _stream_name, messages in entries:
                 for msg_id, fields in messages:
-                    self._handle_event(msg_id, fields)
+                    try:
+                        handler(msg_id, fields)
+                    except Exception as exc:
+                        logger.error(
+                            "event handler error", msg_id=msg_id, error=str(exc)
+                        )
 
     def stop(self) -> None:
+        """停止消费循环。"""
         self._running = False
 
-    def _handle_event(self, msg_id: str, fields: dict[str, str]) -> None:
-        raw = fields.get("event", "{}")
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("malformed event", msg_id=msg_id, raw=raw)
-            return
-
-        detections = event.get("detections", [])
-        det_summary = ", ".join(
-            f"{d['class']}({d['confidence']:.2f}"
-            + (f", track={d['track_id']}" if d.get("track_id", -1) >= 0 else "")
-            + ")"
-            for d in detections
-        )
-
-        logger.info(
-            "detection event",
-            msg_id=msg_id,
-            source=event.get("source", "?"),
-            frame_id=event.get("frame_id"),
-            detections=det_summary,
-            count=len(detections),
-        )
-
-        # ACK after processing
+    def ack(self, msg_id: str) -> None:
+        """确认已处理事件。"""
         self._redis.xack(self._stream, self._group, msg_id)
-
-
-def run_consumer(config: SsvConfig) -> None:
-    """Run the event consumer with graceful shutdown."""
-    consumer = EventConsumer(config)
-
-    def _shutdown(sig: int, _frame: object) -> None:
-        logger.info("received signal, stopping consumer", signal=sig)
-        consumer.stop()
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    consumer.start()

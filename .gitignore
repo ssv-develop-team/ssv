@@ -38,3 +38,4 @@ runs/
 
 # Models (too large for git)
 models/
+!agent/src/ssv_agent/models/

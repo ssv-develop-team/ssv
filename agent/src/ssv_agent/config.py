@@ -48,8 +48,17 @@ class TrackingConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    state_machine_timeout: int = 300
-    max_retries: int = 3
+    state_machine_timeout: int = 300   # 状态机单次复核超时（秒）
+    max_retries: int = 3              # 失败重试次数
+    mock_provider: bool = True        # 使用 mock provider（默认开启，后续接入真实模型时关闭）
+    review_result_stream: str = "ssv:review-results"  # 复核结果 Redis Stream key
+    prompt_max_tokens: int = 4096     # 提示词 token 预算上限（字符数/2 估算）
+    prompt_log_enabled: bool = False  # 提示词调试日志开关（mock 模式下默认关闭）
+
+    # ── M4 上下文工程新增 ───────────────────────────────────────────────
+    context_history_max_window: int = 50       # 历史记录最大窗口大小
+    context_engine_debug: bool = False         # 上下文引擎 debug 模式（硬约束超限 raise）
+    rules_yaml_path: str = "config/rules.yaml" # 安全规则 YAML 文件路径
 
 
 class SsvConfig(BaseModel):
