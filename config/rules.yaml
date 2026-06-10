@@ -1,0 +1,34 @@
+# config/rules.yaml — 安全规则知识库
+# RetrievalManager 查找顺序: 本文件 → $SSV_RULES_PATH → 硬编码默认规则
+
+rules:
+  - id: "safety-helmet-mandatory"
+    trigger: ["no_helmet", "low_confidence"]
+    content: >
+      安全帽佩戴规范: 进入电气作业区域（变电站、配电室、电缆沟道、架空线路下方）
+      必须正确佩戴安全帽。任何人不得在未佩戴安全帽的情况下进入带电间隔或作业警戒区。
+    source: "《电力安全工作规程 电力线路部分》GB 26859-2011 第4.2条"
+    source_type: "regulation"
+    priority: 1
+
+  - id: "consecutive-violation"
+    trigger: ["consecutive_hits"]
+    content: >
+      连续违规判定: 同一目标在电气作业区域内连续3帧以上检测为未佩戴安全帽，
+      触发告警并通知现场工作负责人。对于变电站高压区、近电作业等高风险场景，
+      连续2帧即可触发。
+    source: "《电力安全工作规程 发电厂和变电站电气部分》GB 26860-2011 第5.4条"
+    source_type: "regulation"
+    priority: 2
+
+  - id: "conflict-resolution"
+    trigger: ["rule_conflict"]
+    content: >
+      冲突判定规则: 当同一目标同时存在 head 和 helmet 检测时:
+      (1) 若 bbox 高度重叠(IoU>0.5)且属于同一 track_id，
+          倾向于判定为已佩戴安全帽(可能因安全帽颜色/材质与背景融合导致模型漏检);
+      (2) 若 bbox 无明显重叠或分属不同 track_id，需人工复核，
+          特别注意电气作业场景中可能出现的"手持安全帽而未佩戴"的情况。
+    source: "电气作业安全帽检测误判分析报告 v1.0"
+    source_type: "expert"
+    priority: 2
