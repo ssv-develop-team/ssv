@@ -2,6 +2,7 @@ gst_unit_tests = executable('gst-unit-tests',
   'test_ssv_meta.cpp',
   'test_gst_plugins.cpp',
   dependencies : [gst_deps, gst_base_dep, gst_app_dep, gst_video_dep, gst_check_dep, ssv_common_dep],
+  link_with : [ssv_pub_lib, ssv_overlay_lib],
 )
 
 test('gst-unit-tests', gst_unit_tests,

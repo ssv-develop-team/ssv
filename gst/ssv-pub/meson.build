@@ -1,4 +1,4 @@
-shared_library('gstssvpub',
+ssv_pub_lib = shared_library('gstssvpub',
   'gstssvpub.cpp',
   dependencies : [gst_deps, gst_base_dep, gst_video_dep, ssv_common_dep,
                   hiredis_dep, json_dep],

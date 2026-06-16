@@ -6,6 +6,21 @@
 #include <string>
 #include <vector>
 
+/// Track state enum — 2-bit, embedded in SsvDetection::track_state.
+///
+///  - NEW (0):   Track just created in this frame (first appearance).
+///  - MATCHED (1): Track successfully matched to an existing trajectory.
+///  - LOST (2):   Track alive but unmatched this frame (time_since_seen > 0).
+///                No corresponding detection exists in current frame output.
+///  - DEAD (3):   Track exceeded track-buffer and was removed.
+///                No corresponding detection exists.
+enum SsvTrackState : int {
+    SSV_TRACK_NEW = 0,
+    SSV_TRACK_MATCHED = 1,
+    SSV_TRACK_LOST = 2,
+    SSV_TRACK_DEAD = 3,
+};
+
 /// Single detection result in original-frame normalized coordinates.
 struct SsvDetection {
     char class_name[32];   ///< Short label name, e.g. "person"
@@ -13,6 +28,8 @@ struct SsvDetection {
     float x1, y1, x2, y2; ///< original-frame normalized bbox, [0, 1], left-top/right-bottom
     int class_id = -1;     ///< model class index, -1 = unset
     int track_id = -1;     ///< assigned by ssvtrack, -1 = not tracked
+    int track_state = SSV_TRACK_NEW;  ///< SsvTrackState for this detection's track
+    bool occluded = false; ///< true when confidence < track-thresh on a matched track
 };
 
 /// Per-frame detection result.

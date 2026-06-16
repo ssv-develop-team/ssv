@@ -51,8 +51,8 @@ centroid(float x1, float y1, float x2, float y2, float &cx, float &cy) {
 
 class IoUTracker {
 public:
-    IoUTracker(int max_age, float iou_thresh)
-        : max_age_(max_age), iou_thresh_(iou_thresh) {}
+    IoUTracker(int max_age, float iou_thresh, float conf_thresh)
+        : max_age_(max_age), iou_thresh_(iou_thresh), conf_thresh_(conf_thresh) {}
 
     void update(std::vector<SsvDetection> &dets) {
         // Predict positions using velocity
@@ -113,6 +113,9 @@ public:
                 t.age++;
                 t.time_since_seen = 0;
                 dets[di].track_id = t.id;
+                dets[di].track_state = (t.age == 1)
+                    ? SSV_TRACK_NEW : SSV_TRACK_MATCHED;
+                dets[di].occluded = (dets[di].confidence < conf_thresh_);
                 track_matched[best_ti] = true;
                 det_matched[di] = true;
             }
@@ -142,6 +145,8 @@ public:
                 t.time_since_seen = 0;
                 t.alive = true;
                 dets[di].track_id = t.id;
+                dets[di].track_state = SSV_TRACK_NEW;
+                dets[di].occluded = false;
                 tracks_.push_back(t);
             }
         }
@@ -157,6 +162,7 @@ private:
     int next_id_ = 1;
     int max_age_;
     float iou_thresh_;
+    float conf_thresh_;
     std::vector<IoUTrack> tracks_;
 };
 
@@ -209,9 +215,9 @@ ssv_track_start(GstBaseTransform *trans) {
         self->mock_next_id = 1;
         GST_INFO_OBJECT(self, "mock-track enabled (sequential IDs)");
     } else {
-        self->tracker = new IoUTracker(self->track_buffer, self->match_thresh);
-        GST_INFO_OBJECT(self, "IoU tracker started (buffer=%d, match_thresh=%.2f)",
-            self->track_buffer, self->match_thresh);
+        self->tracker = new IoUTracker(self->track_buffer, self->match_thresh, self->track_thresh);
+        GST_INFO_OBJECT(self, "IoU tracker started (buffer=%d, match_thresh=%.2f, track_thresh=%.2f)",
+            self->track_buffer, self->match_thresh, self->track_thresh);
     }
     return TRUE;
 }
@@ -236,9 +242,11 @@ ssv_track_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
     }
 
     if (self->mock_track) {
-        // Mock mode: assign sequential IDs (one per detection per frame)
+        // Mock mode: assign sequential IDs, all marked as NEW
         for (auto &d : det.detections) {
             d.track_id = self->mock_next_id++;
+            d.track_state = SSV_TRACK_NEW;
+            d.occluded = false;
         }
     } else if (self->tracker) {
         self->tracker->update(det.detections);

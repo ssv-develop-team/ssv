@@ -30,6 +30,8 @@ bool ssv_normalize_detection(SsvDetection &det) {
         det.class_id = -1;
     if (det.track_id < -1)
         det.track_id = -1;
+    if (det.track_state < 0 || det.track_state > 3)
+        det.track_state = 0;
 
     return true;
 }

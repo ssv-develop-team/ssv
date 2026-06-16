@@ -1,6 +1,13 @@
 #pragma once
 
+#include "ssv_meta.hpp"
+
 #include <gst/base/gstbasetransform.h>
+
+#include <cstdint>
+#include <string>
+
+std::string ssv_pub_build_event_payload(const SsvFrameDetections &det, std::int64_t timestamp_ms);
 
 G_BEGIN_DECLS
 

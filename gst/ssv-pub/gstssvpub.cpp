@@ -6,6 +6,7 @@
 #include <hiredis/hiredis.h>
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 
@@ -46,6 +47,35 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
 
 // ── Redis helpers ──────────────────────────────────────────────────────
 
+std::string
+ssv_pub_build_event_payload(const SsvFrameDetections &det, std::int64_t timestamp_ms) {
+    using json = nlohmann::json;
+
+    json detections_arr = json::array();
+    for (const auto &d : det.detections) {
+        json det_obj = {
+            {"class", d.class_name},
+            {"class_id", d.class_id},
+            {"confidence", d.confidence},
+            {"bbox", {d.x1, d.y1, d.x2, d.y2}},
+            {"track_id", d.track_id},
+            {"track_state", d.track_state},
+            {"occluded", d.occluded}
+        };
+        detections_arr.push_back(det_obj);
+    }
+
+    json msg = {
+        {"type", "detection"},
+        {"source", det.source_id},
+        {"timestamp_ms", timestamp_ms},
+        {"frame_id", det.frame_id},
+        {"detections", detections_arr}
+    };
+
+    return msg.dump();
+}
+
 static gboolean
 ssv_pub_redis_connect(SsvPub *self) {
     if (self->redis_ctx) {
@@ -76,29 +106,7 @@ ssv_pub_redis_publish(SsvPub *self, const SsvFrameDetections &det) {
     if (!self->redis_ctx)
         return;
 
-    using json = nlohmann::json;
-
-    json detections_arr = json::array();
-    for (const auto &d : det.detections) {
-        json det_obj = {
-            {"class", d.class_name},
-            {"class_id", d.class_id},
-            {"confidence", d.confidence},
-            {"bbox", {d.x1, d.y1, d.x2, d.y2}},
-            {"track_id", d.track_id}
-        };
-        detections_arr.push_back(det_obj);
-    }
-
-    json msg = {
-        {"type", "detection"},
-        {"source", det.source_id},
-        {"timestamp_ms", std::time(nullptr) * 1000LL},
-        {"frame_id", det.frame_id},
-        {"detections", detections_arr}
-    };
-
-    std::string payload = msg.dump();
+    std::string payload = ssv_pub_build_event_payload(det, std::time(nullptr) * 1000LL);
 
     auto *reply = (redisReply *)redisCommand(self->redis_ctx,
         "XADD %s * event %s",

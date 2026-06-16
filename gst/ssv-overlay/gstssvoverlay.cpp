@@ -138,21 +138,47 @@ static constexpr uint8_t FONT_5X7[][7] = {
     {0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11}, // x
     {0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E}, // y
     {0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F}, // z
+    {0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A}, // #
+    {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E}, // [
+    {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E}, // ]
 };
+
+static int glyph_index_for(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c == 'C') return 10;
+    if (c == 'P') return 11;
+    if (c == 'F') return 12;
+    if (c == 'S') return 13;
+    if (c == ':') return 14;
+    if (c == '.') return 15;
+    if (c == '-') return 16;
+    if (c == ' ') return 17;
+    if (c >= 'a' && c <= 'z') return 18 + (c - 'a');
+    if (c >= 'A' && c <= 'Z') return glyph_index_for((char)(c - 'A' + 'a'));
+    if (c == '#') return 44;
+    if (c == '[') return 45;
+    if (c == ']') return 46;
+    return -1;
+}
+
+bool ssv_overlay_glyph_is_supported(char c)
+{
+    int index = glyph_index_for(c);
+    if (index < 0)
+        return false;
+    for (int row = 0; row < 7; ++row) {
+        if (FONT_5X7[index][row] != 0)
+            return true;
+    }
+    return c == ' ';
+}
 
 static const uint8_t *glyph_for(char c)
 {
-    if (c >= '0' && c <= '9') return FONT_5X7[c - '0'];
-    if (c == 'C') return FONT_5X7[10];
-    if (c == 'P') return FONT_5X7[11];
-    if (c == 'F') return FONT_5X7[12];
-    if (c == 'S') return FONT_5X7[13];
-    if (c == ':') return FONT_5X7[14];
-    if (c == '.') return FONT_5X7[15];
-    if (c == '-') return FONT_5X7[16];
-    if (c == ' ') return FONT_5X7[17];
-    if (c >= 'a' && c <= 'z') return FONT_5X7[18 + (c - 'a')];
-    if (c >= 'A' && c <= 'Z') return glyph_for((char)(c - 'A' + 'a'));
+    int index = glyph_index_for(c);
+    if (index >= 0)
+        return FONT_5X7[index];
     return FONT_5X7[17];
 }
 
@@ -272,7 +298,20 @@ ssv_overlay_transform_ip(GstBaseTransform *trans, GstBuffer *buf)
                    pixel_stride, red_index, green_index, blue_index);
 
         char label[80];
-        std::snprintf(label, sizeof(label), "%s %.2f", det.class_name, det.confidence);
+        if (det.track_id >= 0) {
+            const char *flag = "";
+            if (det.track_state == SSV_TRACK_NEW && !det.occluded)
+                flag = "[N]";
+            else if (det.track_state == SSV_TRACK_NEW && det.occluded)
+                flag = "[No]";
+            else if (det.track_state == SSV_TRACK_MATCHED && det.occluded)
+                flag = "[O]";
+            std::snprintf(label, sizeof(label), "%s #%d%s %.2f",
+                          det.class_name, det.track_id, flag, det.confidence);
+        } else {
+            std::snprintf(label, sizeof(label), "%s %.2f",
+                          det.class_name, det.confidence);
+        }
         paint_text(data, stride, width, height, x1, std::max(0, y1 - 9), label,
                    pixel_stride, red_index, green_index, blue_index,
                    255, 255, 255);
