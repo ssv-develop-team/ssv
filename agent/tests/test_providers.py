@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 from ssv_agent.models.event import (
     Detection,
     DetectionEvent,
     ReviewContext,
     ReviewStrategy,
 )
-from ssv_agent.providers.base import BaseProvider, ReviewConclusion
+from ssv_agent.providers.base import ReviewConclusion
+from ssv_agent.providers.local_yolo import LocalYoloProvider
 from ssv_agent.providers.mock import MockProvider, MockVLMProvider
+from ssv_agent.providers.openai_compatible import OpenAICompatibleProvider
 
 
 class TestMockProvider:
@@ -101,6 +106,128 @@ class TestMockVLMProvider:
         p = MockVLMProvider()
         result = p.review_keyframe("/tmp/frame_42.jpg", {})
         assert len(result.key_observations) == 2
+
+
+class TestLocalYoloProvider:
+    def test_provider_name(self) -> None:
+        p = LocalYoloProvider(model_path="/tmp/model.pt")
+        assert p.provider_name == "local-yolo-provider"
+
+    def test_missing_dependency_reports_clear_error(self, tmp_path, monkeypatch) -> None:
+        model_path = tmp_path / "model.pt"
+        image_path = tmp_path / "frame.jpg"
+        model_path.write_bytes(b"fake")
+        image_path.write_bytes(b"fake")
+        monkeypatch.setitem(sys.modules, "ultralytics", None)
+
+        p = LocalYoloProvider(model_path=str(model_path))
+        try:
+            p.review_keyframe(str(image_path), {})
+        except RuntimeError as exc:
+            assert "ultralytics is required" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_analyze_with_fake_ultralytics(self, tmp_path, monkeypatch) -> None:
+        model_path = tmp_path / "model.pt"
+        image_path = tmp_path / "frame.jpg"
+        model_path.write_bytes(b"fake")
+        image_path.write_bytes(b"fake")
+
+        class FakeBox:
+            cls = 0
+            conf = 0.91
+
+        class FakeResult:
+            names = {0: "helmet"}
+            boxes = [FakeBox()]
+
+        class FakeYOLO:
+            def __init__(self, path):
+                self.path = path
+
+            def __call__(self, *args, **kwargs):
+                return [FakeResult()]
+
+        fake_module = types.SimpleNamespace(YOLO=FakeYOLO)
+        monkeypatch.setitem(sys.modules, "ultralytics", fake_module)
+
+        p = LocalYoloProvider(model_path=str(model_path))
+        ctx = make_context(ReviewStrategy.VISUAL_REVIEW)
+        ctx.event.evidence_paths = [str(image_path)]
+
+        result = p.analyze(ctx)
+        assert "已佩戴安全帽" in result
+        assert "helmet conf=0.91" in result
+
+
+class TestOpenAICompatibleProvider:
+    def test_provider_name(self) -> None:
+        p = OpenAICompatibleProvider(
+            base_url="https://example.test/compatible-mode/v1",
+            text_model="qwen3.7-plus",
+        )
+        assert p.provider_name == "openai-compatible-provider"
+
+    def test_missing_api_key_reports_clear_error(self, monkeypatch) -> None:
+        monkeypatch.delenv("SSV_AGENT_API_KEY", raising=False)
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        p = OpenAICompatibleProvider(
+            base_url="https://example.test/compatible-mode/v1",
+            text_model="qwen3.7-plus",
+        )
+
+        try:
+            p.analyze(make_context(ReviewStrategy.RULE_EXPLAIN))
+        except RuntimeError as exc:
+            assert "SSV_AGENT_API_KEY" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_analyze_posts_chat_completion(self, monkeypatch) -> None:
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return (
+                    '{"choices":[{"message":{"content":"AI 复核结论"}}]}'
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["timeout"] = timeout
+            captured["body"] = request.data
+            return FakeResponse()
+
+        monkeypatch.setenv("SSV_AGENT_API_KEY", "test-key")
+        monkeypatch.setattr("ssv_agent.providers.openai_compatible.urlopen", fake_urlopen)
+
+        p = OpenAICompatibleProvider(
+            base_url="https://example.test/compatible-mode/v1/",
+            text_model="qwen3.7-plus",
+            timeout_seconds=12,
+            temperature=0.1,
+            max_tokens=512,
+        )
+        result = p.analyze(make_context(ReviewStrategy.RULE_EXPLAIN))
+
+        assert "AI 复核结论" in result
+        assert captured["url"] == "https://example.test/compatible-mode/v1/chat/completions"
+        assert captured["timeout"] == 12
+        assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+        body = captured["body"].decode("utf-8")
+        assert '"model": "qwen3.7-plus"' in body
+        assert '"temperature": 0.1' in body
+        assert '"max_tokens": 512' in body
+        assert "检测目标数" in body
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

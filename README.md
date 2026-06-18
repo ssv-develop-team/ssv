@@ -31,12 +31,12 @@ GStreamer C++ 插件链
 - C++ GStreamer 插件：`ssvtemplate`、`ssvinfer`、`ssvtrack`、`ssvpub`、`ssvoverlay`。
 - 共享 C++ 模块：配置加载、日志、检测元数据。
 - YOLO ONNX Runtime 推理插件，支持 mock 检测和异步推理开关。
-- Redis Streams 发布插件和 Python Agent 消费基线。
+- Redis Streams 发布插件和 Python Agent 复核编排基线。
 - Docker Redis 开发环境。
 - `./ssv` 统一入口脚本。
 - C++ 插件测试、Agent 单元测试、CLI 脚本测试。
 
-尚未完成：生产级 C++ pipeline runner、完整事件判定、证据输出、真实安全帽专用模型、完整 Agent 状态机、工具调用、模型 provider、知识库和端到端报告闭环。
+尚未完成：生产级 C++ pipeline runner、完整事件判定、证据输出、实时链路安全帽 ONNX 模型接入、外部通知/工单系统、生产级 LLM/VLM 稳定性治理和端到端报告闭环。Agent 侧状态机、工具路由、结果回写、规则检索、可选本地 YOLO 复核 provider 和 OpenAI-compatible provider 已具备基线能力。
 
 ## 依赖
 
@@ -118,6 +118,9 @@ cp .env.example .env
 | `./ssv run --display --overlay` | 在显示窗口绘制检测框，当前用于调试 |
 | `./ssv run --display --sink waylandsink` | 指定显示 sink |
 | `./ssv agent` | 启动 Python Agent 服务 |
+| `./ssv t4-demo` | 运行 T4 Agent Redis 闭环演示 |
+| `./ssv t4-video-demo --video demo.mp4 --model model.pt` | 从视频/流生成事件并演示 T4 复核闭环 |
+| `./ssv t4-full-demo` | 一键运行 T4 内部、视频、本地/外部 AI 演示 |
 | `./ssv inspect` | 查看插件注册和属性信息 |
 | `./ssv stop` | 停止后台服务 |
 | `./ssv download-model` | 下载默认 YOLOv8n ONNX 模型 |
@@ -148,6 +151,9 @@ cp .env.example .env
 | `REDIS_HOST` | Redis 地址 | `localhost` |
 | `REDIS_PORT` | Redis 端口 | `6379` |
 | `SSV_REDIS_STREAM_KEY` | Redis Stream key | `ssv:events` |
+| `SSV_AGENT_MOCK_PROVIDER` | Agent 是否使用 mock provider | `true` |
+| `SSV_AGENT_PROVIDER` | 非 mock provider 类型 | `local_yolo` |
+| `SSV_AGENT_MODEL_PATH` | Agent 本地 YOLO 复核模型路径 | `/home/lzy/work-code/comp-2-freeze10.pt` |
 
 ONNX Runtime 下载和路径覆盖：
 
@@ -202,6 +208,13 @@ docker exec ssv-redis redis-cli XLEN ssv:events
 docker exec ssv-redis redis-cli XRANGE ssv:events - + COUNT 5
 ```
 
+如果本机没有 Docker，`./ssv redis` 会尝试把 Redis 下载到 `.deps/redis` 并用用户权限启动。对应调试命令：
+
+```bash
+LD_LIBRARY_PATH=$PWD/.deps/redis/usr/lib/x86_64-linux-gnu \
+  .deps/redis/usr/bin/redis-cli -h 127.0.0.1 -p ${REDIS_PORT:-6379} ping
+```
+
 如果 `.env` 修改了 `SSV_REDIS_STREAM_KEY`，把命令中的 `ssv:events` 换成对应 key。
 
 ### Agent 调试
@@ -210,7 +223,68 @@ docker exec ssv-redis redis-cli XRANGE ssv:events - + COUNT 5
 ./ssv agent
 ```
 
-Agent 当前用于消费 Redis Streams 并验证事件消费基线。完整上下文构造、状态机、工具路由和模型 provider 在后续 roadmap 阶段实现。
+Agent 当前用于消费 Redis Streams，并在异步边界后完成事件解析、上下文构造、状态机编排、工具路由、provider 复核和结果回写。默认使用 mock provider；如需使用本地 YOLO 关键帧复核，先安装 Agent 视觉依赖并关闭 mock：
+
+```bash
+./ssv agent --no-mock
+```
+
+本地 YOLO provider 只读取 Redis 事件中的 `evidence_paths` 关键帧，不进入每帧实时检测链路。
+
+可重复演示 T4 内部闭环时，使用：
+
+```bash
+./ssv t4-demo
+```
+
+该命令会启动/复用本机 Redis，向临时 Redis Stream 注入两条 mock 复核事件，并使用 `SSV_AGENT_MODEL_PATH` 指向的本地 YOLO 权重对一张合成关键帧做真实 provider 烟测。演示产物写入 `output/t4-demo/`，其中 `local_yolo_smoke` 使用合成图，预期结果是 `needs_human`，用于证明模型调用、失败降级和终态回写已打通；替换为真实关键帧后才能评估安全帽识别效果。
+
+汇报时推荐使用一键演示：
+
+```bash
+./ssv t4-full-demo
+```
+
+默认使用 `/home/lzy/work-code/30sec.mp4` 和 `/home/lzy/work-code/comp-2-freeze10.pt`，依次运行 T4 内部闭环、真实视频 + 本地 YOLO provider、真实视频 + `openai_compatible` provider（当 `.env` 已配置外部 AI 时），并在 `output/t4-full-demo/summary.md` 生成汇总。
+终端会直接打印链路数据流、工具输出和外部 AI 回复；有图形桌面时会自动尝试打开 `output/t4-full-demo/report.html`。如不想自动打开报告页，追加 `--no-open-report`。
+
+如果要用本地视频或 RTSP 流演示“视频输入 → YOLO 检测 → Redis 事件 → T4 复核 → 结果回写”，使用：
+
+```bash
+./ssv t4-video-demo \
+  --video /path/to/demo.mp4 \
+  --model /home/lzy/work-code/comp-2-freeze10.pt
+```
+
+该命令是演示适配器：它用 Python 从视频抽样并生成一条代表性 Redis 事件，不替代生产级 T1/T2/T3 GStreamer 链路。默认会把写入 Redis 的检测置信度限制在 `0.55` 以内，确保汇报时能稳定走 T4 复核路径；如需完全保留检测模型原始置信度，追加 `--preserve-confidence`。产物写入 `output/t4-video-demo/`，包含原始关键帧、带框关键帧、事件 JSON 和复核结果 JSON。
+
+如需在 T4 复核阶段调用外部 OpenAI-compatible API（例如阿里云百炼 DashScope compatible-mode），先在 `.env` 中配置 `SSV_AGENT_PROVIDER=openai_compatible`、`SSV_AGENT_API_BASE_URL`、`SSV_AGENT_API_KEY` 和 `SSV_AGENT_TEXT_MODEL`，然后运行：
+
+```bash
+./ssv t4-video-demo \
+  --video /home/lzy/work-code/30sec.mp4 \
+  --model /home/lzy/work-code/comp-2-freeze10.pt \
+  --agent-provider openai_compatible
+```
+
+调试单条事件时可以使用 one-shot 入口：
+
+```bash
+cat >/tmp/ssv-t4-event.json <<'JSON'
+{
+  "type": "detection",
+  "source": "manual-camera",
+  "timestamp_ms": 1700000000000,
+  "frame_id": 1,
+  "detections": [
+    {"class": "head", "confidence": 0.52, "bbox": [0.1, 0.1, 0.4, 0.5], "track_id": 1}
+  ],
+  "evidence_paths": ["/path/to/keyframe.jpg"]
+}
+JSON
+
+./ssv agent --no-mock --once-event-file /tmp/ssv-t4-event.json
+```
 
 ### GStreamer 日志
 

@@ -125,6 +125,7 @@ class TestToolRouter:
         router = ToolRouter()
         router.register(MockEchoTool())
         assert "echo" in router.registered_tools
+        assert router.tool_definitions[0].name == "echo"
 
         result = router.call_tool("echo", {"key": "value"})
         assert result.success is True

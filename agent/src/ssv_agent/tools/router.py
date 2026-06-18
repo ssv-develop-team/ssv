@@ -34,6 +34,11 @@ class ToolRouter:
     def registered_tools(self) -> list[str]:
         return list(self._tools.keys())
 
+    @property
+    def tool_definitions(self) -> list:
+        """返回已注册工具的自描述定义。"""
+        return [tool.to_definition() for tool in self._tools.values()]
+
     def register(self, tool: BaseTool) -> None:
         """注册一个工具。"""
         if tool.name in self._tools:

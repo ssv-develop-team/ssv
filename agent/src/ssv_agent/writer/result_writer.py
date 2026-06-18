@@ -8,7 +8,7 @@ from typing import Optional
 import structlog
 from redis import Redis
 
-from ssv_agent.models.event import ReviewResult
+from ssv_agent.models.event import EventState, ReviewResult
 
 logger = structlog.get_logger()
 
@@ -68,7 +68,7 @@ class ResultWriter:
                 logger.error("redis write failed", error=str(exc))
 
         # 3. 终态日志（FAILED/NEEDS_HUMAN 额外警告）
-        if hasattr(result, "failed") and result.final_state != "completed":
+        if result.final_state != EventState.COMPLETED:
             logger.warning(
                 "review ended with non-completed state",
                 state=result.final_state.value,

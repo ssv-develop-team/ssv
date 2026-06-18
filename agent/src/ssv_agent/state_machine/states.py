@@ -29,6 +29,7 @@ class StateContext:
     context: Optional[ReviewContext] = None
     tool_results: list[ToolResult] = field(default_factory=list)
     error: str = ""
+    provider_used: str = "none"
     started_at: float = field(default_factory=time.time)
     completed_at: float = 0.0
     timeout_seconds: int = 300
@@ -59,6 +60,7 @@ class StateContext:
             severity=self.event.severity,
             detections_count=len(self.event.detections),
             tool_results=self.tool_results,
+            provider_used=self.provider_used,
             created_at=self.completed_at,
         )
 

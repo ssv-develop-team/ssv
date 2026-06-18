@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 from ssv_agent.config import SsvConfig
@@ -35,6 +34,10 @@ def test_agent_service_initialization(monkeypatch: Any) -> None:
     service = AgentService(config, mock_provider=True)
     assert service.consumer is not None
     assert service.machine is not None
+    assert set(service.tool_router.registered_tools) == {
+        "rule_retrieval",
+        "generate_notification",
+    }
 
 
 def test_handle_event_processes_detection(monkeypatch: Any) -> None:
@@ -53,7 +56,13 @@ def test_handle_event_processes_detection(monkeypatch: Any) -> None:
         "timestamp_ms": 1700000000000,
         "frame_id": 42,
         "detections": [
-            {"class": "head", "class_id": 1, "confidence": 0.95, "bbox": [0.1, 0.1, 0.3, 0.3], "track_id": 5},
+            {
+                "class": "head",
+                "class_id": 1,
+                "confidence": 0.95,
+                "bbox": [0.1, 0.1, 0.3, 0.3],
+                "track_id": 5,
+            },
         ],
     })
     service._handle_event("123-0", {"event": payload})
@@ -64,7 +73,30 @@ def test_handle_event_processes_detection(monkeypatch: Any) -> None:
     # 验证复核结果已回写
     assert len(fake.published) == 1
     stream, fields = fake.published[0]
+    assert stream == config.agent.review_result_stream
     assert "review" in fields
+    assert service.history_manager.record_count == 1
+
+
+def test_handle_event_uses_configured_review_stream(monkeypatch: Any) -> None:
+    """复核结果应写入 AgentConfig.review_result_stream。"""
+    fake = FakeRedis()
+    monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kw: fake)
+
+    config = SsvConfig()
+    config.agent.review_result_stream = "custom:reviews"
+    service = AgentService(config, mock_provider=True)
+
+    payload = json.dumps({
+        "source": "cam-1",
+        "frame_id": 7,
+        "detections": [
+            {"class": "head", "confidence": 0.95, "bbox": [0.1, 0.1, 0.3, 0.3]},
+        ],
+    })
+    service._handle_event("msg-7", {"event": payload})
+
+    assert fake.published[0][0] == "custom:reviews"
 
 
 def test_handle_event_rejects_malformed_json(monkeypatch: Any) -> None:
@@ -93,7 +125,12 @@ def test_end_to_end_direct_confirm_flow(monkeypatch: Any) -> None:
         "source": "cam-1",
         "frame_id": 1,
         "detections": [
-            {"class": "head", "confidence": 0.95, "bbox": [0.1, 0.1, 0.3, 0.3], "track_id": 1},
+            {
+                "class": "head",
+                "confidence": 0.95,
+                "bbox": [0.1, 0.1, 0.3, 0.3],
+                "track_id": 1,
+            },
         ],
     })
     service._handle_event("msg-1", {"event": payload})

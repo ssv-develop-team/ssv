@@ -59,8 +59,6 @@ def test_handler_callback_is_invoked(monkeypatch: Any) -> None:
         call_args.append((msg_id, fields))
         consumer.stop()  # 处理一条就停
 
-    # 注入假的 xreadgroup 行为
-    original_start = consumer.start
     def fake_start(handler_fn):
         consumer._running = True
         payload = {

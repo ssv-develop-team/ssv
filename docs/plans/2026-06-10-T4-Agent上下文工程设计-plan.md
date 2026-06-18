@@ -2,7 +2,7 @@
 
 > **Goal:** 将分散在各模块的上下文组装逻辑收敛为统一的"上下文工程"子系统——五大要素（系统提示、工具定义、历史记录、检索上下文、用户输入）纳入 ContextEngine 统一收集，经 BudgetEngine 配额分配后由 PromptAssembler 组装为 LLM-ready messages。
 
-**Architecture:** `ContextEngine.collect()` 调用六个 Manager/Renderer 并发收集各要素，产出 `ContextPack` 统一容器 → `BudgetEngine.allocate()` 按策略分配 token 配额 → `PromptAssembler.assemble()` 执行截断和拼接 → `PromptAssembly` messages 列表。整个链路用 Protocol 解耦，各模块可独立替换和独立测试。
+**Architecture:** `ContextEngine.collect()` 顺序调用各个 Manager/Renderer 收集上下文要素，产出 `ContextPack` 统一容器；`BudgetEngine.allocate()` 与 `PromptAssembler.assemble()` 已实现并可测试，真实 LLM provider 接入前暂不驱动生产复核结论。整个链路用 Protocol 解耦，各模块可独立替换和独立测试。
 
 **Tech Stack:** Python 3.12, dataclasses, PyYAML, structlog。不引入新第三方依赖。
 
@@ -40,7 +40,7 @@ agent/src/ssv_agent/prompts/system.py      → SystemPrompt 新增 layers 字段
 agent/src/ssv_agent/prompts/templates.py   → 删 SYSTEM_PROMPT_CONTENT / OUTPUT_FORMAT_SPEC 重复定义
 agent/src/ssv_agent/prompts/assembler.py   → assemble() 接收 ContextPack
 agent/src/ssv_agent/prompts/logger.py      → CallRecord 新增 5 字段
-agent/src/ssv_agent/prompts/manager.py     → [废弃] 合并到 SystemPromptManager
+agent/src/ssv_agent/prompts/manager.py     → 保留轻量 validate/get_versions，SystemPromptManager 承担分层渲染
 agent/src/ssv_agent/tools/base.py          → +4自描述属性 + to_definition()
 agent/src/ssv_agent/service.py             → 构造 ContextEngine + BudgetEngine，传入 StateMachine
 agent/src/ssv_agent/state_machine/machine.py → _do_context_building 调用 ContextEngine.collect()
@@ -283,7 +283,7 @@ assert len(block.messages) == 0
 
 查找顺序：`config/rules.yaml` → `$SSV_RULES_PATH` → 硬编码默认规则（降级）。
 `search(event, strategy)` — 精确匹配 trigger_reason → MD5 去重 → source_type 标注 → priority 排序截断。
-空结果时返回 `（未找到匹配规则。请基于系统提示中的判断原则独立复核。）`。
+空结果时返回空 `RetrievalBlock`，由 `UserInputBuilder` 在 prompt 文本中表达“未找到匹配规则”的降级语义。
 
 - [x] **Step 3: Prompt 呈现分级**
 
@@ -374,7 +374,7 @@ assert budget.strategy == "rule_explain"
 
 - [x] **Step 1: 实现 ContextEngine**
 
-`collect(event, strategy) -> ContextPack` — 并发调用六个 Manager/Renderer：
+`collect(event, strategy) -> ContextPack` — 顺序调用以下 Manager/Renderer：
 
 1. `SystemPromptManager.render(strategy)` → SystemPromptBlock
 2. `ToolDefinitionsRenderer.render(router, strategy)` → ToolDefinitionsBlock
@@ -386,12 +386,12 @@ assert budget.strategy == "rule_explain"
 - [x] **Step 2: 渐进激活降级**
 
 各 Manager/Renderer 为 None 时 → 产出空 Block，不影响其他要素。
-`config.py` 中通过 `context_engine_enabled` 控制是否启用（mock 阶段可关闭）。
+`config.py` 当前提供 `context_history_max_window`、`context_engine_debug` 和 `rules_yaml_path`；ContextEngine 默认启用，禁用开关留到真实 provider 接入后再评估。
 
 **Verification:**
 ```python
 from ssv_agent.context.engine import ContextEngine
-engine = ContextEngine(router=router, enabled=True)
+engine = ContextEngine()
 pack = engine.collect(event, "direct_confirm")
 assert pack.system_prompt.content != ""
 assert pack.user_input.event_context != ""
@@ -408,15 +408,16 @@ assert pack.user_input.event_context != ""
 ```python
 class AgentConfig(BaseModel):
     ...
-    context_engine_enabled: bool = True
-    budget_engine_enabled: bool = True
+    context_history_max_window: int = 50
+    context_engine_debug: bool = False
+    rules_yaml_path: str = "config/rules.yaml"
 ```
 
 - [x] **Step 2: service.py 构造上下文工程管线**
 
 ```python
-self._context_engine = ContextEngine(router=tool_router, enabled=config.agent.context_engine_enabled)
-self._budget_engine = BudgetEngine() if config.agent.budget_engine_enabled else None
+self._context_engine = ContextEngine(...)
+self._budget_engine = BudgetEngine()
 self._machine = StateMachine(
     provider=provider,
     context_engine=self._context_engine,
@@ -439,7 +440,7 @@ self._machine = StateMachine(
 **Verification:**
 ```bash
 uv run --extra dev pytest tests/ -v
-# 所有已有 82+ 测试保持通过（向后兼容）
+# 所有已有测试保持通过（向后兼容）
 ```
 
 ---

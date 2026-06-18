@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from ssv_agent.config import load_config
 from ssv_agent.logging import setup_logging
-from ssv_agent.service import run
+from ssv_agent.service import AgentService, run
 
 
 def main() -> None:
@@ -32,14 +33,20 @@ def main() -> None:
     parser.add_argument(
         "--mock-provider",
         action="store_true",
-        default=True,
-        help="Use mock provider for review (default: True, for development)",
+        default=None,
+        help="Use mock provider for review (overrides config)",
     )
     parser.add_argument(
         "--no-mock",
         action="store_true",
         default=False,
         help="Disable mock provider (use real model API)",
+    )
+    parser.add_argument(
+        "--once-event-file",
+        type=str,
+        default=None,
+        help="Process one event JSON file and exit (for T4 smoke/debug)",
     )
     args = parser.parse_args()
 
@@ -57,5 +64,17 @@ def main() -> None:
     log_level = args.log_level or cfg.logging.python_log_level
     setup_logging(log_level)
 
-    mock = not args.no_mock
+    if args.no_mock:
+        mock = False
+    elif args.mock_provider:
+        mock = True
+    else:
+        mock = cfg.agent.mock_provider
+    if args.once_event_file:
+        with open(args.once_event_file) as f:
+            data = json.load(f)
+        service = AgentService(cfg, mock_provider=mock, redis_writer=False)
+        result = service.process_event_data(data, msg_id="manual-0")
+        print(result.model_dump_json())
+        return
     run(cfg, mock_provider=mock)

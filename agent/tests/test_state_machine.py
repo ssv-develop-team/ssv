@@ -8,9 +8,7 @@ from ssv_agent.models.event import (
     EventState,
     ReviewResult,
     ReviewStrategy,
-    Severity,
     ToolResult,
-    TriggerReason,
 )
 from ssv_agent.state_machine.machine import StateMachine
 from ssv_agent.state_machine.states import StateContext
@@ -197,28 +195,25 @@ class TestStateMachine:
     def test_provider_failure_yields_needs_human(self) -> None:
         """Provider 失败 + 无其他工具成功 → NEEDS_HUMAN。"""
         provider = FailingProvider()
-        machine = StateMachine(provider=provider)
+        writer = MockResultWriter()
+        machine = StateMachine(provider=provider, result_writer=writer)
         event = make_event(detections=[
             Detection(class_name="head", confidence=0.5)
         ])
         result = machine.execute(event)
         assert result.final_state == EventState.NEEDS_HUMAN
+        assert len(writer.written) == 1
 
     def test_all_tools_fail(self) -> None:
-        """所有工具调用失败 → NEEDS_HUMAN。"""
+        """需要 provider 的策略在 provider 缺失时 → NEEDS_HUMAN。"""
         machine = StateMachine()  # no provider
         event = make_event(detections=[
             Detection(class_name="head", confidence=0.75),
             Detection(class_name="helmet", confidence=0.7),
         ])
-        # 这个路径会走 RULE_EXPLAIN，但 tool_router 为 None
-        # 不会记录任何 tool_result，所以 tool_results 为空列表
-        # 空列表不会触发 "all failed" 逻辑
-        # 所以这个测试需要调整
         result = machine.execute(event)
-        # 没有 provider 但也没有 tool_results —— 不会失败
-        # 但 tool_results 为空，意味着没做任何事，但状态是 COMPLETED
-        assert result.final_state == EventState.COMPLETED
+        assert result.final_state == EventState.NEEDS_HUMAN
+        assert result.tool_results[0].error == "provider unavailable"
 
     def test_no_provider_direct_confirm_still_works(self) -> None:
         """直接确认路径不需要 provider。"""
@@ -235,7 +230,7 @@ class TestStateMachine:
         machine = StateMachine()
         event = make_event(detections=[])
         result = machine.execute(event)
-        assert result.final_state == EventState.COMPLETED
+        assert result.final_state == EventState.NEEDS_HUMAN
         assert result.strategy == ReviewStrategy.VISUAL_REVIEW
 
     def test_state_machine_exception_handling(self) -> None:

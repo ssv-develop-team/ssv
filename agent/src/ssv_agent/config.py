@@ -51,9 +51,20 @@ class AgentConfig(BaseModel):
     state_machine_timeout: int = 300   # 状态机单次复核超时（秒）
     max_retries: int = 3              # 失败重试次数
     mock_provider: bool = True        # 使用 mock provider（默认开启，后续接入真实模型时关闭）
+    provider_type: str = "local_yolo" # mock_provider=false 时使用的 provider 类型
     review_result_stream: str = "ssv:review-results"  # 复核结果 Redis Stream key
     prompt_max_tokens: int = 4096     # 提示词 token 预算上限（字符数/2 估算）
     prompt_log_enabled: bool = False  # 提示词调试日志开关（mock 模式下默认关闭）
+    local_yolo_model_path: str = "/home/lzy/work-code/comp-2-freeze10.pt"
+    local_yolo_confidence_threshold: float = 0.25
+    local_yolo_device: str = "cpu"
+    openai_api_base_url: str = ""
+    openai_api_key_env: str = "SSV_AGENT_API_KEY"
+    openai_text_model: str = "qwen3.7-plus"
+    openai_vision_model: str = ""
+    openai_timeout_seconds: float = 60.0
+    openai_temperature: float = 0.2
+    openai_max_tokens: int = 2048
 
     # ── M4 上下文工程新增 ───────────────────────────────────────────────
     context_history_max_window: int = 50       # 历史记录最大窗口大小
@@ -83,6 +94,26 @@ def _apply_env_overrides(cfg: SsvConfig) -> None:
         cfg.logging.python_log_level = v
     if v := os.environ.get("SSV_DISPLAY_SINK"):
         cfg.display.sink = v
+    if v := os.environ.get("SSV_AGENT_MOCK_PROVIDER"):
+        cfg.agent.mock_provider = v.lower() in ("1", "true", "yes", "on")
+    if v := os.environ.get("SSV_AGENT_PROVIDER"):
+        cfg.agent.provider_type = v
+    if v := os.environ.get("SSV_AGENT_MODEL_PATH"):
+        cfg.agent.local_yolo_model_path = v
+    if v := os.environ.get("SSV_AGENT_API_BASE_URL"):
+        cfg.agent.openai_api_base_url = v
+    if v := os.environ.get("SSV_AGENT_API_KEY_ENV"):
+        cfg.agent.openai_api_key_env = v
+    if v := os.environ.get("SSV_AGENT_TEXT_MODEL"):
+        cfg.agent.openai_text_model = v
+    if v := os.environ.get("SSV_AGENT_VISION_MODEL"):
+        cfg.agent.openai_vision_model = v
+    if v := os.environ.get("SSV_AGENT_API_TIMEOUT_SECONDS"):
+        cfg.agent.openai_timeout_seconds = float(v)
+    if v := os.environ.get("SSV_AGENT_API_TEMPERATURE"):
+        cfg.agent.openai_temperature = float(v)
+    if v := os.environ.get("SSV_AGENT_API_MAX_TOKENS"):
+        cfg.agent.openai_max_tokens = int(v)
 
 
 def load_config(path: str | Path | None = None) -> SsvConfig:

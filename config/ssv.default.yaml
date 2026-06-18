@@ -44,3 +44,21 @@ tracking:
 agent:
   state_machine_timeout: 300
   max_retries: 3
+  mock_provider: true
+  provider_type: "local_yolo"
+  review_result_stream: "ssv:review-results"
+  prompt_max_tokens: 4096
+  prompt_log_enabled: false
+  local_yolo_model_path: "/home/lzy/work-code/comp-2-freeze10.pt"
+  local_yolo_confidence_threshold: 0.25
+  local_yolo_device: "cpu"
+  openai_api_base_url: ""
+  openai_api_key_env: "SSV_AGENT_API_KEY"
+  openai_text_model: "qwen3.7-plus"
+  openai_vision_model: ""
+  openai_timeout_seconds: 60.0
+  openai_temperature: 0.2
+  openai_max_tokens: 2048
+  context_history_max_window: 50
+  context_engine_debug: false
+  rules_yaml_path: "config/rules.yaml"

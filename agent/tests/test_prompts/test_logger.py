@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ssv_agent.prompts.assembler import PromptAssembly, PromptMessage
 from ssv_agent.prompts.logger import CallRecord, PromptLogger
 

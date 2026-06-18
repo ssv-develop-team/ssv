@@ -6,8 +6,8 @@
 
 ## 核心成果
 
-1. **初步打通整个 T4 链路** — 事件产生 → 证据输出 → Redis 异步边界 → Agent 事件消费 → 上下文构造 → 状态机编排 → 策略选择 → 模型调用 → 结果汇总 → 结果回写，端到端闭环
-2. **完成 Agent 上下文工程设计** — 五要素（系统提示/工具定义/历史/检索/用户输入）统一管线，ContextEngine → BudgetEngine → PromptAssembler 三层组装
+1. **初步打通 T4 内部复核链路** — Redis 事件消费 → 事件模型校验 → 上下文构造 → 状态机编排 → 策略选择 → provider 调用 → 结果汇总 → Redis/日志回写 → ACK
+2. **完成 Agent 上下文工程设计** — 五要素（系统提示/工具定义/历史/检索/用户输入）统一管线；`ContextEngine` 已接入状态机，`BudgetEngine` 与 `PromptAssembler` 已实现并等待真实 provider 激活
 3. **针对 Agent 输出不可控问题，新增提示词模块加固** — 5 条核心原则（清晰明确/提供上下文/具体要求/示例参考/分步思考），从 4 行硬编码升级为 7 个模块集中管理
 
 ---
@@ -27,10 +27,10 @@
 | 模块 | 文件 | 职责 |
 |:--|:--|:--|
 | 事件领域模型 | `models/event.py` | pydantic 强类型：Detection / DetectionEvent / ReviewResult / ReviewContext / ToolResult。事件自带 infer_severity() / infer_trigger_reason() / select_strategy() 自动推断逻辑 |
-| LLM 状态机 | `state_machine/machine.py`, `states.py` | 7 流转状态 + 3 终态 + 4 条复核策略路径。依赖注入 Provider/ToolRouter/ResultWriter，Protocol 协议解耦 |
-| Provider 抽象 | `providers/base.py`, `mock.py` | BaseProvider（文本模型）+ BaseVLMProvider（视觉模型）双抽象基类 + MockProvider / MockVLMProvider 开发阶段 mock |
-| 上下文构造 | `context/builder.py` | ContextBuilder（M4 阶段，后续升级为 ContextEngine） |
-| 工具路由 | `tools/base.py`, `router.py` | BaseTool 抽象 + ToolRouter 注册调用 |
+| 状态机 | `state_machine/machine.py`, `states.py` | 7 个流转状态 + 3 个终态 + 4 条复核策略路径。依赖注入 Provider/ToolRouter/ResultWriter，Protocol 协议解耦 |
+| Provider 抽象 | `providers/base.py`, `mock.py`, `local_yolo.py` | BaseProvider（文本模型）+ BaseVLMProvider（视觉模型）双抽象基类；默认 mock，可选本地 YOLO 关键帧复核 |
+| 上下文构造 | `context/engine.py`, `context/builder.py` | `ContextEngine` 已作为主路径接入状态机；`ContextBuilder` 仅保留兼容旧调用 |
+| 工具路由 | `tools/base.py`, `router.py`, `builtin.py` | BaseTool 抽象 + ToolRouter 注册调用 + 规则检索/通知草稿内置工具 |
 | 结果回写 | `writer/result_writer.py` | Redis Streams + 结构化日志双通道 |
 | 服务整合 | `service.py` | AgentService 编排完整链路：消费 → 状态机 → 回写 → ACK |
 
@@ -85,7 +85,7 @@ Redis Streams (ssv:events)
 
 ### 集成方式
 
-M4 阶段 `PromptAssembler` 和 `PromptLogger` 已在 `service.py` 中实例化，暂未接入 `StateMachine`。M5 接入真实 LLM Provider 时生效，改动范围仅限 `providers/llm.py`（新文件）和 `service.py`（小改）。
+M4 阶段 `PromptAssembler` 和 `PromptLogger` 已在 `service.py` 中实例化，暂未驱动 `StateMachine` 的 provider 调用。M5 接入真实 LLM Provider 时生效，预计改动集中在 provider 工厂、`StateMachine` 调用方式和 `service.py` 装配。
 
 ---
 
@@ -93,21 +93,21 @@ M4 阶段 `PromptAssembler` 和 `PromptLogger` 已在 `service.py` 中实例化�
 
 ### 做了什么
 
-将分散在 `models/event.py`、`prompts/assembler.py`、`context/builder.py` 三处的上下文组装逻辑收敛为统一的"上下文工程"子系统。五大要素——系统提示、工具定义、历史记录、检索上下文、用户输入——纳入 `ContextEngine` 统一生命周期管理。
+将分散在 `models/event.py`、`prompts/assembler.py`、`context/builder.py` 三处的上下文组装逻辑收敛为统一的"上下文工程"子系统。五大要素——系统提示、工具定义、历史记录、检索上下文、用户输入——纳入 `ContextEngine` 统一生命周期管理；复核完成后已写入内存历史，后续可用于相邻事件上下文。
 
 ### 核心模块（8 文件 + 2 集成文件）
 
 | 模块 | 文件 | 职责 |
 |:--|:--|:--|
 | 数据容器 | `context/pack.py` | ContextPack + 五要素 Block + HistoryMessage + ToolDefinition + TokenBudget |
-| 上下文引擎 | `context/engine.py` | ContextEngine.collect()：并发调用 6 个 Manager/Renderer，产出 ContextPack |
+| 上下文引擎 | `context/engine.py` | `ContextEngine.collect()`：顺序收集 5 类上下文要素和可选集成数据，产出 `ContextPack` |
 | 系统提示管理 | `context/system_prompt.py` | SystemPromptManager：L0-L4 五层分层渲染 + 版本快照 + 硬约束检查 |
 | 工具定义渲染 | `context/tool_definitions.py` | ToolDefinitionsRenderer：按策略条件注入工具描述到 prompt |
 | 历史管理 | `context/history_manager.py` | HistoryManager：三级压缩（全量→轻量→摘要）+ 优先级驱逐算法 |
 | 检索管理 | `context/retrieval_manager.py` | RetrievalManager：YAML 规则加载 + 精确匹配 + MD5 去重 + 降级 |
 | 用户输入构建 | `context/user_input.py` | UserInputBuilder：事件→完整 user message 文本 + 模板渲染 |
 | 预算引擎 | `context/budget.py` | BudgetEngine：按策略为五要素分配 token 配额 |
-| 集成接口 | `integrations/protocols.py`, `mocks.py` | 4 套跨主线 Protocol（Evidence/Track/SourceMeta/EventSequence）+ Mock 实现 |
+| 集成接口 | `integrations/protocols.py`, `mocks.py` | 4 套跨主线 Protocol（Evidence/Track/SourceMeta/EventSequence）+ Mock 实现；T1/T2/T3 未接通时返回空值或 `unknown` |
 
 ### 统一管线
 
@@ -183,6 +183,7 @@ config/rules.yaml                    # 安全规则知识库
 
 docs/specs/
 ├── 2026-06-10-T4-Agent状态机与复核链路-spec.md
+├── 2026-06-10-T4-提示词管理模块-spec.md
 ├── 2026-06-10-T4-提示词管理模块-设计构想.md
 └── 2026-06-10-T4-Agent上下文工程设计-spec.md
 
@@ -209,16 +210,19 @@ agent/tests/
 └── test_config.py                  # 3 tests — 配置加载
 ```
 
-**总计：134 tests，ruff lint zero errors**
+**测试覆盖：状态机、事件模型、provider mock、上下文、提示词、服务编排等 T4 核心路径。具体数量以当前 `pytest` 输出为准。**
 
 ### 修改文件（6 个）
 
-- `agent/src/ssv_agent/service.py` — 重构为 AgentService + 集成全链路
+- `agent/src/ssv_agent/service.py` — 重构为 AgentService + 集成全链路；复核结果写入 `AgentConfig.review_result_stream` 并记录内存历史
 - `agent/src/ssv_agent/event_consumer.py` — 剥离 I/O
 - `agent/src/ssv_agent/config.py` — 新增 Agent 配置项
-- `agent/src/ssv_agent/cli.py` — 新增 --no-mock 标志
+- `agent/src/ssv_agent/cli.py` — 新增 --no-mock 标志，可切换本地 YOLO provider
 - `agent/src/ssv_agent/state_machine/machine.py` — 集成 ContextEngine
 - `agent/src/ssv_agent/providers/mock.py` — 新增 analyze_from_messages() + ContextPack 兼容
+- `agent/src/ssv_agent/providers/local_yolo.py` — 新增本地 YOLO 关键帧复核 provider
+- `agent/src/ssv_agent/tools/builtin.py` — 新增规则检索和通知草稿工具
+- `agent/src/ssv_agent/integrations/evidence.py` — 新增事件证据路径读取实现
 
 ---
 
@@ -226,10 +230,10 @@ agent/tests/
 
 | 项目 | 说明 |
 |:--|:--|
-| 真实 LLM/VLM API 调用 | 全部 mock，M5 接入 |
+| 真实 LLM/VLM API 调用 | 当前支持 mock 和本地 YOLO 关键帧复核；云端/多模态 LLM API M5 接入 |
 | 向量数据库检索 | 当前 YAML 精确匹配，M5 语义检索 |
 | 通知/工单外部系统 | 接口预留，M5 对接 |
-| Agent 状态持久化 | 当前内存，M5 数据库 |
+| Agent 状态持久化 | 当前内存历史，M5 再评估 Redis/数据库持久化 |
 | VLM 提示词组装 | `assemble_vlm()` 方法预留，M5 实现 |
 | 历史 Level 1-3 压缩 | 接口预留，M5 激活 |
 
@@ -239,8 +243,8 @@ agent/tests/
 
 ```bash
 cd agent
-uv run --extra dev pytest         # 134 passed
-uv run --extra dev ruff check src/ # All checks passed
+uv run --extra dev pytest
+uv run --extra dev ruff check src/
 ```
 
 ## 八、Git 提交记录

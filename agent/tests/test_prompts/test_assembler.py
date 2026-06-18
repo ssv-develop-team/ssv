@@ -13,7 +13,6 @@ from ssv_agent.models.event import (
     TriggerReason,
 )
 from ssv_agent.prompts.assembler import (
-    DEFAULT_MAX_TOKENS,
     PromptAssembler,
     PromptAssembly,
     PromptMessage,

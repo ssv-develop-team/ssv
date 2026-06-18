@@ -15,6 +15,10 @@
 #   run --display --sink X   实时链路 + 指定视频 sink
 #   download-model           下载 YOLOv8n ONNX 模型
 #   agent                    启动 Python Agent 服务 (消费 Redis 事件)
+#   t4-demo                  运行 T4 Agent Redis 闭环演示
+#   t4-video-demo            从视频/流生成事件并演示 T4 复核闭环
+#   t4-full-demo             一键运行 T4 内部、视频、本地/外部 AI 演示
+#   t4-yolo-compare          OpenCV 对比显示安全帽 YOLO 检测
 #   inspect                  查看插件详细信息
 #   stop                     停止所有后台服务
 #
@@ -39,6 +43,10 @@ usage() {
     echo "  run --display --sink X   实时链路 + 指定视频 sink"
     echo "  download-model           下载 YOLOv8n ONNX 模型"
     echo "  agent                    启动 Agent (消费 Redis 事件并打印)"
+    echo "  t4-demo                  运行 T4 Agent Redis 闭环演示"
+    echo "  t4-video-demo            从视频/流生成事件并演示 T4 复核闭环"
+    echo "  t4-full-demo             一键运行 T4 内部、视频、本地/外部 AI 演示"
+    echo "  t4-yolo-compare          OpenCV 对比显示安全帽 YOLO 检测"
     echo "  inspect                  查看插件信息"
     echo "  stop                     停止所有后台服务"
     echo ""
@@ -60,7 +68,26 @@ case "${1:-}" in
         exec bash "$SCRIPTS_DIR/pipeline.sh" --run "$@"
         ;;
     download-model) exec bash "$SCRIPTS_DIR/download-model.sh" ;;
-    agent)    exec bash "$SCRIPTS_DIR/agent.sh" ;;
+    agent)
+        shift
+        exec bash "$SCRIPTS_DIR/agent.sh" "$@"
+        ;;
+    t4-demo)
+        shift
+        exec bash "$SCRIPTS_DIR/t4-demo.sh" "$@"
+        ;;
+    t4-video-demo)
+        shift
+        exec bash "$SCRIPTS_DIR/t4-video-demo.sh" "$@"
+        ;;
+    t4-full-demo)
+        shift
+        exec bash "$SCRIPTS_DIR/t4-full-demo.sh" "$@"
+        ;;
+    t4-yolo-compare)
+        shift
+        exec bash "$SCRIPTS_DIR/t4-yolo-compare.sh" "$@"
+        ;;
     inspect)  exec bash "$SCRIPTS_DIR/inspect.sh" ;;
     stop)     exec bash "$SCRIPTS_DIR/stop.sh" ;;
     help|-h|--help|"")

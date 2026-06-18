@@ -103,6 +103,11 @@ class StateMachine:
     def execute(self, event: DetectionEvent) -> ReviewResult:
         """执行完整复核流程，返回 ReviewResult。"""
         ctx = StateContext(event=event, timeout_seconds=self._timeout)
+        ctx.provider_used = (
+            getattr(self._provider, "provider_name", "unknown")
+            if self._provider is not None
+            else "none"
+        )
 
         logger.info(
             "state machine started",
@@ -130,8 +135,7 @@ class StateMachine:
     def _run_states(self, ctx: StateContext) -> None:
         """按顺序驱动状态流转。
 
-        提前退出（跳过回写）：FAILED / NEEDS_HUMAN
-        正常到达回写：COMPLETED
+        COMPLETED / FAILED / NEEDS_HUMAN 都要进入回写，保证下游能观察终态。
         """
         steps = [
             self._do_parsing,
@@ -142,9 +146,8 @@ class StateMachine:
         ]
         for step in steps:
             step(ctx)
-            # 仅异常终态提前退出，COMPLETED 继续走到回写
             if ctx.state in (EventState.FAILED, EventState.NEEDS_HUMAN):
-                return
+                break
 
         self._do_result_writing(ctx)
 
@@ -173,9 +176,15 @@ class StateMachine:
             # M4: 通过 ContextEngine.collect() 产出 ContextPack
             try:
                 strategy = ctx.event.select_strategy().value
+                tool_definitions = (
+                    getattr(self._tool_router, "tool_definitions", [])
+                    if self._tool_router is not None
+                    else []
+                )
                 pack = self._context_engine.collect(
                     event=ctx.event,
                     strategy=strategy,
+                    tool_definitions=tool_definitions,
                 )
                 ctx.context = pack  # 存储 ContextPack（替代 ReviewContext）
                 logger.debug(
@@ -206,7 +215,7 @@ class StateMachine:
 
         if isinstance(ctx.context, ContextPack):
             # ContextPack 已包含 strategy 元数据，无需重建
-            ctx.context.metadata["strategy"] = ctx.strategy
+            ctx.context.metadata["strategy"] = ctx.strategy.value
         else:
             # 旧 ReviewContext 路径
             ctx.context = ReviewContext(
@@ -259,8 +268,8 @@ class StateMachine:
             ctx.record_tool_result(
                 ToolResult(
                     tool_name="visual_review",
-                    success=True,
-                    output="[mock] visual review passed",
+                    success=False,
+                    error="provider unavailable",
                 )
             )
 
@@ -302,6 +311,14 @@ class StateMachine:
                         error=str(exc),
                     )
                 )
+        else:
+            ctx.record_tool_result(
+                ToolResult(
+                    tool_name="rule_explain",
+                    success=False,
+                    error="provider unavailable",
+                )
+            )
 
     def _handle_notify_report(self, ctx: StateContext) -> None:
         """通知报告：生成通知内容。"""
@@ -343,6 +360,14 @@ class StateMachine:
                         error=str(exc),
                     )
                 )
+        else:
+            ctx.record_tool_result(
+                ToolResult(
+                    tool_name="report_generation",
+                    success=False,
+                    error="provider unavailable",
+                )
+            )
 
     def _do_result_aggregation(self, ctx: StateContext) -> None:
         """汇总结果：检查超时和工具调用失败。"""

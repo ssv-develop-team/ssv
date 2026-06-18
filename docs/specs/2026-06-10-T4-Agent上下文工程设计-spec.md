@@ -37,7 +37,7 @@ C++ 插件链 (T1/T2)                 Redis Streams (T3)              Python Age
                                                                   └──────────────────────┘
 ```
 
-**当前 T4 收到的全部数据**：`DetectionEvent`（source、frame_id、timestamp_ms、detections 列表）。无证据路径、无跟踪状态、无场景元数据、无事件序列。
+**当前 T4 稳定依赖的数据**：`DetectionEvent`（source、frame_id、timestamp_ms、detections 列表）。证据路径、跟踪状态、场景元数据和事件序列均通过可为空的集成接口接入；T1/T2/T3 未提供时由 mock 实现返回空值或 `unknown`，不影响 T4 单元测试。
 
 ### 1.2 五大要素的就绪状态
 
@@ -46,8 +46,8 @@ C++ 插件链 (T1/T2)                 Redis Streams (T3)              Python Age
 | 系统提示 | ✅ | 一段平铺文本，无分层版本管理；`system.py` 与 `templates.py` 存在内容重复 |
 | 工具定义 | ⚠️ | `ToolRouter` 能注册调用，但 schema 未注入 prompt，LLM 不可见 |
 | 用户输入 | ⚠️ | 事件→文本渲染散落在 `models/event.py` (`prompt_context`) 和 `prompts/assembler.py` (`_build_event_context`) 两处 |
-| 历史记录 | ❌ | `history_summary` 始终为空，无写入路径 |
-| 检索上下文 | ⚠️ | 3 条 if-else 硬编码规则，`StateMachine` 未实际调用 `ContextBuilder._lookup_rules()` |
+| 历史记录 | ⚠️ | `HistoryManager` 已有内存写入和窗口检索；尚未持久化 |
+| 检索上下文 | ✅ | `RetrievalManager` 从 `config/rules.yaml` 加载规则，缺失时降级到内置规则 |
 
 ### 1.3 设计原则
 
@@ -60,20 +60,24 @@ C++ 插件链 (T1/T2)                 Redis Streams (T3)              Python Age
 
 ## 二、上下文组装管线
 
-### 2.1 当前问题
+### 2.1 当前落地状态
 
 ```
-DetectionEvent → StateMachine → MockProvider.analyze()
-                      │                  │
-                 创建 ReviewContext    直接读 context.prompt_context
-                 (rule_snippets=[])    (PromptAssembler 被绕过)
+DetectionEvent → StateMachine
+                      │
+                      ├─ ContextEngine.collect() → ContextPack
+                      └─ MockProvider.analyze(ContextPack)
 ```
 
-四个具体问题：
-- `prompt_context` 字符串拼接逻辑（`"\n".join(lines)`）在 `models/event.py` 的 `ReviewContext.prompt_context` 属性中，而非上下文工程模块
-- `_build_event_context()` 字符串拼接逻辑在 `prompts/assembler.py`，与 `prompt_context` 属性功能重叠
-- `PromptAssembler` 已完整实现，但 `MockProvider` 绕过了它——`service.py` 构造了 `PromptAssembler` 但从未传入 `StateMachine`
-- 工具定义永远在组装链路之外——`BaseTool` 只有 `name` + `execute`，无自描述能力
+当前已经收敛的点：
+- `ContextEngine` 已在 `StateMachine._do_context_building()` 中调用，产出 `ContextPack`
+- `UserInputBuilder` 承担事件到 user message 的主要渲染，`ReviewContext.prompt_context` 仅保留兼容路径并标记 deprecated
+- `RetrievalManager` 已接入 `config/rules.yaml`，替代旧 `ContextBuilder._lookup_rules()` 的硬编码路径
+- `BaseTool` 已具备自描述属性和 `to_definition()`，可被 `ToolDefinitionsRenderer` 渲染给后续真实 LLM
+
+仍保留的 M5 激活点：
+- `PromptAssembler` 和 `BudgetEngine` 已在 `AgentService` 中构造，但 M4 状态机仍调用 `MockProvider.analyze(context)`；真实 provider 接入时再切换到 `analyze_from_messages(messages)`
+- `ContextBuilder` 仅作为兼容旧测试和旧调用的薄包装保留
 
 ### 2.2 统一管线
 
@@ -107,7 +111,7 @@ PromptAssembler.assemble(pack)
 PromptAssembly → messages 列表
 ```
 
-> **注**：few-shot 选择保留在 `PromptAssembler`（D5），因为选择逻辑与目标 LLM 上下文窗口强相关，属于组装层而非收集层。
+> **注**：M4 已实现 `ContextEngine.collect()` 到 `ContextPack`；`BudgetEngine.allocate()` 和 `PromptAssembler.assemble()` 已可单独测试，真实模型 provider 接入前不驱动生产复核结论。
 
 ### 2.3 关键收敛
 
@@ -118,7 +122,7 @@ PromptAssembly → messages 列表
 | `_render_system_prompt()` | `prompts/assembler.py` | `SystemPromptManager` | 含分层拼接 + 版本快照 |
 | `_render_task_template()` | `prompts/assembler.py` | `UserInputBuilder` | 模板渲染逻辑内聚到输入构建器 |
 | `_lookup_rules()` | `context/builder.py` | `RetrievalManager` | `ContextBuilder` 整体废弃 |
-| `MockProvider` 直接读 `prompt_context` | `providers/mock.py` | 改为走 `ContextPack`（M4）→ `PromptAssembly`（M5） | 见第四节 Provider 双轨过渡 |
+| `MockProvider` 直接读 `prompt_context` | `providers/mock.py` | 已兼容 `ContextPack`（M4）→ `PromptAssembly`（M5） | 见第四节 Provider 双轨过渡 |
 | `SYSTEM_PROMPT_CONTENT` 重复定义 | `prompts/templates.py` | 删除，`system.py` 为 canonical source | D1 |
 
 ---
@@ -412,7 +416,7 @@ class ProviderProtocol(Protocol):
 ```
 
 - `MockProvider` 同时实现两个方法
-- `StateMachine` M4 仍调用 `analyze(context)`，传入 `ContextPack`（通过 `to_review_context()` 兼容）
+- `StateMachine` M4 仍调用 `analyze(context)`，传入 `ContextPack`（`MockProvider` 内部通过 `to_review_context()` 兼容）
 - `PromptAssembler` 在 `service.py` 中已构造，但暂未接入 `StateMachine`
 
 **M5 阶段**（真实 LLM 接入后）：
@@ -430,7 +434,7 @@ M4 阶段 `service.py` 变更：
 self._assembler = PromptAssembler(max_tokens=config.agent.prompt_max_tokens)
 self._machine = StateMachine(provider=provider, ...)
 
-# M4 优化后
+# M4 当前实现
 self._context_engine = ContextEngine(...)
 self._budget_engine = BudgetEngine()
 self._assembler = PromptAssembler(max_tokens=config.agent.prompt_max_tokens)
@@ -447,7 +451,7 @@ self._machine = StateMachine(
 
 ## 九、跨主线集成接口
 
-T1/T2/T3 接通后，以下四套 Protocol 将补充数据注入上下文。当前全部 mock（返空），将来按配置切换。
+T1/T2/T3 接通后，以下四套 Protocol 将补充数据注入上下文。当前全部 mock（返空或 `unknown`），将来按配置切换。
 
 ### 9.1 四套接口总览
 
@@ -526,7 +530,7 @@ class FilesystemEvidenceProvider:
     def get_keyframe_path(self, event): ...     # 返回真实路径
 ```
 
-**切换零改动**：`ContextEngine` 依赖 Protocol，`service.py` 工厂函数按配置字符串选择实现。
+**切换方式**：`ContextEngine` 依赖 Protocol，后续在 `service.py` 工厂函数中按配置字符串选择 mock 或真实实现。
 
 **独立切换**：四个接口互不依赖，可分别接通。空值时静默跳过，不影响其他接口。
 
@@ -585,7 +589,7 @@ agent/src/ssv_agent/
 | `prompts/logger.py` | 小改 | CallRecord 新增字段（见 10.3 节） |
 | `prompts/manager.py` | 废弃 | → SystemPromptManager |
 | `tools/base.py` | 小改 | +4 属性 + to_definition() |
-| `service.py` | 中改 | 构造 ContextEngine + BudgetEngine；传入 StateMachine |
+| `service.py` | 中改 | 构造 ContextEngine + BudgetEngine；传入 StateMachine；复核完成后记录内存历史 |
 | `state_machine/machine.py` | 中改 | _do_context_building 调用 ContextEngine.collect() |
 | `providers/mock.py` | 小改 | 新增 analyze_from_messages() |
 | `config.py` | 中改 | 新增上下文工程配置项 |
