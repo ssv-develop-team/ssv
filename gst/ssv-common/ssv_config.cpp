@@ -24,8 +24,8 @@ std::string find_config_file(const std::string& explicit_path) {
         return env_path;
 
     // Relative to working directory
-    if (std::filesystem::exists("config/ssv.default.yaml"))
-        return "config/ssv.default.yaml";
+    if (std::filesystem::exists("config/ssv.example.yaml"))
+        return "config/ssv.example.yaml";
 
     // System-wide fallback
     if (std::filesystem::exists("/etc/ssv/ssv.yaml"))
@@ -33,7 +33,7 @@ std::string find_config_file(const std::string& explicit_path) {
 
     throw std::runtime_error(
         "No config file found. Searched: SSV_CONFIG_PATH, "
-        "config/ssv.default.yaml, /etc/ssv/ssv.yaml");
+        "config/ssv.example.yaml, /etc/ssv/ssv.yaml");
 }
 
 template <typename T>

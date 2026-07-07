@@ -1,5 +1,5 @@
 # Site Safety Vision - 运行时配置文件
-# 复制此文件为 ssv.default.yaml 或设置 SSV_CONFIG_PATH 环境变量
+# 本仓库只保留这一份 YAML 示例配置；本地覆盖优先使用 .env 或 SSV_CONFIG_PATH。
 #
 # 环境变量覆盖 (优先级高于 YAML):
 #   REDIS_HOST        → redis.host
@@ -66,7 +66,7 @@ inference:
   # 推理运行时：auto 根据模型后缀选择；onnxruntime 加载 .onnx；tensorrt 加载 .engine
   runtime: "auto"
   # 模型文件路径；工程实时链路不直接加载 .pt
-  model_path: ""
+  model_path: "models/yolov8n.onnx"
   # 检测置信度阈值
   confidence_threshold: 0.5
   # 推理设备：auto、cpu、gpu
@@ -83,6 +83,21 @@ inference:
   target_class: "person"
   # 模型类别表，每行一个类别名，行号对应 class_id
   label_map: "config/model-labels/coco80.txt"
+
+# 跟踪配置（M2 起使用）
+tracking:
+  # 是否启用跟踪插件
+  enabled: true
+  # 跟踪算法使用的帧率估计
+  frame_rate: 30
+  # 保留检测进入跟踪的置信度阈值
+  track_threshold: 0.5
+  # 轨迹丢失后的保留帧数
+  track_buffer: 30
+  # IoU 匹配阈值
+  match_threshold: 0.3
+  # 无真实检测时使用 mock track
+  mock_track: false
 
 # Agent 配置（M6 起使用）
 agent:

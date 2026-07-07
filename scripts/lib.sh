@@ -18,7 +18,7 @@ if [ -f "$SSV_ROOT/.env" ]; then
     done < "$SSV_ROOT/.env"
 fi
 
-SSV_CONFIG="${SSV_CONFIG_PATH:-$SSV_ROOT/config/ssv.default.yaml}"
+SSV_CONFIG="${SSV_CONFIG_PATH:-$SSV_ROOT/config/ssv.example.yaml}"
 SSV_ONNXRUNTIME_FLAVOR="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
 SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime"
 if [ "$SSV_ONNXRUNTIME_FLAVOR" = "gpu" ]; then

@@ -19,7 +19,7 @@ def main() -> None:
         "--config",
         type=str,
         default=None,
-        help="Path to YAML config file (default: SSV_CONFIG_PATH or ../config/ssv.default.yaml)",
+        help="Path to YAML config file (default: SSV_CONFIG_PATH or ../config/ssv.example.yaml)",
     )
     parser.add_argument(
         "--log-level",
@@ -32,7 +32,7 @@ def main() -> None:
     config_path = args.config or os.environ.get("SSV_CONFIG_PATH")
     if config_path is None:
         # Default: look relative to agent package
-        candidate = Path(__file__).resolve().parent.parent.parent.parent / "config" / "ssv.default.yaml"
+        candidate = Path(__file__).resolve().parent.parent.parent.parent / "config" / "ssv.example.yaml"
         if candidate.exists():
             config_path = str(candidate)
 

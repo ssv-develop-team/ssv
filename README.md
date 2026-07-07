@@ -124,7 +124,7 @@ cp .env.example .env
 
 ## 配置
 
-长期配置入口是 `config/ssv.default.yaml`。本地开发覆盖使用 `.env`，由 shell 脚本和 Python Agent 加载。首次运行前复制模板：
+YAML 示例配置只保留 `config/ssv.example.yaml`。本地开发覆盖使用 `.env`，由 shell 脚本和 Python Agent 加载。首次运行前复制模板：
 
 ```bash
 cp .env.example .env
@@ -134,7 +134,7 @@ cp .env.example .env
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
-| `SSV_CONFIG_PATH` | YAML 配置文件路径 | `config/ssv.default.yaml` |
+| `SSV_CONFIG_PATH` | YAML 配置文件路径 | `config/ssv.example.yaml` |
 | `SSV_RTSP_URL` | RTSP 视频源地址 | 无，必须设置 |
 | `SSV_MODEL_PATH` | YOLO ONNX 模型路径 | `models/yolov8n.onnx` |
 | `SSV_CHECK_TIMEOUT` | `./ssv test` 中 smoke 阶段超时时间 | `30s` |
