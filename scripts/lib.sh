@@ -19,15 +19,8 @@ if [ -f "$SSV_ROOT/.env" ]; then
 fi
 
 SSV_CONFIG="${SSV_CONFIG_PATH:-$SSV_ROOT/config/ssv.default.yaml}"
-SSV_ONNXRUNTIME_FLAVOR="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
-SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime"
-if [ "$SSV_ONNXRUNTIME_FLAVOR" = "gpu" ]; then
-    SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime-gpu"
-elif [ "$SSV_ONNXRUNTIME_FLAVOR" != "cpu" ]; then
-    echo "[SSV] unsupported SSV_ONNXRUNTIME_FLAVOR: $SSV_ONNXRUNTIME_FLAVOR (expected cpu or gpu)" >&2
-    exit 1
-fi
-SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-$SSV_ONNXRUNTIME_DEFAULT_ROOT}"
+source "$SSV_ROOT/scripts/runtime/onnxruntime.sh"
+source "$SSV_ROOT/scripts/runtime/cuda.sh"
 SSV_BUILD_DIR="${SSV_BUILD_DIR:-$SSV_ROOT/build}"
 SSV_PLUGIN_DIR="$SSV_BUILD_DIR/gst/ssv-template"
 
@@ -45,24 +38,13 @@ append_ld_path_if_dir() {
     fi
 }
 
-append_nvidia_wheel_libs() {
-    local site_packages
-    for site_packages in "$SSV_ROOT"/.venv/lib/python*/site-packages; do
-        [ -d "$site_packages/nvidia" ] || continue
-        local lib_dir
-        for lib_dir in "$site_packages"/nvidia/*/lib; do
-            append_ld_path_if_dir "$lib_dir"
-        done
-    done
-}
-
 # 导出 GST_PLUGIN_PATH 和 LD_LIBRARY_PATH
 export_ssv_plugin_path() {
     export GST_PLUGIN_PATH="$SSV_PLUGIN_PATHS"
     # ssv-common 是共享库，需要让动态链接器能找到
     SSV_LD_PATHS="$SSV_BUILD_DIR/gst/ssv-common"
     append_ld_path_if_dir "$SSV_ONNXRUNTIME_ROOT/lib"
-    append_nvidia_wheel_libs
+    append_ssv_cuda_wheel_libs
     export LD_LIBRARY_PATH="$SSV_LD_PATHS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 }
 

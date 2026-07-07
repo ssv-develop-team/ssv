@@ -1,12 +1,19 @@
+#include "ssv_config.hpp"
 #include "ssv_meta.hpp"
+#include "../ssv-infer/provider/runtime.hpp"
+#include "../ssv-infer/provider/onnx_gpu_runtime.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <memory>
+#include <string>
 
 #include <gst/check/gstcheck.h>
 #include <gst/gst.h>
 #include <gst/app/app.h>
 #include <gst/video/video.h>
-
-#include <cstring>
-#include <string>
 
 extern void run_ssv_meta_tests();
 
@@ -46,39 +53,111 @@ GST_START_TEST(test_ssvinfer_exposes_label_map_property) {
 }
 GST_END_TEST
 
-GST_START_TEST(test_ssvinfer_exposes_device_properties) {
+GST_START_TEST(test_ssv_config_reads_runtime_and_device_options) {
+    const char *path = "/tmp/ssv-runtime-config.yaml";
+    std::ofstream out(path);
+    out << "runtime:\n"
+           "  backend: \"onnx\"\n"
+           "  device: \"gpu\"\n"
+           "inference:\n"
+           "  model_path: \"models/yolov8n.onnx\"\n"
+           "  confidence_threshold: 0.6\n";
+    out.close();
+
+    ssv::SsvConfig cfg = ssv::ssv_config_load(path);
+    fail_unless(cfg.runtime_backend == "onnx");
+    fail_unless(cfg.runtime_device == "gpu");
+    fail_unless(cfg.confidence_threshold == 0.6f);
+
+    std::remove(path);
+}
+GST_END_TEST
+
+GST_START_TEST(test_runtime_factory_accepts_onnx_cpu) {
+    std::string error;
+
+    std::unique_ptr<ssv::provider::Runtime> runtime =
+        ssv::provider::create_runtime("onnx", "cpu", &error);
+    fail_unless(runtime != nullptr);
+    fail_unless(error.empty());
+
+    Ort::SessionOptions options;
+    ssv::provider::RuntimeStatus status;
+    fail_unless(runtime->configure(options, &status, &error));
+    fail_unless(status.requested_runtime == "onnx");
+    fail_unless(status.active_runtime == "CPUExecutionProvider");
+}
+GST_END_TEST
+
+GST_START_TEST(test_runtime_factory_rejects_unknown_device) {
+    std::string error;
+
+    std::unique_ptr<ssv::provider::Runtime> runtime =
+        ssv::provider::create_runtime("onnx", "auto", &error);
+    fail_unless(runtime == nullptr);
+    fail_unless(error == "unsupported inference device: auto");
+}
+GST_END_TEST
+
+GST_START_TEST(test_runtime_factory_uses_default_cuda_env_device_id) {
+    unsetenv("SSV_INFER_CUDA_DEVICE_ID");
+
+    int device_id = -1;
+    std::string error;
+    fail_unless(ssv::provider::read_cuda_device_id_from_env(&device_id, &error));
+    fail_unless(device_id == 0);
+    fail_unless(error.empty());
+
+    std::unique_ptr<ssv::provider::Runtime> runtime =
+        ssv::provider::create_runtime("onnx", "gpu", &error);
+    fail_unless(runtime != nullptr);
+    fail_unless(error.empty());
+}
+GST_END_TEST
+
+GST_START_TEST(test_runtime_factory_rejects_invalid_cuda_env_device_id) {
+    setenv("SSV_INFER_CUDA_DEVICE_ID", "abc", 1);
+
+    std::string error;
+    int device_id = -1;
+    fail_if(ssv::provider::read_cuda_device_id_from_env(&device_id, &error));
+    fail_unless(error.find("SSV_INFER_CUDA_DEVICE_ID") != std::string::npos);
+    unsetenv("SSV_INFER_CUDA_DEVICE_ID");
+}
+GST_END_TEST
+
+GST_START_TEST(test_ssvinfer_exposes_runtime_properties) {
     GstElement *element = gst_element_factory_make("ssvinfer", nullptr);
     fail_unless(element != nullptr);
 
+    gchar *runtime = nullptr;
     gchar *device = nullptr;
-    gboolean cuda_required = TRUE;
-    gint cuda_device_id = -1;
     g_object_get(element,
+        "runtime", &runtime,
         "device", &device,
-        "cuda-device-id", &cuda_device_id,
-        "cuda-required", &cuda_required,
         nullptr);
+    fail_unless(runtime != nullptr);
     fail_unless(device != nullptr);
-    fail_unless(std::string(device) == "auto");
-    fail_unless(cuda_device_id == 0);
-    fail_unless(cuda_required == FALSE);
+    fail_unless(std::string(runtime) == "onnx");
+    fail_unless(std::string(device) == "cpu");
+    fail_unless(g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id") == nullptr);
+    g_free(runtime);
     g_free(device);
 
     g_object_set(element,
-        "device", "cuda",
-        "cuda-device-id", 1,
-        "cuda-required", TRUE,
+        "runtime", "onnx",
+        "device", "gpu",
         nullptr);
     g_object_get(element,
+        "runtime", &runtime,
         "device", &device,
-        "cuda-device-id", &cuda_device_id,
-        "cuda-required", &cuda_required,
         nullptr);
+    fail_unless(runtime != nullptr);
     fail_unless(device != nullptr);
-    fail_unless(std::string(device) == "cuda");
-    fail_unless(cuda_device_id == 1);
-    fail_unless(cuda_required == TRUE);
+    fail_unless(std::string(runtime) == "onnx");
+    fail_unless(std::string(device) == "gpu");
 
+    g_free(runtime);
     g_free(device);
     gst_object_unref(element);
 }
@@ -188,7 +267,12 @@ static Suite *ssv_gst_suite() {
     TCase *tc = tcase_create("plugins");
     tcase_add_test(tc, test_ssv_plugin_factories_are_registered);
     tcase_add_test(tc, test_ssvinfer_exposes_label_map_property);
-    tcase_add_test(tc, test_ssvinfer_exposes_device_properties);
+    tcase_add_test(tc, test_ssv_config_reads_runtime_and_device_options);
+    tcase_add_test(tc, test_runtime_factory_accepts_onnx_cpu);
+    tcase_add_test(tc, test_runtime_factory_rejects_unknown_device);
+    tcase_add_test(tc, test_runtime_factory_uses_default_cuda_env_device_id);
+    tcase_add_test(tc, test_runtime_factory_rejects_invalid_cuda_env_device_id);
+    tcase_add_test(tc, test_ssvinfer_exposes_runtime_properties);
     tcase_add_test(tc, test_ssvoverlay_runs_on_rgb_buffer);
     tcase_add_test(tc, test_ssvoverlay_runs_on_bgrx_buffer);
     tcase_add_test(tc, test_ssvoverlay_draws_latest_detection);

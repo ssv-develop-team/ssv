@@ -8,9 +8,9 @@
 #   SSV_DISPLAY_SINK  → display.sink
 #   SSV_TARGET_CLASS   → inference.target_class
 #   SSV_LABEL_MAP      → inference.label_map
-#   SSV_INFER_DEVICE   → inference.device
-#   SSV_CUDA_DEVICE_ID → inference.cuda_device_id
-#   SSV_CUDA_REQUIRED  → inference.cuda_required
+#   SSV_RUNTIME_BACKEND   → runtime.backend
+#   SSV_RUNTIME_DEVICE    → runtime.device
+#   SSV_INFER_CUDA_DEVICE_ID → 仅在 runtime.device=gpu 时生效
 
 # 配置版本号
 version: "1.0"
@@ -58,18 +58,19 @@ pipeline:
   # 分析帧高度
   frame_height: 480
 
-# 推理配置（M3 起使用）
+# Runtime 配置（M3 起使用）
+runtime:
+  # 推理后端：onnx
+  backend: "onnx"
+  # 推理设备：cpu / gpu
+  device: "cpu"
+
+# Inference 配置（M3 起使用）
 inference:
   # YOLO ONNX 模型文件路径；工程实时链路不直接加载 .pt
   model_path: ""
   # 检测置信度阈值
   confidence_threshold: 0.5
-  # 推理设备：auto 优先 CUDA 并可回退 CPU；cpu 只使用 CPU；cuda 尝试 CUDA
-  device: "auto"
-  # CUDA 设备编号，device 为 auto/cuda 时生效
-  cuda_device_id: 0
-  # CUDA 不可用时是否启动失败；false 表示回退 CPU
-  cuda_required: false
   # 只输出指定类别；空字符串表示不过滤
   target_class: "person"
   # 模型类别表，每行一个类别名，行号对应 class_id

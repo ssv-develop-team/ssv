@@ -1,4 +1,5 @@
 #include "gstssvinfer.hpp"
+#include "provider/runtime.hpp"
 #include "ssv_logging.hpp"
 #include "ssv_meta.hpp"
 
@@ -8,7 +9,6 @@
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
-#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -54,9 +54,8 @@ struct _SsvInfer {
     gfloat conf_threshold;
     gchar *target_class;
     gchar *label_map_path;
+    gchar *runtime;
     gchar *device;
-    gint cuda_device_id;
-    gboolean cuda_required;
     std::vector<std::string> *label_names;
     int target_class_id;
 
@@ -90,9 +89,8 @@ enum {
     PROP_CONF_THRESHOLD,
     PROP_TARGET_CLASS,
     PROP_LABEL_MAP,
+    PROP_RUNTIME,
     PROP_DEVICE,
-    PROP_CUDA_DEVICE_ID,
-    PROP_CUDA_REQUIRED,
     PROP_MOCK_DETECT,
     PROP_ASYNC_INFER,
 };
@@ -190,24 +188,6 @@ load_label_map_file(const char *path, std::vector<std::string> *labels, std::str
         return false;
     }
     return true;
-}
-
-static bool
-str_equal(const char *left, const char *right)
-{
-    return left && right && std::strcmp(left, right) == 0;
-}
-
-static bool
-use_cuda_requested(const char *device)
-{
-    return str_equal(device, "auto") || str_equal(device, "cuda");
-}
-
-static bool
-use_cpu_only(const char *device)
-{
-    return str_equal(device, "cpu");
 }
 
 static int
@@ -510,39 +490,31 @@ ssv_infer_start(GstBaseTransform *trans) {
         opts.SetIntraOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        const char *requested_device = self->device ? self->device : "auto";
-        if (!use_cpu_only(requested_device) && !use_cuda_requested(requested_device)) {
-            GST_ERROR_OBJECT(self, "unsupported inference device: %s", requested_device);
+        std::string runtime_backend = self->runtime ? self->runtime : "onnx";
+        std::string runtime_device = self->device ? self->device : "cpu";
+
+        std::string provider_error;
+        std::unique_ptr<ssv::provider::Runtime> runtime =
+            ssv::provider::create_runtime(runtime_backend, runtime_device, &provider_error);
+        if (!runtime) {
+            GST_ERROR_OBJECT(self, "Failed to create runtime: %s", provider_error.c_str());
             return FALSE;
         }
 
-        bool cuda_enabled = false;
-        if (use_cuda_requested(requested_device)) {
-            try {
-                OrtCUDAProviderOptions cuda_options{};
-                cuda_options.device_id = self->cuda_device_id;
-                opts.AppendExecutionProvider_CUDA(cuda_options);
-                cuda_enabled = true;
-                GST_INFO_OBJECT(self,
-                    "ONNX Runtime provider requested=%s active=CUDAExecutionProvider device_id=%d",
-                    requested_device, self->cuda_device_id);
-            } catch (const Ort::Exception &e) {
-                if (self->cuda_required) {
-                    GST_ERROR_OBJECT(self,
-                        "CUDAExecutionProvider unavailable and required: %s", e.what());
-                    return FALSE;
-                }
-                GST_WARNING_OBJECT(self,
-                    "CUDAExecutionProvider unavailable, falling back to CPUExecutionProvider: %s",
-                    e.what());
-            }
+        ssv::provider::RuntimeStatus provider_status;
+        if (!runtime->configure(opts, &provider_status, &provider_error)) {
+            GST_ERROR_OBJECT(self, "Failed to configure runtime %s/%s: %s",
+                runtime_backend.c_str(),
+                runtime_device.c_str(),
+                provider_error.c_str());
+            return FALSE;
         }
 
-        if (!cuda_enabled) {
-            GST_INFO_OBJECT(self,
-                "ONNX Runtime provider requested=%s active=CPUExecutionProvider",
-                requested_device);
-        }
+        GST_INFO_OBJECT(self,
+            "ONNX Runtime provider requested=%s/%s active=%s",
+            runtime_backend.c_str(),
+            runtime_device.c_str(),
+            provider_status.active_runtime.c_str());
 
         self->ort_session = new Ort::Session(*self->ort_env, self->model_path, opts);
         self->mem_info = new Ort::MemoryInfo(
@@ -812,15 +784,13 @@ ssv_infer_set_property(GObject *object, guint prop_id,
         g_free(self->label_map_path);
         self->label_map_path = g_value_dup_string(value);
         break;
+    case PROP_RUNTIME:
+        g_free(self->runtime);
+        self->runtime = g_value_dup_string(value);
+        break;
     case PROP_DEVICE:
         g_free(self->device);
         self->device = g_value_dup_string(value);
-        break;
-    case PROP_CUDA_DEVICE_ID:
-        self->cuda_device_id = g_value_get_int(value);
-        break;
-    case PROP_CUDA_REQUIRED:
-        self->cuda_required = g_value_get_boolean(value);
         break;
     case PROP_MOCK_DETECT:
         self->mock_detect = g_value_get_boolean(value);
@@ -850,14 +820,11 @@ ssv_infer_get_property(GObject *object, guint prop_id,
     case PROP_LABEL_MAP:
         g_value_set_string(value, self->label_map_path);
         break;
+    case PROP_RUNTIME:
+        g_value_set_string(value, self->runtime);
+        break;
     case PROP_DEVICE:
         g_value_set_string(value, self->device);
-        break;
-    case PROP_CUDA_DEVICE_ID:
-        g_value_set_int(value, self->cuda_device_id);
-        break;
-    case PROP_CUDA_REQUIRED:
-        g_value_set_boolean(value, self->cuda_required);
         break;
     case PROP_MOCK_DETECT:
         g_value_set_boolean(value, self->mock_detect);
@@ -878,6 +845,7 @@ ssv_infer_finalize(GObject *object) {
     g_free(self->model_path);
     g_free(self->target_class);
     g_free(self->label_map_path);
+    g_free(self->runtime);
     g_free(self->device);
     delete self->label_names;
     delete self->input_name;
@@ -922,21 +890,15 @@ ssv_infer_class_init(SsvInferClass *klass) {
             "Path to model class label map file",
             nullptr, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+    g_object_class_install_property(gobject_class, PROP_RUNTIME,
+        g_param_spec_string("runtime", "Runtime",
+            "Inference runtime stack: onnx",
+            "onnx", (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
     g_object_class_install_property(gobject_class, PROP_DEVICE,
-        g_param_spec_string("device", "Inference Device",
-            "ONNX Runtime execution device: auto, cpu, or cuda",
-            "auto", (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
-
-    g_object_class_install_property(gobject_class, PROP_CUDA_DEVICE_ID,
-        g_param_spec_int("cuda-device-id", "CUDA Device ID",
-            "CUDA device id used when CUDAExecutionProvider is enabled",
-            0, G_MAXINT, 0,
-            (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
-
-    g_object_class_install_property(gobject_class, PROP_CUDA_REQUIRED,
-        g_param_spec_boolean("cuda-required", "CUDA Required",
-            "Fail startup when CUDAExecutionProvider cannot be enabled",
-            FALSE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+        g_param_spec_string("device", "Device",
+            "Inference device used by the runtime stack: cpu or gpu",
+            "cpu", (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
     g_object_class_install_property(gobject_class, PROP_MOCK_DETECT,
         g_param_spec_boolean("mock-detect", "Mock Detect",
@@ -969,9 +931,8 @@ ssv_infer_init(SsvInfer *self) {
     self->conf_threshold = 0.5f;
     self->target_class = g_strdup("");
     self->label_map_path = nullptr;
-    self->device = g_strdup("auto");
-    self->cuda_device_id = 0;
-    self->cuda_required = FALSE;
+    self->runtime = g_strdup("onnx");
+    self->device = g_strdup("cpu");
     self->label_names = new std::vector<std::string>(default_coco_labels());
     self->target_class_id = 0;
     self->ort_env = nullptr;

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+SSV_ONNXRUNTIME_FLAVOR="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
+SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime"
+if [ "$SSV_ONNXRUNTIME_FLAVOR" = "gpu" ]; then
+    SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime-gpu"
+elif [ "$SSV_ONNXRUNTIME_FLAVOR" != "cpu" ]; then
+    echo "[SSV] unsupported SSV_ONNXRUNTIME_FLAVOR: $SSV_ONNXRUNTIME_FLAVOR (expected cpu or gpu)" >&2
+    exit 1
+fi
+SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-$SSV_ONNXRUNTIME_DEFAULT_ROOT}"

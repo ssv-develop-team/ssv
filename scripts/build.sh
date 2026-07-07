@@ -16,15 +16,8 @@ flock 9
 
 ensure_onnxruntime() {
     local version="${SSV_ONNXRUNTIME_VERSION:-1.25.1}"
-    local flavor="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
-    local default_root="$SSV_ROOT/.deps/onnxruntime"
-    if [ "$flavor" = "gpu" ]; then
-        default_root="$SSV_ROOT/.deps/onnxruntime-gpu"
-    elif [ "$flavor" != "cpu" ]; then
-        ssv_error "unsupported SSV_ONNXRUNTIME_FLAVOR: $flavor (expected cpu or gpu)"
-        return 1
-    fi
-    local root="${SSV_ONNXRUNTIME_ROOT:-$default_root}"
+    local flavor="$SSV_ONNXRUNTIME_FLAVOR"
+    local root="$SSV_ONNXRUNTIME_ROOT"
     local pc_file="$root/lib/pkgconfig/onnxruntime.pc"
 
     if [ "$flavor" = "cpu" ] && pkg-config --exists onnxruntime; then
