@@ -130,24 +130,20 @@ YAML 示例配置只保留 `config/ssv.example.yaml`。本地开发覆盖使用 
 cp .env.example .env
 ```
 
-常用环境变量：
+常用配置优先写入 `config/ssv.example.yaml`：模型路径、推理 runtime/device、分析分辨率、Redis 地址和显示 sink 都由 YAML 提供默认值。`.env` 主要保留本地运行、构建和调试覆盖：
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
 | `SSV_CONFIG_PATH` | YAML 配置文件路径 | `config/ssv.example.yaml` |
 | `SSV_RTSP_URL` | RTSP 视频源地址 | 无，必须设置 |
-| `SSV_MODEL_PATH` | YOLO ONNX 模型路径 | `models/yolov8n.onnx` |
+| `SSV_RTSP_PROTOCOLS` | RTSP transport | `tcp` |
+| `SSV_RTSP_LATENCY` | RTSP jitter buffer 延迟 | `200` |
 | `SSV_CHECK_TIMEOUT` | `./ssv test` 中 smoke 阶段超时时间 | `30s` |
 | `GST_DEBUG` | GStreamer 调试级别 | `ssv*:4` |
-| `SSV_DISPLAY_SINK` | 显示 sink | 自动选择 |
 | `SSV_DISPLAY_OVERLAY` | 是否默认开启 overlay | `false` |
-| `SSV_FRAME_WIDTH` | 分析帧宽度 | `640` |
-| `SSV_FRAME_HEIGHT` | 分析帧高度 | `480` |
-| `SSV_ANALYSIS_FPS` | 分析帧率 | `5` |
 | `SSV_DISPLAY_FPS` | 显示帧率 | `30` |
-| `REDIS_HOST` | Redis 地址 | `localhost` |
-| `REDIS_PORT` | Redis 端口 | `6379` |
-| `SSV_REDIS_STREAM_KEY` | Redis Stream key | `ssv:events` |
+
+脚本仍支持 `SSV_MODEL_PATH`、`SSV_INFER_DEVICE`、`REDIS_HOST` 等环境变量作为临时覆盖，但默认值不再在 `.env.example` 中重复维护。
 
 ONNX Runtime 下载和路径覆盖：
 

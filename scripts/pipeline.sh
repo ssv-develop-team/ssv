@@ -90,9 +90,9 @@ if [ -z "$RTSP_URL" ]; then
     exit 1
 fi
 
-MODEL="${SSV_MODEL_PATH:-models/yolov8n.onnx}"
-TARGET_CLASS="${SSV_TARGET_CLASS-person}"
-LABEL_MAP="${SSV_LABEL_MAP:-config/model-labels/coco80.txt}"
+MODEL="${SSV_MODEL_PATH:-$(ssv_yaml_get inference.model_path models/yolov8n.onnx)}"
+TARGET_CLASS="${SSV_TARGET_CLASS-$(ssv_yaml_get inference.target_class person)}"
+LABEL_MAP="${SSV_LABEL_MAP:-$(ssv_yaml_get inference.label_map config/model-labels/coco80.txt)}"
 if [ ! -f "$MODEL" ]; then
     ssv_error "模型文件不存在: $MODEL"
     ssv_warn "运行 ./ssv download-model 下载模型，或设置 SSV_MODEL_PATH"
@@ -111,22 +111,22 @@ if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ssv-redis$'; then
     sleep 2
 fi
 
-FRAME_WIDTH="${SSV_FRAME_WIDTH:-640}"
-FRAME_HEIGHT="${SSV_FRAME_HEIGHT:-480}"
+FRAME_WIDTH="${SSV_FRAME_WIDTH:-$(ssv_yaml_get pipeline.frame_width 640)}"
+FRAME_HEIGHT="${SSV_FRAME_HEIGHT:-$(ssv_yaml_get pipeline.frame_height 480)}"
 DISPLAY_FPS="${SSV_DISPLAY_FPS:-30}"
-ANALYSIS_FPS="${SSV_ANALYSIS_FPS:-5}"
-CONF_THRESHOLD="${SSV_CONF_THRESHOLD:-0.5}"
-INFER_RUNTIME="${SSV_INFER_RUNTIME:-auto}"
-INFER_DEVICE="${SSV_INFER_DEVICE:-auto}"
-INFER_DEVICE_ID="${SSV_INFER_DEVICE_ID:-0}"
-INFER_PRECISION="${SSV_INFER_PRECISION:-auto}"
-MODEL_FAMILY="${SSV_MODEL_FAMILY:-yolo}"
-OUTPUT_FORMAT="${SSV_OUTPUT_FORMAT:-auto}"
+ANALYSIS_FPS="${SSV_ANALYSIS_FPS:-$(ssv_yaml_get pipeline.analysis_fps 5)}"
+CONF_THRESHOLD="${SSV_CONF_THRESHOLD:-$(ssv_yaml_get inference.confidence_threshold 0.5)}"
+INFER_RUNTIME="${SSV_INFER_RUNTIME:-$(ssv_yaml_get inference.runtime auto)}"
+INFER_DEVICE="${SSV_INFER_DEVICE:-$(ssv_yaml_get inference.device auto)}"
+INFER_DEVICE_ID="${SSV_INFER_DEVICE_ID:-$(ssv_yaml_get inference.device_id 0)}"
+INFER_PRECISION="${SSV_INFER_PRECISION:-$(ssv_yaml_get inference.precision auto)}"
+MODEL_FAMILY="${SSV_MODEL_FAMILY:-$(ssv_yaml_get inference.model_family yolo)}"
+OUTPUT_FORMAT="${SSV_OUTPUT_FORMAT:-$(ssv_yaml_get inference.output_format auto)}"
 RTSP_PROTOCOLS="${SSV_RTSP_PROTOCOLS:-tcp}"
 RTSP_LATENCY="${SSV_RTSP_LATENCY:-200}"
-REDIS_HOST="${REDIS_HOST:-localhost}"
-REDIS_PORT="${REDIS_PORT:-6379}"
-REDIS_STREAM_KEY="${SSV_REDIS_STREAM_KEY:-ssv:events}"
+REDIS_HOST="${REDIS_HOST:-$(ssv_yaml_get redis.host localhost)}"
+REDIS_PORT="${REDIS_PORT:-$(ssv_yaml_get redis.port 6379)}"
+REDIS_STREAM_KEY="${SSV_REDIS_STREAM_KEY:-$(ssv_yaml_get redis.stream_key ssv:events)}"
 CHECK_TIMEOUT="${SSV_CHECK_TIMEOUT:-30s}"
 
 resolve_display_sink() {
@@ -137,6 +137,13 @@ resolve_display_sink() {
 
     if [ -n "${SSV_DISPLAY_SINK:-}" ]; then
         echo "$SSV_DISPLAY_SINK"
+        return 0
+    fi
+
+    local yaml_sink
+    yaml_sink="$(ssv_yaml_get display.sink "")"
+    if [ -n "$yaml_sink" ]; then
+        echo "$yaml_sink"
         return 0
     fi
 
