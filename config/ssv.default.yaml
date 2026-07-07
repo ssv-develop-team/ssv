@@ -23,13 +23,14 @@ pipeline:
   frame_height: 480
 
 inference:
+  runtime: "auto"
   model_path: "models/yolov8n.onnx"
   confidence_threshold: 0.5
   device: "auto"
-  # CUDA 设备编号，device 为 auto/cuda 时生效
-  cuda_device_id: 0
-  # CUDA 不可用时是否启动失败；false 表示回退 CPU
-  cuda_required: false
+  device_id: 0
+  precision: "auto"
+  model_family: "yolo"
+  output_format: "auto"
   target_class: "person"
   label_map: "config/model-labels/coco80.txt"
 

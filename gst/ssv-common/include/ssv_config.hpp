@@ -26,11 +26,14 @@ struct SsvConfig {
     int frame_height = 480;
 
     // Inference
+    std::string runtime = "auto";
     std::string model_path;
     float confidence_threshold = 0.5f;
     std::string device = "auto";
-    int cuda_device_id = 0;
-    bool cuda_required = false;
+    int device_id = 0;
+    std::string precision = "auto";
+    std::string model_family = "yolo";
+    std::string output_format = "auto";
     std::string target_class = "person";
     std::string label_map = "config/model-labels/coco80.txt";
 

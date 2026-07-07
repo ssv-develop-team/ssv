@@ -1,4 +1,6 @@
 #include "ssv_meta.hpp"
+#include "ssv_preprocessor.hpp"
+#include "ssv_yolo_parser.hpp"
 
 #include <gst/check/gstcheck.h>
 #include <gst/gst.h>
@@ -6,6 +8,7 @@
 #include <gst/video/video.h>
 
 #include <cstring>
+#include <cmath>
 #include <string>
 
 extern void run_ssv_meta_tests();
@@ -46,41 +49,139 @@ GST_START_TEST(test_ssvinfer_exposes_label_map_property) {
 }
 GST_END_TEST
 
-GST_START_TEST(test_ssvinfer_exposes_device_properties) {
+GST_START_TEST(test_ssvinfer_exposes_runtime_properties) {
     GstElement *element = gst_element_factory_make("ssvinfer", nullptr);
     fail_unless(element != nullptr);
 
+    gchar *runtime = nullptr;
     gchar *device = nullptr;
-    gboolean cuda_required = TRUE;
-    gint cuda_device_id = -1;
+    gchar *precision = nullptr;
+    gchar *model_family = nullptr;
+    gchar *output_format = nullptr;
+    gint device_id = -1;
     g_object_get(element,
+        "runtime", &runtime,
         "device", &device,
-        "cuda-device-id", &cuda_device_id,
-        "cuda-required", &cuda_required,
+        "device-id", &device_id,
+        "precision", &precision,
+        "model-family", &model_family,
+        "output-format", &output_format,
         nullptr);
+    fail_unless(runtime != nullptr);
+    fail_unless(std::string(runtime) == "auto");
     fail_unless(device != nullptr);
     fail_unless(std::string(device) == "auto");
-    fail_unless(cuda_device_id == 0);
-    fail_unless(cuda_required == FALSE);
+    fail_unless(device_id == 0);
+    fail_unless(precision != nullptr);
+    fail_unless(std::string(precision) == "auto");
+    fail_unless(model_family != nullptr);
+    fail_unless(std::string(model_family) == "yolo");
+    fail_unless(output_format != nullptr);
+    fail_unless(std::string(output_format) == "auto");
+    g_free(runtime);
     g_free(device);
+    g_free(precision);
+    g_free(model_family);
+    g_free(output_format);
 
     g_object_set(element,
-        "device", "cuda",
-        "cuda-device-id", 1,
-        "cuda-required", TRUE,
+        "runtime", "onnxruntime",
+        "device", "gpu",
+        "device-id", 1,
+        "precision", "fp32",
+        "model-family", "yolo",
+        "output-format", "yolov8",
         nullptr);
     g_object_get(element,
+        "runtime", &runtime,
         "device", &device,
-        "cuda-device-id", &cuda_device_id,
-        "cuda-required", &cuda_required,
+        "device-id", &device_id,
+        "precision", &precision,
+        "model-family", &model_family,
+        "output-format", &output_format,
         nullptr);
+    fail_unless(runtime != nullptr);
+    fail_unless(std::string(runtime) == "onnxruntime");
     fail_unless(device != nullptr);
-    fail_unless(std::string(device) == "cuda");
-    fail_unless(cuda_device_id == 1);
-    fail_unless(cuda_required == TRUE);
+    fail_unless(std::string(device) == "gpu");
+    fail_unless(device_id == 1);
+    fail_unless(precision != nullptr);
+    fail_unless(std::string(precision) == "fp32");
+    fail_unless(model_family != nullptr);
+    fail_unless(std::string(model_family) == "yolo");
+    fail_unless(output_format != nullptr);
+    fail_unless(std::string(output_format) == "yolov8");
 
+    fail_unless(g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id") == nullptr);
+    fail_unless(g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-required") == nullptr);
+
+    g_free(runtime);
     g_free(device);
+    g_free(precision);
+    g_free(model_family);
+    g_free(output_format);
     gst_object_unref(element);
+}
+GST_END_TEST
+
+GST_START_TEST(test_ssvinfer_preprocessor_outputs_nchw_rgb_tensor) {
+    ssv::infer::SsvVideoFrame frame;
+    frame.frame_id = 1;
+    frame.source_id = "unit-test";
+    frame.width = 1;
+    frame.height = 1;
+    frame.stride = 3;
+    frame.bgr = {10, 20, 30};
+
+    ssv::infer::TensorSpec input;
+    input.name = "images";
+    input.shape = {1, 3, 1, 1};
+    input.layout = ssv::infer::TensorLayout::Nchw;
+
+    ssv::infer::Preprocessor preprocessor;
+    auto result = preprocessor.run(frame, input);
+
+    fail_unless(result.input.host_data.size() == 3);
+    fail_unless(std::fabs(result.input.host_data[0] - (30.0f / 255.0f)) < 0.0001f);
+    fail_unless(std::fabs(result.input.host_data[1] - (20.0f / 255.0f)) < 0.0001f);
+    fail_unless(std::fabs(result.input.host_data[2] - (10.0f / 255.0f)) < 0.0001f);
+}
+GST_END_TEST
+
+GST_START_TEST(test_ssvinfer_yolo_parser_parses_nx6_output) {
+    ssv::infer::InferenceConfig config;
+    config.output_format = ssv::infer::OutputFormat::YoloNx6;
+    config.confidence_threshold = 0.5f;
+    config.target_class = "head";
+
+    ssv::infer::ModelMetadata metadata;
+    ssv::infer::TensorSpec output_spec;
+    output_spec.name = "output0";
+    output_spec.shape = {1, 2, 6};
+    metadata.outputs.push_back(output_spec);
+
+    ssv::infer::YoloOutputParser parser;
+    parser.configure(config, metadata, {"helmet", "head"});
+
+    ssv::infer::Tensor output;
+    output.spec = output_spec;
+    output.host_data = {
+        0.1f, 0.2f, 0.4f, 0.8f, 0.9f, 1.0f,
+        0.2f, 0.2f, 0.5f, 0.8f, 0.4f, 1.0f,
+    };
+
+    ssv::infer::PreprocessResult preprocess;
+    preprocess.original_width = 640;
+    preprocess.original_height = 640;
+    preprocess.model_width = 640;
+    preprocess.model_height = 640;
+
+    auto detections = parser.parse({output}, preprocess);
+
+    fail_unless(detections.size() == 1);
+    fail_unless(detections[0].class_id == 1);
+    fail_unless(std::string(detections[0].class_name) == "head");
+    fail_unless(std::fabs(detections[0].confidence - 0.9f) < 0.0001f);
 }
 GST_END_TEST
 
@@ -188,7 +289,9 @@ static Suite *ssv_gst_suite() {
     TCase *tc = tcase_create("plugins");
     tcase_add_test(tc, test_ssv_plugin_factories_are_registered);
     tcase_add_test(tc, test_ssvinfer_exposes_label_map_property);
-    tcase_add_test(tc, test_ssvinfer_exposes_device_properties);
+    tcase_add_test(tc, test_ssvinfer_exposes_runtime_properties);
+    tcase_add_test(tc, test_ssvinfer_preprocessor_outputs_nchw_rgb_tensor);
+    tcase_add_test(tc, test_ssvinfer_yolo_parser_parses_nx6_output);
     tcase_add_test(tc, test_ssvoverlay_runs_on_rgb_buffer);
     tcase_add_test(tc, test_ssvoverlay_runs_on_bgrx_buffer);
     tcase_add_test(tc, test_ssvoverlay_draws_latest_detection);

@@ -32,10 +32,16 @@ class PipelineConfig(BaseModel):
 
 
 class InferenceConfig(BaseModel):
+    runtime: str = "auto"
     model_path: str = ""
     confidence_threshold: float = 0.5
-    device: str = "cpu"
+    device: str = "auto"
+    device_id: int = 0
+    precision: str = "auto"
+    model_family: str = "yolo"
+    output_format: str = "auto"
     target_class: str = "person"
+    label_map: str = "config/model-labels/coco80.txt"
 
 
 class TrackingConfig(BaseModel):

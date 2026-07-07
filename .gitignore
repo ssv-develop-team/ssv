@@ -26,6 +26,7 @@ dist/
 .vscode/
 .idea/
 *.swp
+.codebase-memory/
 
 # OS
 .DS_Store

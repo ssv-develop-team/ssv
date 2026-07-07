@@ -81,11 +81,14 @@ SsvConfig ssv_config_load(const std::string& path) {
 
     // Inference
     if (auto inference = root["inference"]) {
+        cfg.runtime = get_or<std::string>(inference, "runtime", cfg.runtime);
         cfg.model_path = get_or<std::string>(inference, "model_path", cfg.model_path);
         cfg.confidence_threshold = get_or<float>(inference, "confidence_threshold", cfg.confidence_threshold);
         cfg.device = get_or<std::string>(inference, "device", cfg.device);
-        cfg.cuda_device_id = get_or<int>(inference, "cuda_device_id", cfg.cuda_device_id);
-        cfg.cuda_required = get_or<bool>(inference, "cuda_required", cfg.cuda_required);
+        cfg.device_id = get_or<int>(inference, "device_id", cfg.device_id);
+        cfg.precision = get_or<std::string>(inference, "precision", cfg.precision);
+        cfg.model_family = get_or<std::string>(inference, "model_family", cfg.model_family);
+        cfg.output_format = get_or<std::string>(inference, "output_format", cfg.output_format);
         cfg.target_class = get_or<std::string>(inference, "target_class", cfg.target_class);
         cfg.label_map = get_or<std::string>(inference, "label_map", cfg.label_map);
     }

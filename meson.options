@@ -1,1 +1,3 @@
 option('tests', type : 'boolean', value : false, description : 'Build tests')
+option('tensorrt', type : 'combo', choices : ['auto', 'enabled', 'disabled'], value : 'auto',
+  description : 'Build TensorRT inference backend when the SDK is available')
