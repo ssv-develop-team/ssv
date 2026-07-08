@@ -81,13 +81,12 @@ sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
 # 1. 进入项目
 cd site-safety-vision
 
-# 2. 准备本地环境变量
-cp .env.example .env
+# 2. 准备本机 YAML 配置
+cp config/ssv.example.yaml config/ssv.yaml
 
-# 3. 编辑 .env，至少设置 RTSP 地址
-# SSV_RTSP_URL=rtsp://user:pass@host:554/stream
+# 3. 编辑 config/ssv.yaml，至少设置 sources[0].uri
 
-# 4. 下载默认 YOLOv8n ONNX 模型，或在 .env 设置 SSV_MODEL_PATH
+# 4. 下载默认 YOLOv8n ONNX 模型，或在 YAML 设置 inference.model_path
 ./ssv download-model
 
 # 5. 编译 C++ 插件
@@ -103,7 +102,7 @@ cp .env.example .env
 ./ssv run --display
 ```
 
-`./ssv test` 先跑代码测试，再在 `SSV_RTSP_URL`、模型文件等条件满足时做一次有界链路冒烟测试，完成后退出。`SSV_CHECK_TIMEOUT` 只影响这一步 smoke。`./ssv run` 是长期运行模式，按 `Ctrl+C` 退出；`./ssv run --display` 关闭视频窗口或中断进程后退出。
+`./ssv test` 先跑代码测试，再在 YAML `sources[0].uri` 或 `SSV_RTSP_URL`、模型文件等条件满足时做一次有界链路冒烟测试，完成后退出。`pipeline.check_timeout` 只影响这一步 smoke。`./ssv run` 是长期运行模式，按 `Ctrl+C` 退出；`./ssv run --display` 关闭视频窗口或中断进程后退出。
 
 ## 命令
 
@@ -124,26 +123,24 @@ cp .env.example .env
 
 ## 配置
 
-YAML 示例配置只保留 `config/ssv.example.yaml`。本地开发覆盖使用 `.env`，由 shell 脚本和 Python Agent 加载。首次运行前复制模板：
+YAML 示例配置只保留 `config/ssv.example.yaml`。本地运行配置优先读取项目根目录 `ssv.yaml`，不存在时读取 `config/ssv.yaml`，两者都已加入 `.gitignore`，适合保存 RTSP 地址、模型路径和显示偏好。首次运行前复制模板：
 
 ```bash
-cp .env.example .env
+cp config/ssv.example.yaml config/ssv.yaml
 ```
 
-常用配置优先写入 `config/ssv.example.yaml`：模型路径、推理 runtime/device、分析分辨率、Redis 地址和显示 sink 都由 YAML 提供默认值。`.env` 主要保留本地运行、构建和调试覆盖：
+常用配置优先写入 `config/ssv.yaml`：`sources[0].uri`、模型路径、推理 runtime/device、分析分辨率、Redis 地址和显示 sink 都由 YAML 提供默认值。`.env` 只保留配置文件选择、少量临时调试覆盖和构建配置：
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
-| `SSV_CONFIG_PATH` | YAML 配置文件路径 | `config/ssv.example.yaml` |
-| `SSV_RTSP_URL` | RTSP 视频源地址 | 无，必须设置 |
-| `SSV_RTSP_PROTOCOLS` | RTSP transport | `tcp` |
-| `SSV_RTSP_LATENCY` | RTSP jitter buffer 延迟 | `200` |
-| `SSV_CHECK_TIMEOUT` | `./ssv test` 中 smoke 阶段超时时间 | `30s` |
-| `GST_DEBUG` | GStreamer 调试级别 | `ssv*:4` |
-| `SSV_DISPLAY_OVERLAY` | 是否默认开启 overlay | `false` |
-| `SSV_DISPLAY_FPS` | 显示帧率 | `30` |
+| `SSV_CONFIG_PATH` | YAML 配置文件路径 | `ssv.yaml`、`config/ssv.yaml`、`config/ssv.example.yaml` |
+| `SSV_RTSP_URL` | 临时覆盖 RTSP 视频源地址 | YAML `sources[0].uri` |
+| `GST_DEBUG` | 临时覆盖 GStreamer 调试级别 | YAML `logging.cpp_debug_level` |
+| `REDIS_HOST` / `REDIS_PORT` | 部署环境临时覆盖 Redis 地址 | YAML `redis.host` / `redis.port` |
 
-脚本仍支持 `SSV_MODEL_PATH`、`SSV_INFER_DEVICE`、`REDIS_HOST` 等环境变量作为临时覆盖，但默认值不再在 `.env.example` 中重复维护。
+模型、推理 runtime/device、RTSP transport/latency、显示帧率和 overlay 等运行参数统一写入 YAML 配置，不再提供同名环境变量覆盖。
+
+`pipeline.analysis_fps` 控制推理/跟踪/事件发布分支的抽帧频率，默认示例为 `5`，用于降低 GPU 和事件吞吐压力。需要测试 TensorRT 或让分析分支按源视频可用帧率运行时，将它设为 `0` 表示不限流；显示窗口帧率仍由 `display.fps` 控制。
 
 ONNX Runtime 下载和路径覆盖：
 
@@ -160,6 +157,26 @@ export LD_LIBRARY_PATH="/path/to/onnxruntime/lib:$LD_LIBRARY_PATH"
 SSV_ONNXRUNTIME_ROOT=/path/to/onnxruntime ./ssv build
 ```
 
+TensorRT 按仓库内依赖管理，不要求安装到系统目录。默认 `./ssv build` 使用 `SSV_TENSORRT=auto`，检测不到 TensorRT 时编译明确报错的占位后端；需要真实 TensorRT 后端时显式启用：
+
+```bash
+SSV_TENSORRT=enabled ./ssv build
+```
+
+启用后，脚本只使用显式配置的本地 TensorRT SDK 来源：可以预先解包到 `.deps/tensorrt/`，也可以通过 `SSV_TENSORRT_ARCHIVE` 指向本地归档，或通过 `SSV_TENSORRT_URL` 指向你确认兼容的 NVIDIA 归档 URL。TensorRT engine 与 TensorRT/CUDA/driver/硬件组合强相关，脚本不会替使用者静默选择默认 TensorRT 版本。脚本会根据本地目录生成 Meson 可识别的 `nvinfer.pc`。可用变量：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `SSV_TENSORRT` | TensorRT 构建模式：`auto`、`enabled`、`disabled` | `auto` |
+| `SSV_TENSORRT_ROOT` | 已解包的 TensorRT SDK 目录，也作为归档解包目标 | `.deps/tensorrt` |
+| `SSV_TENSORRT_ARCHIVE` | 本地 TensorRT SDK 归档路径，支持 `.tar.*` 和 `.zip` | 无 |
+| `SSV_TENSORRT_URL` | TensorRT SDK 归档 URL，需使用者显式设置 | 无 |
+| `SSV_TENSORRT_VERSION` | 写入本地 `nvinfer.pc` 的版本字符串 | `local` |
+| `CUDA_HOME` | CUDA Toolkit 根目录；未设置时尝试 `/usr/local/cuda*` | 自动检测 |
+| `SSV_EXTRA_PKG_CONFIG_PATH` | 额外 pkg-config 搜索路径 | 无 |
+
+TensorRT 后端只加载已构建好的 `.engine` 文件，不在插件内把 `.onnx` 转成 `.engine`。
+
 ## 运行和调试
 
 ### 构建与插件检查
@@ -174,10 +191,10 @@ SSV_ONNXRUNTIME_ROOT=/path/to/onnxruntime ./ssv build
 ### 测试套件
 
 ```bash
-SSV_CHECK_TIMEOUT=15s ./ssv test
+./ssv test
 ```
 
-该命令会先跑构建、Meson 测试、CLI 测试和 Python Agent 测试；当 `SSV_RTSP_URL` 和模型文件都可用时，再跑一次短时链路冒烟测试。退出后返回统一结果码。
+该命令会先跑构建、Meson 测试、CLI 测试和 Python Agent 测试；当 YAML `sources[0].uri` 或 `SSV_RTSP_URL`、模型文件都可用时，再跑一次短时链路冒烟测试。退出后返回统一结果码。smoke 超时时间由 `ssv.yaml` 的 `pipeline.check_timeout` 控制。
 
 ### 显示调试
 
@@ -198,7 +215,7 @@ docker exec ssv-redis redis-cli XLEN ssv:events
 docker exec ssv-redis redis-cli XRANGE ssv:events - + COUNT 5
 ```
 
-如果 `.env` 修改了 `SSV_REDIS_STREAM_KEY`，把命令中的 `ssv:events` 换成对应 key。
+如果 YAML 修改了 `redis.stream_key`，把命令中的 `ssv:events` 换成对应 key。
 
 ### Agent 调试
 

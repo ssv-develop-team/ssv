@@ -5,6 +5,7 @@
 
 #include <gst/video/video.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <utility>
 
 GST_DEBUG_CATEGORY_STATIC(ssv_infer_debug);
+#define GST_CAT_DEFAULT ssv_infer_debug
 
 using ssv::infer::InferenceConfig;
 using ssv::infer::InferenceEngine;
@@ -47,6 +49,10 @@ struct _SsvInfer {
     bool worker_stop;
     bool latest_frame_ready;
     SsvVideoFrame *latest_frame;
+
+    std::mutex *fps_mutex;
+    guint64 inference_frame_count;
+    std::chrono::steady_clock::time_point *inference_fps_started_at;
 };
 
 enum {
@@ -108,6 +114,25 @@ ssv_infer_empty_detections(const SsvVideoFrame &input)
 }
 
 static void
+ssv_infer_note_inference_completed(SsvInfer *self)
+{
+    if (!self->fps_mutex || !self->inference_fps_started_at)
+        return;
+
+    std::lock_guard<std::mutex> lock(*self->fps_mutex);
+    self->inference_frame_count++;
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(now - *self->inference_fps_started_at).count();
+    if (elapsed < 1.0)
+        return;
+
+    double fps = static_cast<double>(self->inference_frame_count) / elapsed;
+    GST_INFO_OBJECT(self, "inference fps: %.1f", fps);
+    self->inference_frame_count = 0;
+    *self->inference_fps_started_at = now;
+}
+
+static void
 ssv_infer_run_on_frame(SsvInfer *self, const SsvVideoFrame &input)
 {
     SsvFrameDetections det = ssv_infer_empty_detections(input);
@@ -121,6 +146,7 @@ ssv_infer_run_on_frame(SsvInfer *self, const SsvVideoFrame &input)
     } catch (const std::exception &e) {
         GST_WARNING_OBJECT(self, "inference failed: %s", e.what());
     }
+    ssv_infer_note_inference_completed(self);
 
     if (!det.detections.empty()) {
         GST_DEBUG_OBJECT(self, "frame %" G_GUINT64_FORMAT ": %zu detections",
@@ -258,6 +284,11 @@ ssv_infer_stop(GstBaseTransform *trans)
     self->worker_cv = nullptr;
     delete self->worker_mutex;
     self->worker_mutex = nullptr;
+    if (self->fps_mutex && self->inference_fps_started_at) {
+        std::lock_guard<std::mutex> lock(*self->fps_mutex);
+        self->inference_frame_count = 0;
+        *self->inference_fps_started_at = std::chrono::steady_clock::now();
+    }
     return TRUE;
 }
 
@@ -418,6 +449,8 @@ ssv_infer_finalize(GObject *object)
     delete self->latest_frame;
     delete self->worker_cv;
     delete self->worker_mutex;
+    delete self->inference_fps_started_at;
+    delete self->fps_mutex;
     G_OBJECT_CLASS(ssv_infer_parent_class)->finalize(object);
 }
 
@@ -532,6 +565,9 @@ ssv_infer_init(SsvInfer *self)
     self->worker_stop = false;
     self->latest_frame_ready = false;
     self->latest_frame = nullptr;
+    self->fps_mutex = new std::mutex();
+    self->inference_frame_count = 0;
+    self->inference_fps_started_at = new std::chrono::steady_clock::time_point(std::chrono::steady_clock::now());
 }
 
 GST_ELEMENT_REGISTER_DEFINE(ssv_infer, "ssvinfer",

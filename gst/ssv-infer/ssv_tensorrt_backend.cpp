@@ -1,6 +1,7 @@
 #include "ssv_inference_backend.hpp"
 
 #include <NvInfer.h>
+#include <NvInferVersion.h>
 #include <cuda_runtime_api.h>
 
 #include <fstream>
@@ -30,16 +31,13 @@ private:
 };
 
 template <typename T>
-struct TrtDeleter {
-    void operator()(T *ptr) const
-    {
-        if (ptr)
-            ptr->destroy();
-    }
-};
+using TrtPtr = std::unique_ptr<T>;
 
-template <typename T>
-using TrtPtr = std::unique_ptr<T, TrtDeleter<T>>;
+struct TrtTensorBinding {
+    std::string name;
+    TensorSpec spec;
+    bool input = false;
+};
 
 void check_cuda(cudaError_t status, const char *action)
 {
@@ -57,17 +55,6 @@ std::vector<char> read_file(const std::string &path)
         std::istreambuf_iterator<char>());
 }
 
-int64_t volume(const nvinfer1::Dims &dims)
-{
-    int64_t result = 1;
-    for (int i = 0; i < dims.nbDims; ++i) {
-        if (dims.d[i] <= 0)
-            throw std::runtime_error("dynamic TensorRT bindings are not supported in this stage");
-        result *= dims.d[i];
-    }
-    return result;
-}
-
 std::vector<int64_t> shape_from_dims(const nvinfer1::Dims &dims)
 {
     std::vector<int64_t> shape;
@@ -77,6 +64,37 @@ std::vector<int64_t> shape_from_dims(const nvinfer1::Dims &dims)
     return shape;
 }
 
+#if NV_TENSORRT_MAJOR >= 10
+TensorSpec spec_from_tensor(nvinfer1::ICudaEngine &engine, const char *name)
+{
+    if (engine.getTensorDataType(name) != nvinfer1::DataType::kFLOAT)
+        throw std::runtime_error("only float32 TensorRT bindings are supported");
+    TensorSpec spec;
+    spec.name = name;
+    spec.dtype = DataType::Float32;
+    spec.shape = shape_from_dims(engine.getTensorShape(name));
+    if (spec.shape.size() == 4 && spec.shape[1] == 3)
+        spec.layout = TensorLayout::Nchw;
+    return spec;
+}
+
+std::vector<TrtTensorBinding> collect_bindings(nvinfer1::ICudaEngine &engine)
+{
+    std::vector<TrtTensorBinding> bindings;
+    int32_t count = engine.getNbIOTensors();
+    bindings.reserve(static_cast<size_t>(count));
+    for (int32_t i = 0; i < count; ++i) {
+        const char *name = engine.getIOTensorName(i);
+        if (!name)
+            throw std::runtime_error("TensorRT engine has unnamed IO tensor");
+        nvinfer1::TensorIOMode mode = engine.getTensorIOMode(name);
+        if (mode != nvinfer1::TensorIOMode::kINPUT && mode != nvinfer1::TensorIOMode::kOUTPUT)
+            continue;
+        bindings.push_back({name, spec_from_tensor(engine, name), mode == nvinfer1::TensorIOMode::kINPUT});
+    }
+    return bindings;
+}
+#else
 TensorSpec spec_from_binding(nvinfer1::ICudaEngine &engine, int binding)
 {
     if (engine.getBindingDataType(binding) != nvinfer1::DataType::kFLOAT)
@@ -89,6 +107,17 @@ TensorSpec spec_from_binding(nvinfer1::ICudaEngine &engine, int binding)
         spec.layout = TensorLayout::Nchw;
     return spec;
 }
+
+std::vector<TrtTensorBinding> collect_bindings(nvinfer1::ICudaEngine &engine)
+{
+    std::vector<TrtTensorBinding> bindings;
+    int count = engine.getNbBindings();
+    bindings.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+        bindings.push_back({engine.getBindingName(i), spec_from_binding(engine, i), engine.bindingIsInput(i)});
+    return bindings;
+}
+#endif
 
 } // namespace
 
@@ -105,8 +134,8 @@ private:
     TrtPtr<nvinfer1::IExecutionContext> context_{nullptr};
     BackendInfo info_;
     ModelMetadata metadata_;
-    int input_binding_ = -1;
-    std::vector<int> output_bindings_;
+    TrtTensorBinding input_;
+    std::vector<TrtTensorBinding> outputs_;
 };
 
 ModelMetadata TensorRtBackend::load(const InferenceConfig &config)
@@ -137,23 +166,24 @@ ModelMetadata TensorRtBackend::load(const InferenceConfig &config)
 
     metadata_ = {};
     metadata_.backend = info_;
-    output_bindings_.clear();
-    input_binding_ = -1;
+    outputs_.clear();
+    input_ = {};
+    bool has_input = false;
 
-    for (int i = 0; i < engine_->getNbBindings(); ++i) {
-        TensorSpec spec = spec_from_binding(*engine_, i);
-        if (engine_->bindingIsInput(i)) {
-            if (input_binding_ != -1)
+    for (const TrtTensorBinding &binding : collect_bindings(*engine_)) {
+        if (binding.input) {
+            if (has_input)
                 throw std::runtime_error("only single-input TensorRT engines are supported");
-            input_binding_ = i;
-            metadata_.inputs.push_back(spec);
+            input_ = binding;
+            has_input = true;
+            metadata_.inputs.push_back(binding.spec);
         } else {
-            output_bindings_.push_back(i);
-            metadata_.outputs.push_back(spec);
+            outputs_.push_back(binding);
+            metadata_.outputs.push_back(binding.spec);
         }
     }
 
-    if (input_binding_ == -1 || metadata_.outputs.empty())
+    if (!has_input || metadata_.outputs.empty())
         throw std::runtime_error("TensorRT engine must have one input and at least one output");
 
     return metadata_;
@@ -166,38 +196,58 @@ std::vector<Tensor> TensorRtBackend::infer(std::span<const Tensor> inputs)
     if (inputs.size() != 1)
         throw std::runtime_error("TensorRT backend expects one input tensor");
 
-    int nb_bindings = engine_->getNbBindings();
-    std::vector<void *> buffers(nb_bindings, nullptr);
+    std::vector<TrtTensorBinding> bindings;
+    bindings.reserve(1 + outputs_.size());
+    bindings.push_back(input_);
+    bindings.insert(bindings.end(), outputs_.begin(), outputs_.end());
+
+    std::vector<void *> buffers(bindings.size(), nullptr);
     cudaStream_t stream = nullptr;
 
     try {
         check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate failed");
 
-        for (int i = 0; i < nb_bindings; ++i) {
-            int64_t count = volume(engine_->getBindingDimensions(i));
+        for (size_t i = 0; i < bindings.size(); ++i) {
+            int64_t count = 1;
+            for (int64_t dim : bindings[i].spec.shape)
+                count *= dim;
             check_cuda(cudaMalloc(&buffers[i], sizeof(float) * static_cast<size_t>(count)), "cudaMalloc failed");
+#if NV_TENSORRT_MAJOR >= 10
+            if (!context_->setTensorAddress(bindings[i].name.c_str(), buffers[i]))
+                throw std::runtime_error("TensorRT setTensorAddress failed for tensor: " + bindings[i].name);
+#endif
         }
 
         const Tensor &input = inputs[0];
-        int64_t input_count = volume(engine_->getBindingDimensions(input_binding_));
+        int64_t input_count = 1;
+        for (int64_t dim : input_.spec.shape)
+            input_count *= dim;
         if (input.host_data.size() != static_cast<size_t>(input_count))
             throw std::runtime_error("input tensor data size does not match TensorRT binding");
 
-        check_cuda(cudaMemcpyAsync(buffers[input_binding_], input.host_data.data(),
+        check_cuda(cudaMemcpyAsync(buffers[0], input.host_data.data(),
                        sizeof(float) * input.host_data.size(), cudaMemcpyHostToDevice, stream),
                    "cudaMemcpyAsync input failed");
 
+#if NV_TENSORRT_MAJOR >= 10
+        if (!context_->enqueueV3(stream))
+            throw std::runtime_error("TensorRT enqueueV3 failed");
+#else
         if (!context_->enqueueV2(buffers.data(), stream, nullptr))
             throw std::runtime_error("TensorRT enqueueV2 failed");
+#endif
 
         std::vector<Tensor> outputs;
-        outputs.reserve(output_bindings_.size());
-        for (int binding : output_bindings_) {
+        outputs.reserve(outputs_.size());
+        for (size_t output_index = 0; output_index < outputs_.size(); ++output_index) {
+            const TrtTensorBinding &binding = outputs_[output_index];
             Tensor output;
-            output.spec = spec_from_binding(*engine_, binding);
-            int64_t count = volume(engine_->getBindingDimensions(binding));
+            output.spec = binding.spec;
+            int64_t count = 1;
+            for (int64_t dim : binding.spec.shape)
+                count *= dim;
             output.host_data.resize(static_cast<size_t>(count));
-            check_cuda(cudaMemcpyAsync(output.host_data.data(), buffers[binding],
+            check_cuda(cudaMemcpyAsync(output.host_data.data(), buffers[output_index + 1],
                            sizeof(float) * output.host_data.size(), cudaMemcpyDeviceToHost, stream),
                        "cudaMemcpyAsync output failed");
             outputs.push_back(std::move(output));

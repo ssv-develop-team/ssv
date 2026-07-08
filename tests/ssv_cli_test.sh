@@ -26,12 +26,19 @@ for legacy in "--m2" "--m2-mock" "--m3" "--m3-mock" "check" "all"; do
 done
 
 grep -q 'SSV_RTSP_URL' .env.example || fail ".env.example does not document SSV_RTSP_URL"
-grep -q 'SSV_RTSP_PROTOCOLS=tcp' .env.example || fail ".env.example does not default RTSP transport to TCP"
+grep -q 'config/ssv.yaml' scripts/lib.sh || fail "scripts/lib.sh does not search config/ssv.yaml"
+grep -q 'config/ssv.yaml' .gitignore || fail ".gitignore does not ignore local config/ssv.yaml"
+if rg -n 'SSV_RTSP_PROTOCOLS|SSV_RTSP_LATENCY|SSV_CHECK_TIMEOUT|SSV_DISPLAY_OVERLAY' .env.example >/tmp/ssv-env-runtime-matches.txt; then
+    cat /tmp/ssv-env-runtime-matches.txt >&2
+    fail ".env.example should not document YAML-owned runtime overrides"
+fi
 grep -q 'rtspsrc' scripts/pipeline.sh || fail "pipeline script does not use explicit rtspsrc"
 grep -q 'protocols=\$RTSP_PROTOCOLS' scripts/pipeline.sh || fail "pipeline script does not pass RTSP transport"
 grep -q 'application/x-rtp,media=video' scripts/pipeline.sh || fail "pipeline script does not filter RTSP video stream"
 grep -q 'videorate' scripts/pipeline.sh || fail "pipeline script does not normalize RTSP framerate"
-grep -q 'SSV_ANALYSIS_FPS' scripts/pipeline.sh || fail "pipeline script does not expose analysis fps"
+grep -q 'ssv_yaml_get pipeline.analysis_fps' scripts/pipeline.sh || fail "pipeline script does not read analysis fps from YAML"
+grep -q 'ssv_yaml_get sources.0.protocols' scripts/pipeline.sh || fail "pipeline script does not read RTSP transport from YAML"
+grep -q 'ssv_yaml_get sources.0.latency_ms' scripts/pipeline.sh || fail "pipeline script does not read RTSP latency from YAML"
 grep -q 'display_source_pipeline' scripts/pipeline.sh || fail "display mode does not split before inference"
 grep -q 'DISPLAY_OVERLAY' scripts/pipeline.sh || fail "display overlay is not controlled by an explicit switch"
 if rg -n '^DISPLAY=' scripts/pipeline.sh >/tmp/ssv-display-var-matches.txt; then
@@ -62,13 +69,14 @@ grep -q 'async=true' scripts/pipeline.sh || fail "pipeline script does not enabl
 grep -q 'ssv_yaml_get' scripts/lib.sh || fail "scripts/lib.sh does not expose YAML config reader"
 grep -q 'ssv_yaml_get inference.model_path' scripts/pipeline.sh || fail "pipeline script does not read model path from YAML"
 grep -q 'ssv_yaml_get pipeline.analysis_fps' scripts/pipeline.sh || fail "pipeline script does not read analysis fps from YAML"
+grep -q 'analysis_rate_pipeline' scripts/pipeline.sh || fail "pipeline script does not build analysis rate branch"
+grep -q 'ANALYSIS_FPS_LABEL="不限流"' scripts/pipeline.sh || fail "pipeline script does not support unlimited analysis fps"
+grep -q 'framerate=\$ANALYSIS_FPS/1' scripts/pipeline.sh || fail "pipeline script does not keep capped analysis fps path"
 grep -q 'ssv_yaml_get redis.stream_key' scripts/pipeline.sh || fail "pipeline script does not read Redis stream key from YAML"
-grep -q 'SSV_INFER_RUNTIME' scripts/pipeline.sh || fail "pipeline script does not expose inference runtime"
-grep -q 'SSV_INFER_DEVICE' scripts/pipeline.sh || fail "pipeline script does not expose inference device"
-grep -q 'SSV_INFER_DEVICE_ID' scripts/pipeline.sh || fail "pipeline script does not expose inference device id"
-grep -q 'SSV_INFER_PRECISION' scripts/pipeline.sh || fail "pipeline script does not expose inference precision"
-grep -q 'SSV_MODEL_FAMILY' scripts/pipeline.sh || fail "pipeline script does not expose model family"
-grep -q 'SSV_OUTPUT_FORMAT' scripts/pipeline.sh || fail "pipeline script does not expose output format"
+if rg -n 'SSV_MODEL_PATH|SSV_TARGET_CLASS|SSV_LABEL_MAP|SSV_FRAME_WIDTH|SSV_FRAME_HEIGHT|SSV_ANALYSIS_FPS|SSV_CONF_THRESHOLD|SSV_INFER_RUNTIME|SSV_INFER_DEVICE|SSV_INFER_DEVICE_ID|SSV_INFER_PRECISION|SSV_MODEL_FAMILY|SSV_OUTPUT_FORMAT|SSV_RTSP_PROTOCOLS|SSV_RTSP_LATENCY|SSV_CHECK_TIMEOUT|SSV_DISPLAY_OVERLAY|SSV_DISPLAY_SINK|SSV_REDIS_STREAM_KEY|SSV_DISPLAY_FPS|SSV_CUDA_DEVICE_ID|SSV_CUDA_REQUIRED|cuda-device-id|cuda-required' scripts/pipeline.sh >/tmp/ssv-runtime-env-matches.txt; then
+    cat /tmp/ssv-runtime-env-matches.txt >&2
+    fail "pipeline script must not expose YAML-owned runtime environment overrides"
+fi
 if rg -n 'SSV_CUDA_DEVICE_ID|SSV_CUDA_REQUIRED|cuda-device-id|cuda-required' scripts/pipeline.sh >/tmp/ssv-cuda-config-matches.txt; then
     cat /tmp/ssv-cuda-config-matches.txt >&2
     fail "pipeline script must not expose CUDA-specific inference config"
@@ -81,13 +89,17 @@ grep -q 'model-family=\$MODEL_FAMILY' scripts/pipeline.sh || fail "pipeline scri
 grep -q 'output-format=\$OUTPUT_FORMAT' scripts/pipeline.sh || fail "pipeline script does not pass output format to ssvinfer"
 grep -q 'SSV_ONNXRUNTIME_FLAVOR' scripts/build.sh || fail "build script does not expose ONNX Runtime flavor"
 grep -q 'onnxruntime-gpu' scripts/build.sh || fail "build script does not isolate ONNX Runtime GPU package"
+grep -q 'SSV_TENSORRT_URL' .env.example || fail ".env.example does not document explicit TensorRT URL configuration"
+grep -q 'SSV_TENSORRT_ARCHIVE' .env.example || fail ".env.example does not document TensorRT archive configuration"
+grep -q 'SSV_TENSORRT_MESON_MODE' scripts/build.sh || fail "build script does not resolve TensorRT mode before Meson"
+if rg -n 'TensorRT-Enterprise|default_url' scripts/build.sh >/tmp/ssv-tensorrt-default-url-matches.txt; then
+    cat /tmp/ssv-tensorrt-default-url-matches.txt >&2
+    fail "build script must not choose a default TensorRT SDK URL"
+fi
 grep -q 'SSV_ONNXRUNTIME_FLAVOR' scripts/lib.sh || fail "runtime script does not use ONNX Runtime flavor"
 grep -q 'onnxruntime-gpu' scripts/lib.sh || fail "runtime script does not select ONNX Runtime GPU path"
 grep -q 'site-packages' scripts/lib.sh || fail "runtime script does not discover Python site-packages"
 grep -q 'nvidia/.*/lib' scripts/lib.sh || grep -q 'nvidia/\*/lib' scripts/lib.sh || fail "runtime script does not add NVIDIA wheel lib directories"
-grep -q 'SSV_TARGET_CLASS' scripts/pipeline.sh || fail "pipeline script does not expose target class"
-grep -q 'TARGET_CLASS="${SSV_TARGET_CLASS-' scripts/pipeline.sh || fail "pipeline script does not preserve empty target class for all-class inference"
-grep -q 'SSV_LABEL_MAP' scripts/pipeline.sh || fail "pipeline script does not expose label map"
 grep -q 'if \[ -n "\$TARGET_CLASS" \]' scripts/pipeline.sh || fail "pipeline script does not omit empty target class"
 grep -q 'infer_props+=("target-class=\$TARGET_CLASS")' scripts/pipeline.sh || fail "pipeline script does not pass non-empty target class to ssvinfer"
 grep -q 'label-map=\$LABEL_MAP' scripts/pipeline.sh || fail "pipeline script does not pass label map to ssvinfer"

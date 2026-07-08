@@ -18,7 +18,15 @@ if [ -f "$SSV_ROOT/.env" ]; then
     done < "$SSV_ROOT/.env"
 fi
 
-SSV_CONFIG="${SSV_CONFIG_PATH:-$SSV_ROOT/config/ssv.example.yaml}"
+if [ -n "${SSV_CONFIG_PATH:-}" ]; then
+    SSV_CONFIG="$SSV_CONFIG_PATH"
+elif [ -f "$SSV_ROOT/ssv.yaml" ]; then
+    SSV_CONFIG="$SSV_ROOT/ssv.yaml"
+elif [ -f "$SSV_ROOT/config/ssv.yaml" ]; then
+    SSV_CONFIG="$SSV_ROOT/config/ssv.yaml"
+else
+    SSV_CONFIG="$SSV_ROOT/config/ssv.example.yaml"
+fi
 SSV_ONNXRUNTIME_FLAVOR="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
 SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime"
 if [ "$SSV_ONNXRUNTIME_FLAVOR" = "gpu" ]; then
@@ -28,6 +36,7 @@ elif [ "$SSV_ONNXRUNTIME_FLAVOR" != "cpu" ]; then
     exit 1
 fi
 SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-$SSV_ONNXRUNTIME_DEFAULT_ROOT}"
+SSV_TENSORRT_ROOT="${SSV_TENSORRT_ROOT:-$SSV_ROOT/.deps/tensorrt}"
 SSV_BUILD_DIR="${SSV_BUILD_DIR:-$SSV_ROOT/build}"
 SSV_PLUGIN_DIR="$SSV_BUILD_DIR/gst/ssv-template"
 
@@ -51,10 +60,20 @@ with open(Path(config_path), encoding="utf-8") as f:
 
 value = data
 for part in key_path.split("."):
-    if not isinstance(value, dict) or part not in value:
+    if isinstance(value, dict):
+        if part not in value:
+            print(default_value, end="")
+            raise SystemExit(0)
+        value = value[part]
+    elif isinstance(value, list) and part.isdigit():
+        index = int(part)
+        if index >= len(value):
+            print(default_value, end="")
+            raise SystemExit(0)
+        value = value[index]
+    else:
         print(default_value, end="")
         raise SystemExit(0)
-    value = value[part]
 
 if value is None:
     print(default_value, end="")
@@ -81,7 +100,10 @@ append_ld_path_if_dir() {
 
 append_nvidia_wheel_libs() {
     local site_packages
-    for site_packages in "$SSV_ROOT"/.venv/lib/python*/site-packages; do
+    for site_packages in \
+        "$SSV_ROOT"/.venv/lib/python*/site-packages \
+        "$SSV_ROOT"/.deps/python-site-packages \
+        "$SSV_ROOT"/.deps/venvs/*/lib/python*/site-packages; do
         [ -d "$site_packages/nvidia" ] || continue
         local lib_dir
         for lib_dir in "$site_packages"/nvidia/*/lib; do
@@ -96,6 +118,8 @@ export_ssv_plugin_path() {
     # ssv-common 是共享库，需要让动态链接器能找到
     SSV_LD_PATHS="$SSV_BUILD_DIR/gst/ssv-common"
     append_ld_path_if_dir "$SSV_ONNXRUNTIME_ROOT/lib"
+    append_ld_path_if_dir "$SSV_TENSORRT_ROOT/usr/lib/x86_64-linux-gnu"
+    append_ld_path_if_dir "$SSV_TENSORRT_ROOT/lib"
     append_nvidia_wheel_libs
     export LD_LIBRARY_PATH="$SSV_LD_PATHS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 }

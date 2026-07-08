@@ -19,8 +19,9 @@ ssv_info "步骤 4/5: 运行 Python Agent 测试"
 ssv_require_command "uv" "pip install uv" "All"
 (cd "$SSV_ROOT/agent" && uv run --extra dev pytest)
 
-MODEL="${SSV_MODEL_PATH:-models/yolov8n.onnx}"
-if [ -n "${SSV_RTSP_URL:-}" ] && [ -f "$MODEL" ]; then
+MODEL="$(ssv_yaml_get inference.model_path models/yolov8n.onnx)"
+RTSP_URL="${SSV_RTSP_URL:-$(ssv_yaml_get sources.0.uri "")}"
+if [ -n "$RTSP_URL" ] && [ -f "$MODEL" ]; then
     ssv_info "步骤 5/5: 运行链路冒烟测试"
     set +e
     bash "$SSV_ROOT/scripts/pipeline.sh" --smoke --skip-build
@@ -33,7 +34,7 @@ if [ -n "${SSV_RTSP_URL:-}" ] && [ -f "$MODEL" ]; then
         ssv_warn "链路冒烟测试失败，已作为警告继续: status=$smoke_status"
     fi
 else
-    ssv_warn "跳过链路冒烟测试: 需要 SSV_RTSP_URL 和可用模型文件"
+    ssv_warn "跳过链路冒烟测试: 需要 YAML sources[0].uri 或 SSV_RTSP_URL，以及可用模型文件"
 fi
 
 ssv_info "测试套件完成"

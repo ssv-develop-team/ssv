@@ -1,19 +1,11 @@
 # Site Safety Vision - 运行时配置文件
-# 本仓库只保留这一份 YAML 示例配置；本地覆盖优先使用 .env 或 SSV_CONFIG_PATH。
+# 本仓库只保留这一份 YAML 示例配置；本地覆盖推荐使用 config/ssv.yaml，也可用项目根目录 ssv.yaml 或 SSV_CONFIG_PATH。
 #
-# 环境变量覆盖 (优先级高于 YAML):
+# 环境变量覆盖 (优先级高于 YAML)，只保留适合部署和临时调试的少量变量:
 #   REDIS_HOST        → redis.host
 #   REDIS_PORT        → redis.port
-#   SSV_LOG_LEVEL     → logging.python_log_level
-#   SSV_DISPLAY_SINK  → display.sink
-#   SSV_TARGET_CLASS   → inference.target_class
-#   SSV_LABEL_MAP      → inference.label_map
-#   SSV_INFER_RUNTIME  → inference.runtime
-#   SSV_INFER_DEVICE   → inference.device
-#   SSV_INFER_DEVICE_ID → inference.device_id
-#   SSV_INFER_PRECISION → inference.precision
-#   SSV_MODEL_FAMILY    → inference.model_family
-#   SSV_OUTPUT_FORMAT   → inference.output_format
+#   SSV_RTSP_URL      → sources[0].uri
+#   GST_DEBUG         → logging.cpp_debug_level
 
 # 配置版本号
 version: "1.0"
@@ -41,6 +33,8 @@ sources: []
 #  - name: "camera-01"
 #    type: "rtsp"
 #    uri: "rtsp://192.168.1.100:554/stream"
+#    protocols: "tcp"
+#    latency_ms: 200
 #  - name: "test-video"
 #    type: "file"
 #    uri: "/path/to/video.mp4"
@@ -49,12 +43,18 @@ sources: []
 display:
   # 是否开启 GStreamer 本地显示窗口
   enabled: false
+  # 是否默认开启检测框 overlay；当前仍为调试路径
+  overlay: false
+  # 显示分支帧率
+  fps: 30
   # 视频 sink 元素（autovideosink 自动选择，或指定 waylandsink/xvimagesink）
   sink: "autovideosink"
 
 # Pipeline 配置（M2 起使用）
 pipeline:
-  # 分析帧率（每秒抽取多少帧进行分析）
+  # 链路冒烟测试超时
+  check_timeout: "30s"
+  # 分析帧率（每秒抽取多少帧进行分析）；设为 0 表示不限流
   analysis_fps: 5
   # 分析帧宽度
   frame_width: 640

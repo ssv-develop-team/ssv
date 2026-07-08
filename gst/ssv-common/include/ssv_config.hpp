@@ -18,9 +18,12 @@ struct SsvConfig {
 
     // Display
     bool display_enabled = false;
+    bool display_overlay = false;
+    int display_fps = 30;
     std::string display_sink = "autovideosink";
 
     // Pipeline
+    std::string check_timeout = "30s";
     int analysis_fps = 5;
     int frame_width = 640;
     int frame_height = 480;
@@ -51,7 +54,7 @@ struct SsvConfig {
 };
 
 /// Load configuration from YAML file.
-/// Search order: explicit path → SSV_CONFIG_PATH env → config/ssv.example.yaml → /etc/ssv/ssv.yaml
+/// Search order: explicit path → SSV_CONFIG_PATH env → ssv.yaml → config/ssv.yaml → config/ssv.example.yaml → /etc/ssv/ssv.yaml
 /// Throws std::runtime_error if no config file found.
 SsvConfig ssv_config_load(const std::string& path = "");
 

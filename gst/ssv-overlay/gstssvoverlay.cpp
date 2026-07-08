@@ -5,7 +5,6 @@
 #include <gst/video/video.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -15,9 +14,6 @@ GST_DEBUG_CATEGORY_STATIC(ssv_overlay_debug);
 typedef struct _SsvOverlay {
     GstBaseTransform parent;
     gboolean enabled;
-    gint frame_count;
-    double fps;
-    std::chrono::steady_clock::time_point *fps_started_at;
 } SsvOverlay;
 
 typedef struct _SsvOverlayClass {
@@ -273,21 +269,6 @@ ssv_overlay_transform_ip(GstBaseTransform *trans, GstBuffer *buf)
         return GST_FLOW_OK;
     }
 
-    self->frame_count++;
-    auto now = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(now - *self->fps_started_at).count();
-    if (elapsed >= 1.0) {
-        self->fps = self->frame_count / elapsed;
-        self->frame_count = 0;
-        *self->fps_started_at = now;
-    }
-
-    char fps_text[32];
-    std::snprintf(fps_text, sizeof(fps_text), "FPS:%.1f", self->fps);
-    paint_text(data, stride, width, height, 8, 8, fps_text,
-               pixel_stride, red_index, green_index, blue_index,
-               255, 255, 255);
-
     auto latest = SsvDetectionStore::instance().peek_latest();
     for (const auto &det : latest.detections) {
         int x1 = (int)(det.x1 * width);
@@ -350,15 +331,6 @@ ssv_overlay_get_property(GObject *object, guint prop_id,
 }
 
 static void
-ssv_overlay_finalize(GObject *object)
-{
-    auto *self = SSV_OVERLAY(object);
-    delete self->fps_started_at;
-    self->fps_started_at = nullptr;
-    G_OBJECT_CLASS(ssv_overlay_parent_class)->finalize(object);
-}
-
-static void
 ssv_overlay_class_init(SsvOverlayClass *klass)
 {
     auto *gobject_class = G_OBJECT_CLASS(klass);
@@ -367,8 +339,6 @@ ssv_overlay_class_init(SsvOverlayClass *klass)
 
     gobject_class->set_property = ssv_overlay_set_property;
     gobject_class->get_property = ssv_overlay_get_property;
-    gobject_class->finalize = ssv_overlay_finalize;
-
     g_object_class_install_property(gobject_class, PROP_ENABLED,
         g_param_spec_boolean("enabled", "Enabled", "Draw latest detection boxes",
             TRUE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
@@ -388,9 +358,6 @@ static void
 ssv_overlay_init(SsvOverlay *self)
 {
     self->enabled = TRUE;
-    self->frame_count = 0;
-    self->fps = 0.0;
-    self->fps_started_at = new std::chrono::steady_clock::time_point(std::chrono::steady_clock::now());
 }
 
 GST_ELEMENT_REGISTER_DEFINE(ssv_overlay, "ssvoverlay", GST_RANK_NONE, SSV_TYPE_OVERLAY)

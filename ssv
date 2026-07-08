@@ -43,10 +43,11 @@ usage() {
     echo "  stop                     停止所有后台服务"
     echo ""
     echo "环境变量:"
-    echo "  SSV_CONFIG_PATH    配置文件路径 (默认: config/ssv.example.yaml)"
-    echo "  SSV_RTSP_URL       RTSP 视频源地址"
-    echo "  SSV_MODEL_PATH     YOLO 模型路径 (默认: models/yolov8n.onnx)"
-    echo "  GST_DEBUG          GStreamer 调试级别 (默认: ssv*:4)"
+    echo "  SSV_CONFIG_PATH    配置文件路径 (默认优先: ssv.yaml)"
+    echo "  SSV_RTSP_URL       临时覆盖 RTSP 视频源地址"
+    echo "  GST_DEBUG          临时覆盖 GStreamer 调试级别"
+    echo ""
+    echo "运行参数优先写入 ssv.yaml；示例模板见 config/ssv.example.yaml。"
     echo ""
 }
 

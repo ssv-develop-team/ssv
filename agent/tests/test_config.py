@@ -11,8 +11,6 @@ def test_load_config_uses_yaml_values(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.delenv("SSV_CONFIG_PATH", raising=False)
     monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.delenv("REDIS_PORT", raising=False)
-    monkeypatch.delenv("SSV_LOG_LEVEL", raising=False)
-    monkeypatch.delenv("SSV_DISPLAY_SINK", raising=False)
     path = tmp_path / "ssv.yaml"
     path.write_text(
         """
@@ -46,15 +44,29 @@ def test_load_config_applies_environment_overrides(
     path.write_text("redis:\n  host: yaml-host\n  port: 1111\n", encoding="utf-8")
     monkeypatch.setenv("REDIS_HOST", "env-host")
     monkeypatch.setenv("REDIS_PORT", "2222")
-    monkeypatch.setenv("SSV_LOG_LEVEL", "DEBUG")
-    monkeypatch.setenv("SSV_DISPLAY_SINK", "fakesink")
 
     cfg = load_config(path)
 
     assert cfg.redis.host == "env-host"
     assert cfg.redis.port == 2222
-    assert cfg.logging.python_log_level == "DEBUG"
-    assert cfg.display.sink == "fakesink"
+
+
+def test_load_config_uses_config_directory_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SSV_CONFIG_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "ssv.yaml").write_text(
+        "redis:\n  host: config-dir-host\npipeline:\n  analysis_fps: 0\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+
+    assert cfg.redis.host == "config-dir-host"
+    assert cfg.pipeline.analysis_fps == 0
 
 
 def test_load_config_missing_explicit_path_raises(tmp_path: Path) -> None:

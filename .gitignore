@@ -21,6 +21,8 @@ dist/
 
 # Environment
 .env
+ssv.yaml
+config/ssv.yaml
 
 # IDE
 .vscode/

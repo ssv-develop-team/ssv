@@ -19,7 +19,7 @@ def main() -> None:
         "--config",
         type=str,
         default=None,
-        help="Path to YAML config file (default: SSV_CONFIG_PATH or ../config/ssv.example.yaml)",
+        help="Path to YAML config file (default: SSV_CONFIG_PATH, ssv.yaml, config/ssv.yaml, or config/ssv.example.yaml)",
     )
     parser.add_argument(
         "--log-level",

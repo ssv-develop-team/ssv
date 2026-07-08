@@ -23,7 +23,15 @@ std::string find_config_file(const std::string& explicit_path) {
     if (env_path && std::filesystem::exists(env_path))
         return env_path;
 
-    // Relative to working directory
+    // Local development override, relative to working directory.
+    if (std::filesystem::exists("ssv.yaml"))
+        return "ssv.yaml";
+
+    // Local config directory override, relative to working directory.
+    if (std::filesystem::exists("config/ssv.yaml"))
+        return "config/ssv.yaml";
+
+    // Repository default, relative to working directory.
     if (std::filesystem::exists("config/ssv.example.yaml"))
         return "config/ssv.example.yaml";
 
@@ -33,7 +41,7 @@ std::string find_config_file(const std::string& explicit_path) {
 
     throw std::runtime_error(
         "No config file found. Searched: SSV_CONFIG_PATH, "
-        "config/ssv.example.yaml, /etc/ssv/ssv.yaml");
+        "ssv.yaml, config/ssv.yaml, config/ssv.example.yaml, /etc/ssv/ssv.yaml");
 }
 
 template <typename T>
@@ -69,11 +77,14 @@ SsvConfig ssv_config_load(const std::string& path) {
     // Display
     if (auto display = root["display"]) {
         cfg.display_enabled = get_or<bool>(display, "enabled", cfg.display_enabled);
+        cfg.display_overlay = get_or<bool>(display, "overlay", cfg.display_overlay);
+        cfg.display_fps = get_or<int>(display, "fps", cfg.display_fps);
         cfg.display_sink = get_or<std::string>(display, "sink", cfg.display_sink);
     }
 
     // Pipeline
     if (auto pipeline = root["pipeline"]) {
+        cfg.check_timeout = get_or<std::string>(pipeline, "check_timeout", cfg.check_timeout);
         cfg.analysis_fps = get_or<int>(pipeline, "analysis_fps", cfg.analysis_fps);
         cfg.frame_width = get_or<int>(pipeline, "frame_width", cfg.frame_width);
         cfg.frame_height = get_or<int>(pipeline, "frame_height", cfg.frame_height);

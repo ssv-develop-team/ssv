@@ -10,7 +10,7 @@ cd "$SSV_ROOT"
 
 MODE="run"
 SHOW_DISPLAY=false
-DISPLAY_OVERLAY="${SSV_DISPLAY_OVERLAY:-false}"
+DISPLAY_OVERLAY="$(ssv_yaml_get display.overlay false)"
 DISPLAY_SINK_OVERRIDE=""
 SKIP_BUILD=false
 
@@ -65,6 +65,10 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$SHOW_DISPLAY" = false ] && [ "$(ssv_yaml_get display.enabled false)" = "true" ]; then
+    SHOW_DISPLAY=true
+fi
+
 ssv_header "检查 GStreamer Pipeline"
 
 ssv_require_command "gst-launch-1.0" \
@@ -83,25 +87,25 @@ fi
 
 export_ssv_plugin_path
 
-RTSP_URL="${SSV_RTSP_URL:-}"
+RTSP_URL="${SSV_RTSP_URL:-$(ssv_yaml_get sources.0.uri "")}"
 if [ -z "$RTSP_URL" ]; then
-    ssv_error "SSV_RTSP_URL 未设置"
-    ssv_warn "在 .env 中设置: SSV_RTSP_URL=rtsp://user:pass@host:554/stream"
+    ssv_error "RTSP 视频源未配置"
+    ssv_warn "在 ssv.yaml 设置 sources[0].uri，或临时设置 SSV_RTSP_URL"
     exit 1
 fi
 
-MODEL="${SSV_MODEL_PATH:-$(ssv_yaml_get inference.model_path models/yolov8n.onnx)}"
-TARGET_CLASS="${SSV_TARGET_CLASS-$(ssv_yaml_get inference.target_class person)}"
-LABEL_MAP="${SSV_LABEL_MAP:-$(ssv_yaml_get inference.label_map config/model-labels/coco80.txt)}"
+MODEL="$(ssv_yaml_get inference.model_path models/yolov8n.onnx)"
+TARGET_CLASS="$(ssv_yaml_get inference.target_class person)"
+LABEL_MAP="$(ssv_yaml_get inference.label_map config/model-labels/coco80.txt)"
 if [ ! -f "$MODEL" ]; then
     ssv_error "模型文件不存在: $MODEL"
-    ssv_warn "运行 ./ssv download-model 下载模型，或设置 SSV_MODEL_PATH"
+    ssv_warn "运行 ./ssv download-model 下载模型，或在 ssv.yaml 设置 inference.model_path"
     exit 1
 fi
 
 if [ -n "$LABEL_MAP" ] && [ ! -f "$LABEL_MAP" ]; then
     ssv_error "类别表文件不存在: $LABEL_MAP"
-    ssv_warn "设置 SSV_LABEL_MAP，或使用默认 config/model-labels/coco80.txt"
+    ssv_warn "设置 inference.label_map，或使用默认 config/model-labels/coco80.txt"
     exit 1
 fi
 
@@ -111,32 +115,33 @@ if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ssv-redis$'; then
     sleep 2
 fi
 
-FRAME_WIDTH="${SSV_FRAME_WIDTH:-$(ssv_yaml_get pipeline.frame_width 640)}"
-FRAME_HEIGHT="${SSV_FRAME_HEIGHT:-$(ssv_yaml_get pipeline.frame_height 480)}"
-DISPLAY_FPS="${SSV_DISPLAY_FPS:-30}"
-ANALYSIS_FPS="${SSV_ANALYSIS_FPS:-$(ssv_yaml_get pipeline.analysis_fps 5)}"
-CONF_THRESHOLD="${SSV_CONF_THRESHOLD:-$(ssv_yaml_get inference.confidence_threshold 0.5)}"
-INFER_RUNTIME="${SSV_INFER_RUNTIME:-$(ssv_yaml_get inference.runtime auto)}"
-INFER_DEVICE="${SSV_INFER_DEVICE:-$(ssv_yaml_get inference.device auto)}"
-INFER_DEVICE_ID="${SSV_INFER_DEVICE_ID:-$(ssv_yaml_get inference.device_id 0)}"
-INFER_PRECISION="${SSV_INFER_PRECISION:-$(ssv_yaml_get inference.precision auto)}"
-MODEL_FAMILY="${SSV_MODEL_FAMILY:-$(ssv_yaml_get inference.model_family yolo)}"
-OUTPUT_FORMAT="${SSV_OUTPUT_FORMAT:-$(ssv_yaml_get inference.output_format auto)}"
-RTSP_PROTOCOLS="${SSV_RTSP_PROTOCOLS:-tcp}"
-RTSP_LATENCY="${SSV_RTSP_LATENCY:-200}"
+FRAME_WIDTH="$(ssv_yaml_get pipeline.frame_width 640)"
+FRAME_HEIGHT="$(ssv_yaml_get pipeline.frame_height 480)"
+DISPLAY_FPS="$(ssv_yaml_get display.fps 30)"
+ANALYSIS_FPS="$(ssv_yaml_get pipeline.analysis_fps 5)"
+CONF_THRESHOLD="$(ssv_yaml_get inference.confidence_threshold 0.5)"
+INFER_RUNTIME="$(ssv_yaml_get inference.runtime auto)"
+INFER_DEVICE="$(ssv_yaml_get inference.device auto)"
+INFER_DEVICE_ID="$(ssv_yaml_get inference.device_id 0)"
+INFER_PRECISION="$(ssv_yaml_get inference.precision auto)"
+MODEL_FAMILY="$(ssv_yaml_get inference.model_family yolo)"
+OUTPUT_FORMAT="$(ssv_yaml_get inference.output_format auto)"
+RTSP_PROTOCOLS="$(ssv_yaml_get sources.0.protocols tcp)"
+RTSP_LATENCY="$(ssv_yaml_get sources.0.latency_ms 200)"
 REDIS_HOST="${REDIS_HOST:-$(ssv_yaml_get redis.host localhost)}"
 REDIS_PORT="${REDIS_PORT:-$(ssv_yaml_get redis.port 6379)}"
-REDIS_STREAM_KEY="${SSV_REDIS_STREAM_KEY:-$(ssv_yaml_get redis.stream_key ssv:events)}"
-CHECK_TIMEOUT="${SSV_CHECK_TIMEOUT:-30s}"
+REDIS_STREAM_KEY="$(ssv_yaml_get redis.stream_key ssv:events)"
+CHECK_TIMEOUT="$(ssv_yaml_get pipeline.check_timeout 30s)"
+GST_DEBUG_LEVEL="${GST_DEBUG:-$(ssv_yaml_get logging.cpp_debug_level "ssv*:4")}"
+
+if [[ ! "$ANALYSIS_FPS" =~ ^[0-9]+$ ]]; then
+    ssv_error "pipeline.analysis_fps 必须是非负整数: $ANALYSIS_FPS"
+    exit 1
+fi
 
 resolve_display_sink() {
     if [ -n "$DISPLAY_SINK_OVERRIDE" ]; then
         echo "$DISPLAY_SINK_OVERRIDE"
-        return 0
-    fi
-
-    if [ -n "${SSV_DISPLAY_SINK:-}" ]; then
-        echo "$SSV_DISPLAY_SINK"
         return 0
     fi
 
@@ -212,10 +217,24 @@ if [ -n "$TARGET_CLASS" ]; then
     infer_props+=("target-class=$TARGET_CLASS")
 fi
 
-analysis_pipeline=(
+analysis_rate_pipeline=(
     ! videoscale
-    ! videorate
-    ! "video/x-raw,width=$FRAME_WIDTH,height=$FRAME_HEIGHT,framerate=$ANALYSIS_FPS/1,format=BGR"
+)
+if [ "$ANALYSIS_FPS" -gt 0 ]; then
+    analysis_rate_pipeline+=(
+        ! videorate
+        ! "video/x-raw,width=$FRAME_WIDTH,height=$FRAME_HEIGHT,framerate=$ANALYSIS_FPS/1,format=BGR"
+    )
+    ANALYSIS_FPS_LABEL="${ANALYSIS_FPS}fps"
+else
+    analysis_rate_pipeline+=(
+        ! "video/x-raw,width=$FRAME_WIDTH,height=$FRAME_HEIGHT,format=BGR"
+    )
+    ANALYSIS_FPS_LABEL="不限流"
+fi
+
+analysis_pipeline=(
+    "${analysis_rate_pipeline[@]}"
     ! ssvtemplate
     ! "${infer_props[@]}"
     ! ssvtrack
@@ -230,7 +249,7 @@ display_source_pipeline=(
 
 ssv_info "输入: $RTSP_URL"
 ssv_info "RTSP transport: $RTSP_PROTOCOLS, latency: ${RTSP_LATENCY}ms"
-ssv_info "显示帧率: ${DISPLAY_FPS}fps, 分析帧率: ${ANALYSIS_FPS}fps"
+ssv_info "显示帧率: ${DISPLAY_FPS}fps, 分析帧率: ${ANALYSIS_FPS_LABEL}"
 ssv_info "模型: $MODEL"
 ssv_info "推理运行时: $INFER_RUNTIME"
 ssv_info "推理设备: $INFER_DEVICE (device-id=$INFER_DEVICE_ID, precision=$INFER_PRECISION)"
@@ -244,7 +263,7 @@ if [ "$SHOW_DISPLAY" = true ]; then
     ssv_info "关闭视频窗口即退出"
     if [ "$DISPLAY_OVERLAY" = true ]; then
         ssv_warn "检测框 overlay 当前为实验路径；如窗口异常，去掉 --overlay"
-        GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
+        GST_DEBUG="$GST_DEBUG_LEVEL" \
         gst-launch-1.0 \
             "${rtsp_decode_pipeline[@]}" \
             ! tee name=t \
@@ -255,7 +274,7 @@ if [ "$SHOW_DISPLAY" = true ]; then
                  "${analysis_pipeline[@]}" \
                  ! fakesink sync=false async=false
     else
-        GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
+        GST_DEBUG="$GST_DEBUG_LEVEL" \
         gst-launch-1.0 \
             "${rtsp_decode_pipeline[@]}" \
             ! tee name=t \
@@ -274,7 +293,7 @@ else
     fi
     if [ "$MODE" = "smoke" ]; then
         set +e
-        GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
+        GST_DEBUG="$GST_DEBUG_LEVEL" \
         timeout --foreground "$CHECK_TIMEOUT" \
         gst-launch-1.0 \
             "${rtsp_decode_pipeline[@]}" \
@@ -287,7 +306,7 @@ else
         fi
         ssv_info "链路冒烟测试完成"
     else
-        GST_DEBUG="${GST_DEBUG:-ssv*:4}" \
+        GST_DEBUG="$GST_DEBUG_LEVEL" \
         gst-launch-1.0 \
             "${rtsp_decode_pipeline[@]}" \
             "${analysis_pipeline[@]}" \
