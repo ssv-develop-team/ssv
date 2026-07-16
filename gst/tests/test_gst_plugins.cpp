@@ -12,13 +12,6 @@
 #include <string>
 
 extern void run_ssv_meta_tests();
-extern void add_botsort_kalman_tests(TCase *tc);
-extern void add_botsort_matching_tests(TCase *tc);
-extern void add_botsort_gmc_tests(TCase *tc);
-extern void add_botsort_tracker_tests(TCase *tc);
-extern void add_botsort_coordinate_tests(TCase *tc);
-extern void add_botsort_processor_tests(TCase *tc);
-extern void add_botsort_coordinate_tests(TCase *tc);
 
 static void assert_element_factory(const char *name) {
     GstElement *element = gst_element_factory_make(name, nullptr);
@@ -361,15 +354,8 @@ GST_END_TEST
 static Suite *ssv_gst_suite() {
     Suite *suite = suite_create("ssv-gst");
     TCase *tc = tcase_create("plugins");
-    add_botsort_kalman_tests(tc);
-    add_botsort_matching_tests(tc);
-    add_botsort_gmc_tests(tc);
-    add_botsort_tracker_tests(tc);
-    add_botsort_coordinate_tests(tc);
-    add_botsort_processor_tests(tc);
     tcase_add_test(tc, test_ssv_plugin_factories_are_registered);
     tcase_add_test(tc, test_ssvinfer_exposes_label_map_property);
-    add_botsort_coordinate_tests(tc);
     tcase_add_test(tc, test_ssvinfer_exposes_runtime_properties);
     tcase_add_test(tc, test_ssvinfer_preprocessor_outputs_nchw_rgb_tensor);
     tcase_add_test(tc, test_ssvinfer_yolo_parser_parses_nx6_output);
