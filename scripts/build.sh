@@ -186,7 +186,7 @@ includedir=\${prefix}/usr/include/opencv4
 Name: opencv4
 Description: Local OpenCV 4.10 runtime from Ubuntu packages
 Version: $SSV_OPENCV_VERSION
-Libs: -L\${libdir} -lopencv_calib3d -lopencv_video -lopencv_dnn -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core
+Libs: -L\${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core -lprotobuf -ltbb -llapack -lblas
 Cflags: -I\${includedir}
 EOF
     for required in "${required_files[@]}"; do

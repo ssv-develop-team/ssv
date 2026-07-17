@@ -43,6 +43,10 @@ jobs:
             libgstreamer1.0-dev \
             libhiredis-dev \
             libyaml-cpp-dev \
+            libblas-dev \
+            liblapack-dev \
+            libprotobuf-dev \
+            libtbb-dev \
             meson \
             ninja-build \
             nlohmann-json3-dev \
