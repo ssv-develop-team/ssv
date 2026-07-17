@@ -119,12 +119,18 @@ grep -q 'SSV_BUILD_DIR.*build' scripts/lib.sh || fail "scripts/lib.sh does not d
 grep -q 'rm -rf.*SSV_BUILD_DIR' scripts/clean.sh || fail "scripts/clean.sh does not remove SSV_BUILD_DIR"
 
 grep -q 'ensure_opencv' scripts/build.sh || fail 'build script does not prepare local OpenCV'
-grep -q 'SSV_OPENCV_POOL_BASE' scripts/build.sh || fail 'build script does not pin Ubuntu OpenCV pool'
+grep -q 'local pool_base="https://archive.ubuntu.com/ubuntu/pool/universe/o/opencv"' scripts/build.sh || fail 'build script does not pin Ubuntu OpenCV pool locally'
+grep -q 'local version="4.10.0"' scripts/build.sh || fail 'build script does not pin OpenCV version locally'
+grep -q 'local deb_revision="4.10.0+dfsg-5ubuntu1"' scripts/build.sh || fail 'build script does not pin OpenCV package revision locally'
 grep -q 'downloads/opencv' scripts/build.sh || fail 'OpenCV packages are not cached under .deps/downloads/opencv'
 grep -q 'SSV_OPENCV_MESON_MODE' scripts/build.sh || fail 'build script does not map OpenCV build mode to Meson'
-grep -q 'case "\$SSV_OPENCV" in' scripts/build.sh || fail 'build script does not handle OpenCV mode like TensorRT'
+grep -q 'case "\$mode" in' scripts/build.sh || fail 'build script does not handle OpenCV mode like TensorRT'
 grep -q 'lib/pkgconfig/opencv4.pc' scripts/build.sh || fail 'build script does not generate local opencv4.pc'
-grep -q 'SSV_OPENCV_LIB_DIR' scripts/lib.sh || fail 'runtime does not expose local OpenCV library path'
+grep -q 'SSV_OPENCV_ROOT=' scripts/lib.sh || fail 'runtime script does not expose OpenCV root override'
+grep -q '"\$SSV_OPENCV_ROOT"/usr/lib/\*' scripts/lib.sh || fail 'runtime script does not discover OpenCV library directory'
+if rg -n 'SSV_OPENCV_(VERSION|DEB_REVISION|POOL_BASE|PC_DIR|LIB_DIR|DEB_ARCH|MULTIARCH)' scripts/lib.sh; then
+    fail 'runtime script exposes OpenCV build implementation details'
+fi
 grep -q "option('opencv'" meson.options || fail 'Meson does not expose OpenCV build mode'
 grep -q "opencv_opt = get_option('opencv')" meson.build || fail 'Meson does not read OpenCV build mode'
 grep -q 'opencv_enabled' meson.build || fail 'Meson does not gate OpenCV discovery by build mode'
