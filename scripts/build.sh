@@ -82,6 +82,129 @@ extract_archive() {
     esac
 }
 
+ensure_opencv() {
+    case "$SSV_OPENCV" in
+        enabled) ;;
+        disabled) return 0 ;;
+        *)
+            ssv_error "unsupported SSV_OPENCV: $SSV_OPENCV (expected enabled or disabled)"
+            return 1
+            ;;
+    esac
+
+    local modules=(core imgproc video calib3d features2d flann dnn)
+    local complete=true
+    local required
+    local required_files=(
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/core.hpp"
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/imgproc.hpp"
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/video/tracking.hpp"
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/calib3d.hpp"
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/features2d.hpp"
+        "$SSV_OPENCV_ROOT/usr/include/opencv4/opencv2/flann.hpp"
+        "$SSV_OPENCV_LIB_DIR/libopencv_core.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_imgproc.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_video.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_calib3d.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_features2d.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_flann.so"
+        "$SSV_OPENCV_LIB_DIR/libopencv_dnn.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_core.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_imgproc.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_video.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_calib3d.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_features2d.so.410"
+        "$SSV_OPENCV_LIB_DIR/libopencv_flann.so.410"
+        "$SSV_OPENCV_PC_DIR/opencv4.pc"
+    )
+    for required in "${required_files[@]}"; do
+        [ -e "$required" ] || complete=false
+    done
+    if [ "$complete" = true ]; then
+        export PKG_CONFIG_PATH="$SSV_OPENCV_PC_DIR${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export LD_LIBRARY_PATH="$SSV_OPENCV_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        pkg-config --exists opencv4
+        return $?
+    fi
+
+    ssv_require_command "dpkg-deb" "install dpkg" "local system" || return 1
+    local download_dir="$SSV_ROOT/.deps/downloads/opencv"
+    mkdir -p "$download_dir"
+    local module kind filename expected_name cache_file actual_name actual_version actual_arch
+    for module in "${modules[@]}"; do
+        local kinds=(dev runtime)
+        [ "$module" = dnn ] && kinds=(runtime)
+        for kind in "${kinds[@]}"; do
+            if [ "$kind" = dev ]; then
+                filename="libopencv-${module}-dev_${SSV_OPENCV_DEB_REVISION}_${SSV_OPENCV_DEB_ARCH}.deb"
+                expected_name="libopencv-${module}-dev"
+            else
+                filename="libopencv-${module}410_${SSV_OPENCV_DEB_REVISION}_${SSV_OPENCV_DEB_ARCH}.deb"
+                expected_name="libopencv-${module}410"
+            fi
+            cache_file="$download_dir/$filename"
+            if [ ! -f "$cache_file" ]; then
+                ssv_info "OpenCV package not found; downloading $filename"
+                download_file "$SSV_OPENCV_POOL_BASE/$filename" "$cache_file" || return 1
+            fi
+            actual_name="$(dpkg-deb -f "$cache_file" Package 2>/dev/null)" || {
+                ssv_error "invalid OpenCV Debian package: $cache_file"
+                return 1
+            }
+            actual_version="$(dpkg-deb -f "$cache_file" Version 2>/dev/null)" || return 1
+            actual_arch="$(dpkg-deb -f "$cache_file" Architecture 2>/dev/null)" || return 1
+            if [ "$actual_name" != "$expected_name" ] || [ "$actual_version" != "$SSV_OPENCV_DEB_REVISION" ] || [ "$actual_arch" != "$SSV_OPENCV_DEB_ARCH" ]; then
+                ssv_error "OpenCV package metadata mismatch: $cache_file (expected ${expected_name}, ${SSV_OPENCV_DEB_REVISION}, ${SSV_OPENCV_DEB_ARCH}; got ${actual_name}, ${actual_version}, ${actual_arch})"
+                return 1
+            fi
+        done
+    done
+
+    local temp_root="$SSV_ROOT/.deps/tmp/opencv-${SSV_OPENCV_VERSION}-$$"
+    trap 'rm -rf "$temp_root"' RETURN
+    rm -rf "$temp_root"
+    mkdir -p "$temp_root/usr"
+    for module in "${modules[@]}"; do
+        local kinds=(dev runtime)
+        [ "$module" = dnn ] && kinds=(runtime)
+        for kind in "${kinds[@]}"; do
+            if [ "$kind" = dev ]; then
+                filename="libopencv-${module}-dev_${SSV_OPENCV_DEB_REVISION}_${SSV_OPENCV_DEB_ARCH}.deb"
+            else
+                filename="libopencv-${module}410_${SSV_OPENCV_DEB_REVISION}_${SSV_OPENCV_DEB_ARCH}.deb"
+            fi
+            dpkg-deb -x "$download_dir/$filename" "$temp_root" || return 1
+        done
+    done
+    mkdir -p "$temp_root/lib/pkgconfig"
+    cat > "$temp_root/lib/pkgconfig/opencv4.pc" <<EOF
+prefix=$SSV_OPENCV_ROOT
+exec_prefix=\${prefix}
+libdir=\${prefix}/usr/lib/$SSV_OPENCV_MULTIARCH
+includedir=\${prefix}/usr/include/opencv4
+
+Name: opencv4
+Description: Local OpenCV 4.10 runtime from Ubuntu packages
+Version: $SSV_OPENCV_VERSION
+Libs: -L\${libdir} -lopencv_calib3d -lopencv_video -lopencv_dnn -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core
+Cflags: -I\${includedir}
+EOF
+    for required in "${required_files[@]}"; do
+        required="${required/$SSV_OPENCV_ROOT/$temp_root}"
+        [ -e "$required" ] || {
+            ssv_error "OpenCV SDK is incomplete after extraction: $required"
+            return 1
+        }
+    done
+    rm -rf "$SSV_OPENCV_ROOT"
+    mkdir -p "$(dirname "$SSV_OPENCV_ROOT")"
+    mv "$temp_root" "$SSV_OPENCV_ROOT" || return 1
+    trap - RETURN
+    export PKG_CONFIG_PATH="$SSV_OPENCV_PC_DIR${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export LD_LIBRARY_PATH="$SSV_OPENCV_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    pkg-config --exists opencv4
+}
+
 ensure_onnxruntime() {
     local version="${SSV_ONNXRUNTIME_VERSION:-1.25.1}"
     local flavor="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
@@ -340,6 +463,7 @@ fi
 
 ensure_onnxruntime
 ensure_tensorrt
+ensure_opencv
 
 if ! pkg-config --exists onnxruntime; then
     ssv_error "缺少 C/C++ 开发依赖: onnxruntime"
@@ -347,6 +471,8 @@ if ! pkg-config --exists onnxruntime; then
     exit 1
 fi
 
+SSV_OPENCV_MESON_MODE="$SSV_OPENCV"
+meson_opencv_args=(-Dopencv="$SSV_OPENCV_MESON_MODE")
 meson_tensorrt_args=()
 case "${SSV_TENSORRT_MESON_MODE:-${SSV_TENSORRT:-auto}}" in
     enabled) meson_tensorrt_args=(-Dtensorrt=enabled) ;;
@@ -360,13 +486,13 @@ fi
 
 if [ -f "$SSV_BUILD_DIR/build.ninja" ]; then
     ssv_info "使用已有 Meson 构建目录: ${SSV_BUILD_DIR#$SSV_ROOT/}"
-    meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
+    meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
 else
     if [ -d "$SSV_BUILD_DIR" ]; then
         ssv_warn "构建目录存在但不是有效的 Meson build，重新创建: ${SSV_BUILD_DIR#$SSV_ROOT/}"
         rm -rf "$SSV_BUILD_DIR"
     fi
-    meson setup "$SSV_BUILD_DIR" "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
+    meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
 fi
 
 meson compile -C "$SSV_BUILD_DIR"

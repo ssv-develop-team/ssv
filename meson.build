@@ -56,7 +56,15 @@ if not onnx_dep.found()
   endif
 endif
 
-opencv_dep = dependency('opencv4', required : false)
+opencv_opt = get_option('opencv')
+opencv_enabled = opencv_opt == 'enabled'
+opencv_dep = declare_dependency()
+if opencv_enabled
+  opencv_dep = dependency('opencv4', required : true)
+  message('OpenCV GMC enabled')
+else
+  message('OpenCV GMC disabled')
+endif
 
 conf_data = configuration_data()
 conf_data.set_quoted('SSV_VERSION', meson.project_version())

@@ -117,3 +117,16 @@ fi
 
 grep -q 'SSV_BUILD_DIR.*build' scripts/lib.sh || fail "scripts/lib.sh does not define SSV_BUILD_DIR"
 grep -q 'rm -rf.*SSV_BUILD_DIR' scripts/clean.sh || fail "scripts/clean.sh does not remove SSV_BUILD_DIR"
+
+grep -q 'ensure_opencv' scripts/build.sh || fail 'build script does not prepare local OpenCV'
+grep -q 'SSV_OPENCV_POOL_BASE' scripts/build.sh || fail 'build script does not pin Ubuntu OpenCV pool'
+grep -q 'downloads/opencv' scripts/build.sh || fail 'OpenCV packages are not cached under .deps/downloads/opencv'
+grep -q 'SSV_OPENCV_MESON_MODE' scripts/build.sh || fail 'build script does not map OpenCV build mode to Meson'
+grep -q 'case "\$SSV_OPENCV" in' scripts/build.sh || fail 'build script does not handle OpenCV mode like TensorRT'
+grep -q 'lib/pkgconfig/opencv4.pc' scripts/build.sh || fail 'build script does not generate local opencv4.pc'
+grep -q 'SSV_OPENCV_LIB_DIR' scripts/lib.sh || fail 'runtime does not expose local OpenCV library path'
+grep -q "option('opencv'" meson.options || fail 'Meson does not expose OpenCV build mode'
+grep -q "opencv_opt = get_option('opencv')" meson.build || fail 'Meson does not read OpenCV build mode'
+grep -q 'opencv_enabled' meson.build || fail 'Meson does not gate OpenCV discovery by build mode'
+grep -q 'opencv_enabled' gst/ssv-track/meson.build || fail 'track does not gate GMC on OpenCV mode'
+grep -q 'opencv_enabled' gst/tests/meson.build || fail 'tests do not gate OpenCV on build mode'

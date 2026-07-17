@@ -1,6 +1,6 @@
 ssv_track_deps = [gst_deps, gst_base_dep, gst_video_dep, ssv_common_dep]
-ssv_track_cpp_args = ['-DPACKAGE="gstssvtrack"', '-DSSV_HAS_OPENCV=' + (opencv_dep.found() ? '1' : '0')]
-if opencv_dep.found()
+ssv_track_cpp_args = ['-DPACKAGE="gstssvtrack"', '-DSSV_HAS_OPENCV=' + (opencv_enabled ? '1' : '0')]
+if opencv_enabled
   ssv_track_deps += opencv_dep
 endif
 

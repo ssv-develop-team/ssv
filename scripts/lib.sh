@@ -37,6 +37,22 @@ elif [ "$SSV_ONNXRUNTIME_FLAVOR" != "cpu" ]; then
 fi
 SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-$SSV_ONNXRUNTIME_DEFAULT_ROOT}"
 SSV_TENSORRT_ROOT="${SSV_TENSORRT_ROOT:-$SSV_ROOT/.deps/tensorrt}"
+SSV_OPENCV="${SSV_OPENCV:-enabled}"
+case "$SSV_OPENCV" in
+    enabled|disabled) ;;
+    *) echo "[SSV] unsupported SSV_OPENCV: $SSV_OPENCV (expected enabled or disabled)" >&2; exit 1 ;;
+esac
+SSV_OPENCV_VERSION="${SSV_OPENCV_VERSION:-4.10.0}"
+SSV_OPENCV_DEB_REVISION="${SSV_OPENCV_DEB_REVISION:-4.10.0+dfsg-5ubuntu1}"
+SSV_OPENCV_POOL_BASE="${SSV_OPENCV_POOL_BASE:-https://archive.ubuntu.com/ubuntu/pool/universe/o/opencv}"
+SSV_OPENCV_ROOT="${SSV_OPENCV_ROOT:-$SSV_ROOT/.deps/opencv}"
+SSV_OPENCV_PC_DIR="$SSV_OPENCV_ROOT/lib/pkgconfig"
+case "$(uname -m)" in
+    x86_64|amd64) SSV_OPENCV_DEB_ARCH='amd64'; SSV_OPENCV_MULTIARCH='x86_64-linux-gnu' ;;
+    aarch64|arm64) SSV_OPENCV_DEB_ARCH='arm64'; SSV_OPENCV_MULTIARCH='aarch64-linux-gnu' ;;
+    *) echo "[SSV] unsupported OpenCV architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+SSV_OPENCV_LIB_DIR="$SSV_OPENCV_ROOT/usr/lib/$SSV_OPENCV_MULTIARCH"
 SSV_BUILD_DIR="${SSV_BUILD_DIR:-$SSV_ROOT/build}"
 SSV_PLUGIN_DIR="$SSV_BUILD_DIR/gst/ssv-template"
 
@@ -117,6 +133,7 @@ export_ssv_plugin_path() {
     export GST_PLUGIN_PATH="$SSV_PLUGIN_PATHS"
     # ssv-common 是共享库，需要让动态链接器能找到
     SSV_LD_PATHS="$SSV_BUILD_DIR/gst/ssv-common"
+    append_ld_path_if_dir "$SSV_OPENCV_LIB_DIR"
     append_ld_path_if_dir "$SSV_ONNXRUNTIME_ROOT/lib"
     append_ld_path_if_dir "$SSV_TENSORRT_ROOT/usr/lib/x86_64-linux-gnu"
     append_ld_path_if_dir "$SSV_TENSORRT_ROOT/lib"

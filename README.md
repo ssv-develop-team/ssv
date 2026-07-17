@@ -68,6 +68,8 @@ sudo apt-get install -y \
 
 Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。`./ssv build` 在找不到 `onnxruntime.pc` 时会自动下载官方 CPU release 到 `.deps/onnxruntime/`，并生成 Meson 可识别的 `pkg-config` 文件。
 
+默认 `./ssv build` 由 Ubuntu pool 下载 13 个固定 OpenCV 4.10 `.deb`（六个模块的开发/运行时包，以及 `libopencv-dnn410` 运行时递归依赖）到 `.deps/downloads/opencv/`，解包到 `.deps/opencv/usr/`，并在 `.deps/opencv/lib/pkgconfig/opencv4.pc` 生成本地描述。不调用 `apt`，也不链接系统 OpenCV；glibc、libstdc++ 和其他通用 ABI 运行库仍由宿主提供。若不需要 GMC，使用 `SSV_OPENCV=disabled ./ssv build` 跳过下载和链接，以无 OpenCV 退化路径构建。
+
 Arch Linux:
 
 ```bash
@@ -167,6 +169,7 @@ SSV_TENSORRT=enabled ./ssv build
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
+| `SSV_OPENCV` | OpenCV/GMC 构建模式：`enabled`、`disabled` | `enabled` |
 | `SSV_TENSORRT` | TensorRT 构建模式：`auto`、`enabled`、`disabled` | `auto` |
 | `SSV_TENSORRT_ROOT` | 已解包的 TensorRT SDK 目录，也作为归档解包目标 | `.deps/tensorrt` |
 | `SSV_TENSORRT_ARCHIVE` | 本地 TensorRT SDK 归档路径，支持 `.tar.*` 和 `.zip` | 无 |

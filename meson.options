@@ -1,3 +1,6 @@
 option('tests', type : 'boolean', value : false, description : 'Build tests')
 option('tensorrt', type : 'combo', choices : ['auto', 'enabled', 'disabled'], value : 'auto',
   description : 'Build TensorRT inference backend when the SDK is available')
+
+option('opencv', type : 'combo', choices : ['enabled', 'disabled'], value : 'enabled',
+  description : 'Build OpenCV-based GMC when the local OpenCV SDK is enabled')
