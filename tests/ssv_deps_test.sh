@@ -153,8 +153,9 @@ for key in \"\${SSV_DEPS_ENV_KEYS[@]}\"; do printf -v \"\$key\" %s value; done
 SSV_DEPS_RUNTIME_PATH='$TEST_DIR/custom-lib'
 ssv_deps_write_env '$custom_build/ssv-deps.env'
 SSV_BUILD_DIR='$custom_build'
+LD_LIBRARY_PATH='$TEST_DIR/host-lib'
 ssv_deps_load_runtime
-[ \"\$LD_LIBRARY_PATH\" = '$TEST_DIR/custom-lib' ]"
+[ \"\$LD_LIBRARY_PATH\" = '$TEST_DIR/custom-lib:$TEST_DIR/host-lib' ]"
 }
 assert_success 'runtime snapshot follows custom build directory' custom_build_snapshot_test
 
