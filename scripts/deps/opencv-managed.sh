@@ -126,7 +126,7 @@ ssv_opencv_validate_runtime_closure() {
     shift
     local modules=("$@")
     [ "${#modules[@]}" -gt 0 ] || modules=("${SSV_OPENCV_REQUIRED_MODULES[@]}")
-    local module library needed base readelf_output ldd_output unresolved
+    local module library needed base readelf_output ldd_output missing symbol_errors
     for module in "${modules[@]}"; do
         library="$(ssv_opencv_find_library "$lib_dir" "$module")" || return 1
         readelf_output="$(readelf -d "$library" 2>&1)" || {
@@ -146,8 +146,11 @@ ssv_opencv_validate_runtime_closure() {
             ssv_deps_die "OpenCV runtime load check failed for $(basename -- "$library"): $ldd_output"
             return 1
         }
-        unresolved="$(printf '%s\n' "$ldd_output" | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found$/\1/p' | paste -sd, -)"
-        if [ -n "$unresolved" ]; then
+        missing="$(printf '%s\n' "$ldd_output" | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found$/\1/p' | paste -sd, -)"
+        symbol_errors="$(printf '%s\n' "$ldd_output" | sed -n 's/.*undefined symbol: \([^[:space:]]*\).*/\1/p' | paste -sd, -)"
+        if [ -n "$missing" ] || [ -n "$symbol_errors" ]; then
+            local unresolved="$missing"
+            [ -z "$symbol_errors" ] || unresolved="${unresolved:+$unresolved,}$symbol_errors"
             ssv_deps_die "OpenCV runtime dependency is unresolved for $(basename -- "$library"): $unresolved"
             return 1
         fi

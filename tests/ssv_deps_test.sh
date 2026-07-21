@@ -138,6 +138,16 @@ assert_failure 'local OpenCV provider rejects an unreadable required library' ru
 SSV_ROOT='$TEST_DIR/local-provider-broken'
 ssv_opencv_local_prepare '$fake_broken_opencv/include' '$fake_broken_opencv/lib' 4.10.0"
 
+fake_unresolved_opencv="$TEST_DIR/local-opencv-unresolved"
+build_fake_local_opencv "$fake_unresolved_opencv" 4.10.0
+printf '%s\n' 'extern "C" void ssv_missing_symbol();' 'extern "C" void ssv_call_missing_symbol() { ssv_missing_symbol(); }' \
+    > "$fake_unresolved_opencv/unresolved.cpp"
+"${CXX:-c++}" -fPIC -shared "$fake_unresolved_opencv/unresolved.cpp" \
+    -o "$fake_unresolved_opencv/lib/libopencv_dnn.so"
+assert_failure 'local OpenCV provider rejects an unresolved runtime symbol' run_clean_shell "source scripts/deps.sh
+SSV_ROOT='$TEST_DIR/local-provider-unresolved'
+ssv_opencv_local_prepare '$fake_unresolved_opencv/include' '$fake_unresolved_opencv/lib' 4.10.0"
+
 fake_wrong_opencv="$TEST_DIR/local-opencv-wrong-version"
 build_fake_local_opencv "$fake_wrong_opencv" 4.9.0
 assert_failure 'local OpenCV provider rejects a runtime version other than 4.10.0' run_clean_shell "source scripts/deps.sh
