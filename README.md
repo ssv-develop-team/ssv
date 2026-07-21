@@ -72,6 +72,17 @@ Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。默认 `./ssv build
 
 managed OpenCV 当前由 provider 获取预编译包，使用 `ar` 和 `tar` 解包，不依赖 `apt` 或 `dpkg-deb`。它对项目公开链接 `core`、`imgproc`、`video`、`calib3d`、`features2d`、`flann`，并额外携带 `dnn` 及其特定 SONAME 的 protobuf 运行库以闭合 `libopencv_video` 的动态依赖；这些私有运行库不进入 `opencv4.pc` 的公开 OpenCV 模块列表。包来源属于 provider 内部实现，对外只声明 OpenCV `4.10.0`。
 
+如果你在当前宿主机自行编译 OpenCV 4.10.0，可以使用 `local` provider。它只读取你填写的头文件目录和库目录，不修改或复制 OpenCV 安装目录：
+
+```bash
+SSV_OPENCV_SOURCE=local \
+SSV_OPENCV_INCLUDE_DIR=/path/to/opencv/include/opencv4 \
+SSV_OPENCV_LIB_DIR=/path/to/opencv/lib \
+./ssv build
+```
+
+provider 会生成 `.deps/opencv-local/lib/pkgconfig/opencv4.pc`，并执行 C++ 编译/加载探针；只有实际版本为 `4.10.0` 且所需模块和运行库完整时才会继续构建。Python `cv2` 文件不能代替 C++ OpenCV SDK。
+
 Arch Linux:
 
 ```bash
@@ -146,7 +157,7 @@ cp config/ssv.example.yaml config/ssv.yaml
 
 `pipeline.analysis_fps` 控制推理/跟踪/事件发布分支的抽帧频率，默认示例为 `5`，用于降低 GPU 和事件吞吐压力。需要测试 TensorRT 或让分析分支按源视频可用帧率运行时，将它设为 `0` 表示不限流；显示窗口帧率仍由 `display.fps` 控制。
 
-三类 SDK 使用一致的配置维度：`SOURCE=managed|system` 选择来源，managed 使用稳定 `ROOT`，可选能力再使用 `MODE`。当前 shell 优先于根 `.env`，`.env` 优先于项目默认版本。
+三类 SDK 使用一致的配置维度：`SOURCE` 选择来源，managed 使用稳定 `ROOT`，可选能力再使用 `MODE`。ONNX Runtime 和 TensorRT 支持 `managed|system`；OpenCV 额外支持 `local`，通过 `SSV_OPENCV_INCLUDE_DIR` 和 `SSV_OPENCV_LIB_DIR` 引用本机编译安装。当前 shell 优先于根 `.env`，`.env` 优先于项目默认版本。
 
 ONNX Runtime 是必需依赖，默认 managed CPU：
 
@@ -169,6 +180,11 @@ OpenCV 默认 enabled；不需要 GMC 时完全跳过准备和发现：
 ```bash
 SSV_OPENCV_MODE=disabled ./ssv build
 SSV_OPENCV_SOURCE=system ./ssv build
+# 本地编译的 OpenCV 4.10.0
+SSV_OPENCV_SOURCE=local \
+SSV_OPENCV_INCLUDE_DIR=/path/to/opencv/include/opencv4 \
+SSV_OPENCV_LIB_DIR=/path/to/opencv/lib \
+./ssv build
 ```
 
 TensorRT 与 CUDA Runtime 作为一个依赖单元。默认 managed `auto` 只复用已有完整 ROOT，没有 SDK 时不下载并使用 stub。`enabled` 要求 provider 成功；版本从 `NvInferVersion.h` 自动读取：
@@ -193,9 +209,11 @@ SSV_TENSORRT_MODE=disabled ./ssv build
 | `SSV_ONNXRUNTIME_SOURCE` | ONNX Runtime 来源：`managed`、`system` | `managed` |
 | `SSV_ONNXRUNTIME_VERSION` | managed 版本：`x.y.z` 或 `x.y.z-gpu` | `1.25.1` |
 | `SSV_ONNXRUNTIME_ROOT` | managed 安装目录 | `.deps/onnxruntime` |
-| `SSV_OPENCV_SOURCE` | OpenCV 来源：`managed`、`system` | `managed` |
+| `SSV_OPENCV_SOURCE` | OpenCV 来源：`managed`、`local`、`system` | `managed` |
 | `SSV_OPENCV_MODE` | OpenCV/GMC：`enabled`、`disabled` | `enabled` |
 | `SSV_OPENCV_ROOT` | managed 安装目录 | `.deps/opencv` |
+| `SSV_OPENCV_INCLUDE_DIR` | local OpenCV 头文件目录 | 无 |
+| `SSV_OPENCV_LIB_DIR` | local OpenCV 动态库目录 | 无 |
 | `SSV_TENSORRT_SOURCE` | TensorRT 来源：`managed`、`system` | `managed` |
 | `SSV_TENSORRT_MODE` | TensorRT：`auto`、`enabled`、`disabled` | `auto` |
 | `SSV_TENSORRT_ROOT` | managed SDK 目录 | `.deps/tensorrt` |

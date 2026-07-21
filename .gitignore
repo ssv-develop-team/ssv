@@ -4,6 +4,7 @@ builddir/
 _build/
 install/
 .deps/
+.dep/
 .cache/
 .superpowers/
 

@@ -43,6 +43,7 @@ run_clean_shell() {
     env \
         -u SSV_ONNXRUNTIME_SOURCE -u SSV_ONNXRUNTIME_VERSION -u SSV_ONNXRUNTIME_ROOT \
         -u SSV_OPENCV_SOURCE -u SSV_OPENCV_MODE -u SSV_OPENCV_ROOT \
+        -u SSV_OPENCV_INCLUDE_DIR -u SSV_OPENCV_LIB_DIR \
         -u SSV_TENSORRT_SOURCE -u SSV_TENSORRT_MODE -u SSV_TENSORRT_ROOT \
         -u SSV_TENSORRT_ARCHIVE -u SSV_TENSORRT_URL -u CUDA_HOME \
         -u SSV_EXTRA_PKG_CONFIG_PATH \
@@ -64,6 +65,11 @@ assert_success 'managed root accepts ordinary spaces' run_clean_shell 'source sc
 
 assert_failure 'system ONNX Runtime rejects managed version' run_clean_shell 'SSV_ONNXRUNTIME_SOURCE=system SSV_ONNXRUNTIME_VERSION=1.25.1; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'disabled OpenCV rejects source' run_clean_shell 'SSV_OPENCV_MODE=disabled SSV_OPENCV_SOURCE=managed; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_success 'local OpenCV source accepts explicit include and library paths' run_clean_shell 'local_include="$TEST_DIR/local/include"; local_lib="$TEST_DIR/local/lib"; mkdir -p "$local_include" "$local_lib"; SSV_OPENCV_SOURCE=local SSV_OPENCV_INCLUDE_DIR="$local_include" SSV_OPENCV_LIB_DIR="$local_lib"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config; [ "$SSV_OPENCV_SOURCE" = local ]'
+assert_failure 'local OpenCV requires an include path' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_LIB_DIR="$TEST_DIR/local/lib"; mkdir -p "$SSV_OPENCV_LIB_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_failure 'local OpenCV requires a library path' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/local/include"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_failure 'local OpenCV rejects managed root' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_ROOT="$TEST_DIR/managed" SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/include" SSV_OPENCV_LIB_DIR="$TEST_DIR/lib"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR" "$SSV_OPENCV_LIB_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_failure 'managed OpenCV rejects local include path' run_clean_shell 'SSV_OPENCV_SOURCE=managed SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/include"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'disabled TensorRT rejects source' run_clean_shell 'SSV_TENSORRT_MODE=disabled SSV_TENSORRT_SOURCE=managed; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'TensorRT rejects archive and URL together' run_clean_shell 'source scripts/deps.sh; SSV_TENSORRT_ARCHIVE=/tmp/a.tar; SSV_TENSORRT_URL=https://example.invalid/a.tar; ssv_deps_resolve_config'
 assert_success 'TensorRT accepts a direct HTTPS URL' run_clean_shell 'SSV_TENSORRT_MODE=enabled SSV_TENSORRT_URL=https://example.invalid/a.tar; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
@@ -77,6 +83,53 @@ assert_failure 'provider result rejects extra fields' run_clean_shell 'source sc
 
 assert_success 'TensorRT auto without SDK resolves to stub' run_clean_shell 'source scripts/deps.sh; SSV_TENSORRT_MODE=auto; SSV_TENSORRT_SOURCE=managed; SSV_TENSORRT_ROOT="$TEST_DIR/no-sdk"; ssv_deps_prepare_tensorrt; [ "$SSV_DEPS_TENSORRT_STATUS" = stub ]'
 assert_success 'TensorRT disabled resolves to stub' run_clean_shell 'source scripts/deps.sh; SSV_TENSORRT_MODE=disabled; ssv_deps_resolve_config; ssv_deps_prepare_tensorrt; [ "$SSV_DEPS_TENSORRT_STATUS" = stub ]'
+
+build_fake_local_opencv() {
+    local sdk="$1" version="$2" module
+    mkdir -p "$sdk/include/opencv4/opencv2" "$sdk/lib"
+    printf '%s\n' \
+        '#pragma once' \
+        '#include <string>' \
+        "#define CV_VERSION \"$version\"" \
+        'namespace cv { std::string getVersionString(); }' \
+        > "$sdk/include/opencv4/opencv2/core.hpp"
+    printf '%s\n' \
+        '#include <opencv2/core.hpp>' \
+        "namespace cv { std::string getVersionString() { return \"$version\"; } }" \
+        > "$sdk/core.cpp"
+    "${CXX:-c++}" -std=c++17 -fPIC -shared \
+        -I"$sdk/include/opencv4" "$sdk/core.cpp" -o "$sdk/lib/libopencv_core.so"
+    for module in imgproc video calib3d features2d flann dnn; do
+        ln -s libopencv_core.so "$sdk/lib/libopencv_${module}.so"
+    done
+}
+
+fake_local_opencv="$TEST_DIR/local-opencv-sdk"
+build_fake_local_opencv "$fake_local_opencv" 4.10.0
+assert_success 'local OpenCV provider generates and probes a private pkg-config package' run_clean_shell "source scripts/deps.sh
+SSV_ROOT='$TEST_DIR/local-provider-project'
+result=\"\$(ssv_opencv_local_prepare '$fake_local_opencv/include' '$fake_local_opencv/lib' 4.10.0)\"
+case \"\$result\" in *'version=4.10.0'*) ;; *) exit 1 ;; esac
+pc=\"\$SSV_ROOT/.deps/opencv-local/lib/pkgconfig/opencv4.pc\"
+grep -Fqx 'includedir=$fake_local_opencv/include/opencv4' \"\$pc\"
+grep -Fqx 'libdir=$fake_local_opencv/lib' \"\$pc\""
+assert_success 'local OpenCV snapshot records normalized local paths' run_clean_shell "source scripts/deps.sh
+SSV_OPENCV_SOURCE=local
+SSV_OPENCV_INCLUDE_DIR='$fake_local_opencv/include'
+SSV_OPENCV_LIB_DIR='$fake_local_opencv/lib'
+ssv_deps_resolve_config
+SSV_DEPS_PKG_CONFIG_PATH=''
+SSV_DEPS_BASE_PKG_CONFIG_PATH=''
+PKG_CONFIG_PATH=''
+ssv_deps_prepare_opencv
+[ \"\$SSV_DEPS_OPENCV_INCLUDE_DIR\" = '$fake_local_opencv/include/opencv4' ]
+[ \"\$SSV_DEPS_OPENCV_LIB_DIR\" = '$fake_local_opencv/lib' ]"
+
+fake_wrong_opencv="$TEST_DIR/local-opencv-wrong-version"
+build_fake_local_opencv "$fake_wrong_opencv" 4.9.0
+assert_failure 'local OpenCV provider rejects a runtime version other than 4.10.0' run_clean_shell "source scripts/deps.sh
+SSV_ROOT='$TEST_DIR/local-provider-wrong-version'
+ssv_opencv_local_prepare '$fake_wrong_opencv/include/opencv4' '$fake_wrong_opencv/lib' 4.10.0"
 
 fake_build_bin="$TEST_DIR/fake-build-bin"
 mkdir -p "$fake_build_bin"

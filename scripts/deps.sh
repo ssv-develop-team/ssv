@@ -9,6 +9,7 @@ source "$SSV_ROOT/scripts/deps/common.sh"
 source "$SSV_ROOT/scripts/deps/versions.sh"
 source "$SSV_ROOT/scripts/deps/onnxruntime-managed.sh"
 source "$SSV_ROOT/scripts/deps/opencv-managed.sh"
+source "$SSV_ROOT/scripts/deps/opencv-local.sh"
 source "$SSV_ROOT/scripts/deps/tensorrt-managed.sh"
 
 SSV_DEPS_ENV_KEYS=(
@@ -27,6 +28,8 @@ SSV_DEPS_ENV_KEYS=(
     SSV_DEPS_OPENCV_VERSION
     SSV_DEPS_OPENCV_PCDIR
     SSV_DEPS_OPENCV_RUNTIME_DIRS
+    SSV_DEPS_OPENCV_INCLUDE_DIR
+    SSV_DEPS_OPENCV_LIB_DIR
     SSV_DEPS_TENSORRT_SOURCE
     SSV_DEPS_TENSORRT_VERSION
     SSV_DEPS_TENSORRT_STATUS
@@ -41,6 +44,8 @@ SSV_DEPS_EXPLICIT_KEYS=(
     SSV_OPENCV_SOURCE
     SSV_OPENCV_MODE
     SSV_OPENCV_ROOT
+    SSV_OPENCV_INCLUDE_DIR
+    SSV_OPENCV_LIB_DIR
     SSV_TENSORRT_SOURCE
     SSV_TENSORRT_MODE
     SSV_TENSORRT_ROOT
@@ -65,7 +70,7 @@ ssv_deps_load_dotenv() {
         key="${key//[[:space:]]/}"
         case "$key" in
             SSV_ONNXRUNTIME_SOURCE|SSV_ONNXRUNTIME_VERSION|SSV_ONNXRUNTIME_ROOT|\
-            SSV_OPENCV_SOURCE|SSV_OPENCV_MODE|SSV_OPENCV_ROOT|\
+            SSV_OPENCV_SOURCE|SSV_OPENCV_MODE|SSV_OPENCV_ROOT|SSV_OPENCV_INCLUDE_DIR|SSV_OPENCV_LIB_DIR|\
             SSV_TENSORRT_SOURCE|SSV_TENSORRT_MODE|SSV_TENSORRT_ROOT|\
             SSV_TENSORRT_ARCHIVE|SSV_TENSORRT_URL|CUDA_HOME|\
             SSV_EXTRA_PKG_CONFIG_PATH|SSV_BUILD_DIR)
@@ -90,11 +95,14 @@ ssv_deps_capture_explicit_config() {
 ssv_deps_resolve_config() {
     local onnx_version_explicit=false onnx_root_explicit=false
     local opencv_source_explicit=false opencv_root_explicit=false
+    local opencv_include_explicit=false opencv_lib_explicit=false
     local tensorrt_source_explicit=false tensorrt_root_explicit=false
     [ "${SSV_DEPS_EXPLICIT_SSV_ONNXRUNTIME_VERSION:-false}" = true ] && onnx_version_explicit=true
     [ "${SSV_DEPS_EXPLICIT_SSV_ONNXRUNTIME_ROOT:-false}" = true ] && onnx_root_explicit=true
     [ "${SSV_DEPS_EXPLICIT_SSV_OPENCV_SOURCE:-false}" = true ] && opencv_source_explicit=true
     [ "${SSV_DEPS_EXPLICIT_SSV_OPENCV_ROOT:-false}" = true ] && opencv_root_explicit=true
+    [ "${SSV_DEPS_EXPLICIT_SSV_OPENCV_INCLUDE_DIR:-false}" = true ] && opencv_include_explicit=true
+    [ "${SSV_DEPS_EXPLICIT_SSV_OPENCV_LIB_DIR:-false}" = true ] && opencv_lib_explicit=true
     [ "${SSV_DEPS_EXPLICIT_SSV_TENSORRT_SOURCE:-false}" = true ] && tensorrt_source_explicit=true
     [ "${SSV_DEPS_EXPLICIT_SSV_TENSORRT_ROOT:-false}" = true ] && tensorrt_root_explicit=true
     SSV_ONNXRUNTIME_SOURCE="${SSV_ONNXRUNTIME_SOURCE:-managed}"
@@ -104,6 +112,8 @@ ssv_deps_resolve_config() {
     SSV_OPENCV_SOURCE="${SSV_OPENCV_SOURCE:-managed}"
     SSV_OPENCV_MODE="${SSV_OPENCV_MODE:-enabled}"
     SSV_OPENCV_ROOT="${SSV_OPENCV_ROOT:-.deps/opencv}"
+    SSV_OPENCV_INCLUDE_DIR="${SSV_OPENCV_INCLUDE_DIR:-}"
+    SSV_OPENCV_LIB_DIR="${SSV_OPENCV_LIB_DIR:-}"
 
     SSV_TENSORRT_SOURCE="${SSV_TENSORRT_SOURCE:-managed}"
     SSV_TENSORRT_MODE="${SSV_TENSORRT_MODE:-auto}"
@@ -111,7 +121,7 @@ ssv_deps_resolve_config() {
 
     case "$SSV_ONNXRUNTIME_SOURCE" in managed|system) ;; *) ssv_deps_die "SSV_ONNXRUNTIME_SOURCE must be managed or system"; return 1 ;; esac
     ssv_onnxruntime_normalize_version "$SSV_ONNXRUNTIME_VERSION" >/dev/null || return 1
-    case "$SSV_OPENCV_SOURCE" in managed|system) ;; *) ssv_deps_die "SSV_OPENCV_SOURCE must be managed or system"; return 1 ;; esac
+    case "$SSV_OPENCV_SOURCE" in managed|local|system) ;; *) ssv_deps_die "SSV_OPENCV_SOURCE must be managed, local, or system"; return 1 ;; esac
     case "$SSV_OPENCV_MODE" in enabled|disabled) ;; *) ssv_deps_die "SSV_OPENCV_MODE must be enabled or disabled"; return 1 ;; esac
     case "$SSV_TENSORRT_SOURCE" in managed|system) ;; *) ssv_deps_die "SSV_TENSORRT_SOURCE must be managed or system"; return 1 ;; esac
     case "$SSV_TENSORRT_MODE" in auto|enabled|disabled) ;; *) ssv_deps_die "SSV_TENSORRT_MODE must be auto, enabled, or disabled"; return 1 ;; esac
@@ -123,13 +133,48 @@ ssv_deps_resolve_config() {
         fi
     fi
     if [ "$SSV_OPENCV_MODE" = disabled ]; then
-        if [ "$opencv_source_explicit" = true ] || [ "$opencv_root_explicit" = true ]; then
-            ssv_deps_die "disabled OpenCV must not set SOURCE or ROOT"
+        if [ "$opencv_source_explicit" = true ] || [ "$opencv_root_explicit" = true ] || \
+            [ "$opencv_include_explicit" = true ] || [ "$opencv_lib_explicit" = true ]; then
+            ssv_deps_die "disabled OpenCV must not set SOURCE, ROOT, INCLUDE_DIR, or LIB_DIR"
             return 1
         fi
-    elif [ "$SSV_OPENCV_SOURCE" = system ] && [ "$opencv_root_explicit" = true ]; then
-        ssv_deps_die "system OpenCV must not set managed ROOT"
-        return 1
+    elif [ "$SSV_OPENCV_SOURCE" = system ]; then
+        if [ "$opencv_root_explicit" = true ] || [ "$opencv_include_explicit" = true ] || [ "$opencv_lib_explicit" = true ]; then
+            ssv_deps_die "system OpenCV must not set ROOT, INCLUDE_DIR, or LIB_DIR"
+            return 1
+        fi
+    elif [ "$SSV_OPENCV_SOURCE" = managed ]; then
+        if [ "$opencv_include_explicit" = true ] || [ "$opencv_lib_explicit" = true ]; then
+            ssv_deps_die "managed OpenCV must not set INCLUDE_DIR or LIB_DIR"
+            return 1
+        fi
+    else
+        if [ "$opencv_root_explicit" = true ]; then
+            ssv_deps_die "local OpenCV must not set managed ROOT"
+            return 1
+        fi
+        [ -n "${SSV_OPENCV_INCLUDE_DIR:-}" ] || {
+            ssv_deps_die "local OpenCV requires SSV_OPENCV_INCLUDE_DIR"
+            return 1
+        }
+        [ -n "${SSV_OPENCV_LIB_DIR:-}" ] || {
+            ssv_deps_die "local OpenCV requires SSV_OPENCV_LIB_DIR"
+            return 1
+        }
+        ssv_deps_validate_scalar SSV_OPENCV_INCLUDE_DIR "$SSV_OPENCV_INCLUDE_DIR" || return 1
+        ssv_deps_validate_scalar SSV_OPENCV_LIB_DIR "$SSV_OPENCV_LIB_DIR" || return 1
+        SSV_OPENCV_INCLUDE_DIR="$(ssv_deps_abs_path "$SSV_OPENCV_INCLUDE_DIR")"
+        SSV_OPENCV_INCLUDE_DIR="$(ssv_deps_normalize_path "$SSV_OPENCV_INCLUDE_DIR")" || return 1
+        SSV_OPENCV_LIB_DIR="$(ssv_deps_abs_path "$SSV_OPENCV_LIB_DIR")"
+        SSV_OPENCV_LIB_DIR="$(ssv_deps_normalize_path "$SSV_OPENCV_LIB_DIR")" || return 1
+        [ -d "$SSV_OPENCV_INCLUDE_DIR" ] || {
+            ssv_deps_die "local OpenCV include directory does not exist: $SSV_OPENCV_INCLUDE_DIR"
+            return 1
+        }
+        [ -d "$SSV_OPENCV_LIB_DIR" ] || {
+            ssv_deps_die "local OpenCV library directory does not exist: $SSV_OPENCV_LIB_DIR"
+            return 1
+        }
     fi
     if [ "$SSV_TENSORRT_MODE" = disabled ]; then
         if [ "$tensorrt_source_explicit" = true ] || [ "$tensorrt_root_explicit" = true ] || \
@@ -290,16 +335,28 @@ ssv_deps_prepare_opencv() {
         SSV_DEPS_OPENCV_VERSION=disabled
         SSV_DEPS_OPENCV_PCDIR=""
         SSV_DEPS_OPENCV_RUNTIME_DIRS=""
+        SSV_DEPS_OPENCV_INCLUDE_DIR=""
+        SSV_DEPS_OPENCV_LIB_DIR=""
         return 0
     fi
     local output
     if [ "$SSV_OPENCV_SOURCE" = managed ]; then
         output="$(ssv_opencv_managed_prepare "$SSV_OPENCV_ROOT" "$SSV_DEPS_DEFAULT_OPENCV_VERSION")" || return 1
+    elif [ "$SSV_OPENCV_SOURCE" = local ]; then
+        output="$(ssv_opencv_local_prepare "$SSV_OPENCV_INCLUDE_DIR" "$SSV_OPENCV_LIB_DIR" "$SSV_DEPS_DEFAULT_OPENCV_VERSION")" || return 1
     else
         output="$(ssv_deps_system_result opencv4 4.5)" || return 1
     fi
     ssv_deps_assign_result OPENCV "$output" || return 1
     SSV_DEPS_OPENCV_SOURCE="$SSV_OPENCV_SOURCE"
+    if [ "$SSV_OPENCV_SOURCE" = local ]; then
+        SSV_DEPS_OPENCV_INCLUDE_DIR="$SSV_OPENCV_INCLUDE_DIR"
+        [ -f "$SSV_DEPS_OPENCV_INCLUDE_DIR/opencv2/core.hpp" ] || SSV_DEPS_OPENCV_INCLUDE_DIR="$SSV_DEPS_OPENCV_INCLUDE_DIR/opencv4"
+        SSV_DEPS_OPENCV_LIB_DIR="$SSV_OPENCV_LIB_DIR"
+    else
+        SSV_DEPS_OPENCV_INCLUDE_DIR=""
+        SSV_DEPS_OPENCV_LIB_DIR=""
+    fi
     ssv_deps_prepend_pkgconfig "$SSV_DEPS_OPENCV_PCDIR"
     local hit
     hit="$(ssv_deps_pkgconfig_dir opencv4)" || return 1
@@ -382,7 +439,7 @@ ssv_deps_compute_signature() {
     local payload
     payload="$(printf '%s\n' \
         "$SSV_DEPS_ONNXRUNTIME_SOURCE|$SSV_DEPS_ONNXRUNTIME_CONFIG_VERSION|$SSV_DEPS_ONNXRUNTIME_VERSION|$SSV_DEPS_ONNXRUNTIME_PCDIR|$SSV_DEPS_ONNXRUNTIME_RUNTIME_DIRS" \
-        "$SSV_DEPS_OPENCV_SOURCE|$SSV_DEPS_OPENCV_MODE|$SSV_DEPS_OPENCV_VERSION|$SSV_DEPS_OPENCV_PCDIR|$SSV_DEPS_OPENCV_RUNTIME_DIRS" \
+        "$SSV_DEPS_OPENCV_SOURCE|$SSV_DEPS_OPENCV_MODE|$SSV_DEPS_OPENCV_VERSION|$SSV_DEPS_OPENCV_PCDIR|$SSV_DEPS_OPENCV_RUNTIME_DIRS|$SSV_DEPS_OPENCV_INCLUDE_DIR|$SSV_DEPS_OPENCV_LIB_DIR" \
         "$SSV_DEPS_TENSORRT_SOURCE|$SSV_DEPS_TENSORRT_MODE|$SSV_DEPS_TENSORRT_VERSION|$SSV_DEPS_TENSORRT_STATUS|$SSV_DEPS_TENSORRT_PCDIR|$SSV_DEPS_TENSORRT_RUNTIME_DIRS")"
     if ssv_deps_have_command sha256sum; then
         printf '%s' "$payload" | sha256sum | awk '{print $1}'

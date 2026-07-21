@@ -6,6 +6,7 @@ SSV_OPENCV_PACKAGE_REVISION="4.10.0+dfsg-5ubuntu1"
 SSV_OPENCV_POOL_BASE="https://archive.ubuntu.com/ubuntu/pool/universe/o/opencv"
 SSV_OPENCV_PROTOBUF_REVISION="3.21.12-11ubuntu3.1"
 SSV_OPENCV_PROTOBUF_POOL_BASE="https://archive.ubuntu.com/ubuntu/pool/main/p/protobuf"
+SSV_OPENCV_REQUIRED_MODULES=(core imgproc video calib3d features2d flann dnn)
 
 ssv_opencv_platform() {
     case "$(uname -m)" in
@@ -110,11 +111,24 @@ ssv_opencv_find_library() {
     return 1
 }
 
+ssv_opencv_validate_required_libraries() {
+    local lib_dir="$1" module
+    for module in "${SSV_OPENCV_REQUIRED_MODULES[@]}"; do
+        ssv_opencv_find_library "$lib_dir" "$module" >/dev/null || {
+            ssv_deps_die "OpenCV library missing: libopencv_${module}.so"
+            return 1
+        }
+    done
+}
+
 ssv_opencv_validate_runtime_closure() {
     local lib_dir="$1"
-    local library needed base
-    for library in "$lib_dir"/libopencv_*.so*; do
-        [ -e "$library" ] || continue
+    shift
+    local modules=("$@")
+    [ "${#modules[@]}" -gt 0 ] || modules=("${SSV_OPENCV_REQUIRED_MODULES[@]}")
+    local module library needed base
+    for module in "${modules[@]}"; do
+        library="$(ssv_opencv_find_library "$lib_dir" "$module")" || return 1
         while read -r needed; do
             base="${needed#libopencv_}"
             base="${base%%.so*}"
@@ -131,6 +145,12 @@ ssv_opencv_validate_runtime_closure() {
             return 1
         fi
     done
+}
+
+ssv_opencv_validate_libraries() {
+    local lib_dir="$1"
+    ssv_opencv_validate_required_libraries "$lib_dir" || return 1
+    ssv_opencv_validate_runtime_closure "$lib_dir" "${SSV_OPENCV_REQUIRED_MODULES[@]}"
 }
 
 ssv_opencv_make_pc() {
@@ -156,29 +176,40 @@ ssv_opencv_make_pc() {
         'Cflags: -I${includedir}'
 }
 
+ssv_opencv_probe_version() {
+    local expected_version="$1" lib_dir="$2"
+    ssv_deps_pkgconfig_version_at_least opencv4 4.5 || return 1
+    local runtime_dirs
+    runtime_dirs="$(ssv_deps_runtime_dirs "$lib_dir")"
+    ssv_deps_compile_probe \
+        "#include <opencv2/core.hpp>
+#include <string>
+int main() {
+    return std::string(CV_VERSION) == \"$expected_version\" &&
+                   cv::getVersionString() == \"$expected_version\"
+        ? 0 : 1;
+}" \
+        opencv4 "$runtime_dirs" || return 1
+    printf '%s\n' "$runtime_dirs"
+}
+
 ssv_opencv_validate_layout() {
     local root="$1" expected_version="$2"
     local include_dir lib_dir
     include_dir="$(ssv_opencv_find_include_dir "$root")" || { ssv_deps_die "OpenCV headers not found under $root"; return 1; }
     lib_dir="$(ssv_opencv_find_lib_dir "$root")" || { ssv_deps_die "OpenCV libraries not found under $root"; return 1; }
-    local module
-    for module in core imgproc video calib3d features2d flann dnn; do
-        ssv_opencv_find_library "$lib_dir" "$module" >/dev/null || { ssv_deps_die "OpenCV library missing: libopencv_${module}.so"; return 1; }
-    done
-    ssv_opencv_validate_runtime_closure "$lib_dir" || return 1
+    ssv_opencv_validate_libraries "$lib_dir" || return 1
     ssv_opencv_make_pc "$root" "$expected_version" "$include_dir" "$lib_dir"
     local old_pkg_config_path="${PKG_CONFIG_PATH:-}"
     export PKG_CONFIG_PATH="$root/lib/pkgconfig${old_pkg_config_path:+:$old_pkg_config_path}"
     local pc_dir
     pc_dir="$(ssv_deps_pkgconfig_dir opencv4)" || return 1
     [ "$pc_dir" = "$(cd -- "$root/lib/pkgconfig" && pwd -P)" ] || { ssv_deps_die "OpenCV pkg-config source mismatch: $pc_dir"; return 1; }
-    ssv_deps_pkgconfig_version_at_least opencv4 4.5 || { ssv_deps_die "OpenCV pkg-config version check failed"; return 1; }
     local runtime_dirs
-    runtime_dirs="$(ssv_deps_runtime_dirs "$lib_dir")"
-    ssv_deps_compile_probe \
-        "#include <opencv2/core.hpp>
-int main() { return cv::getVersionString() == \"$expected_version\" ? 0 : 1; }" \
-        opencv4 "$runtime_dirs" || { ssv_deps_die "OpenCV compile/load probe failed"; return 1; }
+    runtime_dirs="$(ssv_opencv_probe_version "$expected_version" "$lib_dir")" || {
+        ssv_deps_die "OpenCV compile/load probe failed (expected $expected_version)"
+        return 1
+    }
     local actual_version
     actual_version="$(pkg-config --modversion opencv4)"
     printf 'version=%s\n' "$actual_version"
