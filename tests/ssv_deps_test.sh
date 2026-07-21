@@ -125,6 +125,19 @@ ssv_deps_prepare_opencv
 [ \"\$SSV_DEPS_OPENCV_INCLUDE_DIR\" = '$fake_local_opencv/include/opencv4' ]
 [ \"\$SSV_DEPS_OPENCV_LIB_DIR\" = '$fake_local_opencv/lib' ]"
 
+fake_local_opencv_spaces="$TEST_DIR/local opencv sdk"
+build_fake_local_opencv "$fake_local_opencv_spaces" 4.10.0
+assert_success 'local OpenCV provider supports include and library paths with spaces' run_clean_shell "source scripts/deps.sh
+SSV_ROOT='$TEST_DIR/local-provider-spaces'
+ssv_opencv_local_prepare '$fake_local_opencv_spaces/include' '$fake_local_opencv_spaces/lib' 4.10.0"
+
+fake_broken_opencv="$TEST_DIR/local-opencv-broken"
+build_fake_local_opencv "$fake_broken_opencv" 4.10.0
+printf 'not an ELF\n' > "$fake_broken_opencv/lib/libopencv_dnn.so"
+assert_failure 'local OpenCV provider rejects an unreadable required library' run_clean_shell "source scripts/deps.sh
+SSV_ROOT='$TEST_DIR/local-provider-broken'
+ssv_opencv_local_prepare '$fake_broken_opencv/include' '$fake_broken_opencv/lib' 4.10.0"
+
 fake_wrong_opencv="$TEST_DIR/local-opencv-wrong-version"
 build_fake_local_opencv "$fake_wrong_opencv" 4.9.0
 assert_failure 'local OpenCV provider rejects a runtime version other than 4.10.0' run_clean_shell "source scripts/deps.sh

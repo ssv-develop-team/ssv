@@ -126,9 +126,13 @@ ssv_opencv_validate_runtime_closure() {
     shift
     local modules=("$@")
     [ "${#modules[@]}" -gt 0 ] || modules=("${SSV_OPENCV_REQUIRED_MODULES[@]}")
-    local module library needed base
+    local module library needed base readelf_output ldd_output unresolved
     for module in "${modules[@]}"; do
         library="$(ssv_opencv_find_library "$lib_dir" "$module")" || return 1
+        readelf_output="$(readelf -d "$library" 2>&1)" || {
+            ssv_deps_die "OpenCV library is not a readable dynamic ELF: $(basename -- "$library"): $readelf_output"
+            return 1
+        }
         while read -r needed; do
             base="${needed#libopencv_}"
             base="${base%%.so*}"
@@ -137,9 +141,12 @@ ssv_opencv_validate_runtime_closure() {
                 ssv_deps_die "OpenCV runtime closure is incomplete: $(basename -- "$library") needs $needed"
                 return 1
             fi
-        done < <(readelf -d "$library" 2>/dev/null | sed -n 's/.*Shared library: \[\(libopencv_[^]]*\)\].*/\1/p')
-        local unresolved
-        unresolved="$(LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$library" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found$/\1/p' | paste -sd, -)"
+        done < <(printf '%s\n' "$readelf_output" | sed -n 's/.*Shared library: \[\(libopencv_[^]]*\)\].*/\1/p')
+        ldd_output="$(LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd -r "$library" 2>&1)" || {
+            ssv_deps_die "OpenCV runtime load check failed for $(basename -- "$library"): $ldd_output"
+            return 1
+        }
+        unresolved="$(printf '%s\n' "$ldd_output" | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found$/\1/p' | paste -sd, -)"
         if [ -n "$unresolved" ]; then
             ssv_deps_die "OpenCV runtime dependency is unresolved for $(basename -- "$library"): $unresolved"
             return 1
@@ -172,8 +179,8 @@ ssv_opencv_make_pc() {
         "Name: opencv4" \
         "Description: OpenCV runtime" \
         "Version: $version" \
-        "Libs: -L\${libdir} -Wl,-rpath-link,\${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core $host_math_libs" \
-        'Cflags: -I${includedir}'
+        "Libs: -L\"\${libdir}\" -Wl,-rpath-link,\"\${libdir}\" -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core $host_math_libs" \
+        'Cflags: -I"${includedir}"'
 }
 
 ssv_opencv_probe_version() {
