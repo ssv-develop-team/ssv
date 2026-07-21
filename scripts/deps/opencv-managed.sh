@@ -165,7 +165,7 @@ ssv_opencv_validate_libraries() {
 
 ssv_opencv_make_pc() {
     local root="$1" version="$2" include_dir="$3" lib_dir="$4"
-    local pc_dir="$root/lib/pkgconfig"
+    local pc_dir="${5:-$root/lib/pkgconfig}"
     local host_math_libs
     if pkg-config --exists cblas; then
         host_math_libs="$(pkg-config --libs cblas lapack blas)" || return 1
@@ -232,7 +232,8 @@ ssv_opencv_managed_validate() {
 }
 
 ssv_opencv_managed_prepare() {
-    local root="$1" expected_version="$2"
+    local workspace_root="$1" expected_version="$2"
+    local root="$workspace_root/managed"
     local result_file error_file
     result_file="$(mktemp "${TMPDIR:-/tmp}/ssv-opencv-result.XXXXXX")"
     error_file="$(mktemp "${TMPDIR:-/tmp}/ssv-opencv-error.XXXXXX")"

@@ -81,7 +81,7 @@ SSV_OPENCV_LIB_DIR=/path/to/opencv/lib \
 ./ssv build
 ```
 
-provider 会生成 `.deps/opencv-local/lib/pkgconfig/opencv4.pc`，并执行 C++ 编译/加载探针；只有实际版本为 `4.10.0` 且所需模块和运行库完整时才会继续构建。Python `cv2` 文件不能代替 C++ OpenCV SDK。
+provider 会生成 `.deps/opencv/local/lib/pkgconfig/opencv4.pc`，并执行 C++ 编译/加载探针；只有实际版本为 `4.10.0` 且所需模块和运行库完整时才会继续构建。项目内自行编译时统一使用 `.deps/opencv/local/{source,build,install}`，managed 解包结果放在 `.deps/opencv/managed`；下载文件仍与其他依赖一起保存在 `.deps/downloads/opencv`。Python `cv2` 文件不能代替 C++ OpenCV SDK。
 
 Arch Linux:
 
@@ -211,7 +211,7 @@ SSV_TENSORRT_MODE=disabled ./ssv build
 | `SSV_ONNXRUNTIME_ROOT` | managed 安装目录 | `.deps/onnxruntime` |
 | `SSV_OPENCV_SOURCE` | OpenCV 来源：`managed`、`local`、`system` | `managed` |
 | `SSV_OPENCV_MODE` | OpenCV/GMC：`enabled`、`disabled` | `enabled` |
-| `SSV_OPENCV_ROOT` | managed 安装目录 | `.deps/opencv` |
+| `SSV_OPENCV_ROOT` | managed/local 共用的 OpenCV 工作根目录 | `.deps/opencv` |
 | `SSV_OPENCV_INCLUDE_DIR` | local OpenCV 头文件目录 | 无 |
 | `SSV_OPENCV_LIB_DIR` | local OpenCV 动态库目录 | 无 |
 | `SSV_TENSORRT_SOURCE` | TensorRT 来源：`managed`、`system` | `managed` |

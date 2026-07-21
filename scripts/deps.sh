@@ -149,10 +149,6 @@ ssv_deps_resolve_config() {
             return 1
         fi
     else
-        if [ "$opencv_root_explicit" = true ]; then
-            ssv_deps_die "local OpenCV must not set managed ROOT"
-            return 1
-        fi
         [ -n "${SSV_OPENCV_INCLUDE_DIR:-}" ] || {
             ssv_deps_die "local OpenCV requires SSV_OPENCV_INCLUDE_DIR"
             return 1
@@ -201,7 +197,7 @@ ssv_deps_resolve_config() {
     if [ "$SSV_ONNXRUNTIME_SOURCE" = managed ]; then
         SSV_ONNXRUNTIME_ROOT="$(ssv_deps_validate_root SSV_ONNXRUNTIME_ROOT "$SSV_ONNXRUNTIME_ROOT")" || return 1
     fi
-    if [ "$SSV_OPENCV_MODE" = enabled ] && [ "$SSV_OPENCV_SOURCE" = managed ]; then
+    if [ "$SSV_OPENCV_MODE" = enabled ] && { [ "$SSV_OPENCV_SOURCE" = managed ] || [ "$SSV_OPENCV_SOURCE" = local ]; }; then
         SSV_OPENCV_ROOT="$(ssv_deps_validate_root SSV_OPENCV_ROOT "$SSV_OPENCV_ROOT")" || return 1
     fi
     if [ "$SSV_TENSORRT_MODE" != disabled ] && [ "$SSV_TENSORRT_SOURCE" = managed ]; then

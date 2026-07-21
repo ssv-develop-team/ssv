@@ -68,7 +68,7 @@ assert_failure 'disabled OpenCV rejects source' run_clean_shell 'SSV_OPENCV_MODE
 assert_success 'local OpenCV source accepts explicit include and library paths' run_clean_shell 'local_include="$TEST_DIR/local/include"; local_lib="$TEST_DIR/local/lib"; mkdir -p "$local_include" "$local_lib"; SSV_OPENCV_SOURCE=local SSV_OPENCV_INCLUDE_DIR="$local_include" SSV_OPENCV_LIB_DIR="$local_lib"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config; [ "$SSV_OPENCV_SOURCE" = local ]'
 assert_failure 'local OpenCV requires an include path' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_LIB_DIR="$TEST_DIR/local/lib"; mkdir -p "$SSV_OPENCV_LIB_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'local OpenCV requires a library path' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/local/include"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
-assert_failure 'local OpenCV rejects managed root' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_ROOT="$TEST_DIR/managed" SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/include" SSV_OPENCV_LIB_DIR="$TEST_DIR/lib"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR" "$SSV_OPENCV_LIB_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_success 'local OpenCV accepts the shared workspace root' run_clean_shell 'SSV_OPENCV_SOURCE=local SSV_OPENCV_ROOT=.deps/opencv-custom SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/include" SSV_OPENCV_LIB_DIR="$TEST_DIR/lib"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR" "$SSV_OPENCV_LIB_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config; [ "$SSV_OPENCV_ROOT" = "$SSV_ROOT/.deps/opencv-custom" ]'
 assert_failure 'managed OpenCV rejects local include path' run_clean_shell 'SSV_OPENCV_SOURCE=managed SSV_OPENCV_INCLUDE_DIR="$TEST_DIR/include"; mkdir -p "$SSV_OPENCV_INCLUDE_DIR"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'disabled TensorRT rejects source' run_clean_shell 'SSV_TENSORRT_MODE=disabled SSV_TENSORRT_SOURCE=managed; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'TensorRT rejects archive and URL together' run_clean_shell 'source scripts/deps.sh; SSV_TENSORRT_ARCHIVE=/tmp/a.tar; SSV_TENSORRT_URL=https://example.invalid/a.tar; ssv_deps_resolve_config'
@@ -106,13 +106,29 @@ build_fake_local_opencv() {
 
 fake_local_opencv="$TEST_DIR/local-opencv-sdk"
 build_fake_local_opencv "$fake_local_opencv" 4.10.0
+
+fake_managed_workspace="$TEST_DIR/managed-opencv-project/.deps/opencv"
+build_fake_local_opencv "$fake_managed_workspace/managed/usr" 4.10.0
+mkdir -p "$fake_managed_workspace/local/source"
+printf 'keep local source\n' > "$fake_managed_workspace/local/source/.ssv-test-sentinel"
+assert_success 'managed OpenCV publishes only inside the shared workspace managed subtree' run_clean_shell "source scripts/deps.sh
+result=\"\$(ssv_opencv_managed_prepare '$fake_managed_workspace' 4.10.0)\"
+case \"\$result\" in *'pkgconfig_dir=$fake_managed_workspace/managed/lib/pkgconfig'*) ;; *) exit 1 ;; esac
+[ -f '$fake_managed_workspace/managed/lib/pkgconfig/opencv4.pc' ]
+[ ! -e '$fake_managed_workspace/lib/pkgconfig/opencv4.pc' ]
+grep -Fqx 'keep local source' '$fake_managed_workspace/local/source/.ssv-test-sentinel'"
+
 assert_success 'local OpenCV provider generates and probes a private pkg-config package' run_clean_shell "source scripts/deps.sh
 SSV_ROOT='$TEST_DIR/local-provider-project'
+mkdir -p \"\$SSV_ROOT/.deps/opencv/local/source\"
+printf 'keep source\n' > \"\$SSV_ROOT/.deps/opencv/local/source/.ssv-test-sentinel\"
 result=\"\$(ssv_opencv_local_prepare '$fake_local_opencv/include' '$fake_local_opencv/lib' 4.10.0)\"
 case \"\$result\" in *'version=4.10.0'*) ;; *) exit 1 ;; esac
-pc=\"\$SSV_ROOT/.deps/opencv-local/lib/pkgconfig/opencv4.pc\"
+pc=\"\$SSV_ROOT/.deps/opencv/local/lib/pkgconfig/opencv4.pc\"
 grep -Fqx 'includedir=$fake_local_opencv/include/opencv4' \"\$pc\"
-grep -Fqx 'libdir=$fake_local_opencv/lib' \"\$pc\""
+grep -Fqx 'libdir=$fake_local_opencv/lib' \"\$pc\"
+grep -Fqx 'keep source' \"\$SSV_ROOT/.deps/opencv/local/source/.ssv-test-sentinel\"
+[ \"\$(find \"\$SSV_ROOT/.deps\" -mindepth 1 -maxdepth 1 -type d -name '*opencv*' -printf '%f\\n')\" = opencv ]"
 assert_success 'local OpenCV snapshot records normalized local paths' run_clean_shell "source scripts/deps.sh
 SSV_OPENCV_SOURCE=local
 SSV_OPENCV_INCLUDE_DIR='$fake_local_opencv/include'
@@ -275,6 +291,14 @@ chmod +x "$fake_bin/curl"
 download_count="$TEST_DIR/curl-count"
 PATH="$fake_bin:$PATH" FAKE_CURL_COUNT="$download_count" run_clean_shell "source scripts/deps.sh; ssv_deps_cached_download https://example.invalid/a '$TEST_DIR/downloads/a' >/dev/null; ssv_deps_cached_download https://example.invalid/a '$TEST_DIR/downloads/a' >/dev/null"
 assert_eq '1' "$(cat "$download_count")" 'cached download avoids a second network request'
+
+if grep -Fq '$SSV_ROOT/.deps/downloads/onnxruntime/' "$ROOT/scripts/deps/onnxruntime-managed.sh" && \
+    grep -Fq '$SSV_ROOT/.deps/downloads/opencv/' "$ROOT/scripts/deps/opencv-managed.sh" && \
+    grep -Fq '$SSV_ROOT/.deps/downloads/tensorrt/' "$ROOT/scripts/deps/tensorrt-managed.sh"; then
+    pass 'managed archives share the central .deps/downloads tree'
+else
+    fail 'managed archives share the central .deps/downloads tree'
+fi
 
 if rg -n 'dpkg-deb' "$ROOT/scripts/deps/opencv-managed.sh" >/dev/null; then fail 'OpenCV provider has no dpkg-deb dependency'; else pass 'OpenCV provider has no dpkg-deb dependency'; fi
 if rg -n 'libcblas-dev' "$ROOT/.github/workflows/ci.yml" "$ROOT/README.md" >/dev/null || \
