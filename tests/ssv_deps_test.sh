@@ -296,5 +296,16 @@ else
 fi
 if rg -n 'SSV_ONNXRUNTIME_FLAVOR|SSV_TENSORRT_VERSION' "$ROOT/scripts" "$ROOT/.env.example" >/dev/null; then fail 'legacy dependency variables are absent'; else pass 'legacy dependency variables are absent'; fi
 
+singular_dep_matches="$TEST_DIR/singular-dep-matches"
+singular_dep_root='.de''p'
+if rg -n --hidden -F "$singular_dep_root/" \
+    --glob '!.git/**' --glob '!.deps/**' --glob "!$singular_dep_root/**" --glob '!build/**' \
+    "$ROOT" >"$singular_dep_matches"; then
+    cat "$singular_dep_matches" >&2
+    fail 'dependency paths use only the .deps root'
+else
+    pass 'dependency paths use only the .deps root'
+fi
+
 printf '%s tests passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
