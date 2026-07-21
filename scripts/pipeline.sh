@@ -213,7 +213,7 @@ infer_props=(
     "precision=$INFER_PRECISION"
     "model-family=$MODEL_FAMILY"
     "output-format=$OUTPUT_FORMAT"
-    "async=true"
+    "async=false"
 )
 if [ -n "$TARGET_CLASS" ]; then
     infer_props+=("target-class=$TARGET_CLASS")

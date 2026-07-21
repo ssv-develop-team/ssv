@@ -8,7 +8,7 @@
 
 当前稳定支持的后处理格式是 YOLOv8 导出的 `[1, 4 + num_classes, n_anchors]` 输出。代码能识别 YOLOv5 形状，但没有对应解析分支，因此现阶段不应把 YOLOv5 ONNX 视为已支持的真实输出格式。
 
-默认工程行为偏向“实时链路不断流”：`async=true` 时，GStreamer 主线程只复制最新帧并立即返回，后台线程独立做推理；如果推理慢于视频帧率，中间帧会被覆盖。该行为适合单机实时预览和事件触发原型，但不适合要求逐帧检测结果完整对齐的离线评测。
+`ssvinfer` 插件的 `async` 属性默认值仍为 `true`：GStreamer 主线程只复制最新帧并立即返回，后台线程独立做推理；如果推理慢于视频帧率，中间帧会被覆盖。该模式适合明确接受 latest-frame 语义的独立调用方。项目的 `scripts/pipeline.sh` 会显式传入 `async=false`，保证 `ssvinfer → ssvtrack` 对同一个分析 buffer 顺序执行；显示分支由独立的 leaky queue 隔离，不会被分析分支阻塞。overlay 发布时序见 [T2 overlay 异步结果一致性 spec](specs/2026-07-21-T2-overlay异步结果一致性-spec.md)。
 
 ## 总体数据流
 
@@ -93,7 +93,7 @@ video/x-raw, format=BGR
 - `mock-detect=false` 时，`model-path` 为空会导致插件启动失败。
 - `conf-threshold` 只在 YOLOv8 解析阶段使用；如果模型 shape 未进入 YOLOv8 后处理分支，该属性不会产生检测输出。
 - `target-class` 只支持内置 COCO 类名映射，暂不支持外部 label map。
-- `async=false` 时，推理在 `transform_ip` 当前线程完成；该模式更容易观察逐帧行为，但可能拖慢 pipeline。
+- `async=false` 时，推理在 `transform_ip` 当前线程完成；项目默认 pipeline 使用该模式，使推理结果能由紧随其后的 `ssvtrack` 在同一个分析 buffer 上消费。
 
 属性对启动和运行路径的影响可以用下图概括：
 

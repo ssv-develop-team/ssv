@@ -65,7 +65,10 @@ grep -q -- '--skip-build' scripts/pipeline.sh || fail "pipeline script does not 
 grep -q '#include <thread>' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not use a worker thread"
 grep -q 'PROP_ASYNC_INFER' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not expose async inference"
 grep -q 'latest_frame' gst/ssv-infer/gstssvinfer.cpp || fail "ssvinfer does not keep latest frame for async inference"
-grep -q 'async=true' scripts/pipeline.sh || fail "pipeline script does not enable async inference"
+grep -q '"async=false"' scripts/pipeline.sh || fail "pipeline script does not keep inference and tracking ordered"
+if rg -n '"async=true"' scripts/pipeline.sh; then
+    fail "pipeline script must not decouple inference from the following tracker"
+fi
 grep -q 'ssv_yaml_get' scripts/lib.sh || fail "scripts/lib.sh does not expose YAML config reader"
 grep -q 'ssv_yaml_get inference.model_path' scripts/pipeline.sh || fail "pipeline script does not read model path from YAML"
 grep -q 'ssv_yaml_get pipeline.analysis_fps' scripts/pipeline.sh || fail "pipeline script does not read analysis fps from YAML"

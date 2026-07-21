@@ -417,6 +417,47 @@ static void test_overlay_independent_after_take() {
     assert_detection_tracking_state(after.detections[0], 88, SSV_TRACK_MATCHED, false);
 }
 
+static void test_overlay_publishes_only_complete_tracked_snapshots() {
+    auto &store = SsvDetectionStore::instance();
+    (void)store.take();
+    (void)store.take_for_tracking();
+
+    store.set(make_detection(180));
+    auto tracked = store.take_for_tracking();
+    tracked.detections[0].track_id = 91;
+    tracked.detections[0].track_state = SSV_TRACK_MATCHED;
+    store.set_tracked(std::move(tracked));
+    (void)store.take();
+
+    store.set(make_detection(181));
+
+    auto latest = store.peek_latest();
+    assert(latest.frame_id == 180);
+    assert(latest.detections.size() == 1);
+    assert_detection_tracking_state(
+        latest.detections[0], 91, SSV_TRACK_MATCHED, false);
+
+    tracked = store.take_for_tracking();
+    assert(tracked.frame_id == 181);
+    tracked.detections[0].track_id = 92;
+    tracked.detections[0].track_state = SSV_TRACK_NEW;
+    store.set_tracked(std::move(tracked));
+
+    latest = store.peek_latest();
+    assert(latest.frame_id == 181);
+    assert(latest.detections.size() == 1);
+    assert_detection_tracking_state(latest.detections[0], 92, SSV_TRACK_NEW, false);
+
+    SsvFrameDetections empty;
+    empty.frame_id = 182;
+    std::snprintf(empty.source_id, sizeof(empty.source_id), "unit-test");
+    store.set_tracked(std::move(empty));
+
+    latest = store.peek_latest();
+    assert(latest.frame_id == 182);
+    assert(latest.detections.empty());
+}
+
 static void test_pub_payload_serializes_tracking_metadata() {
     SsvFrameDetections frame;
     frame.frame_id = 170;
@@ -475,6 +516,7 @@ void run_ssv_meta_tests() {
     test_set_tracked_filters_invalid_detections();
     test_set_tracked_with_empty_detections();
     test_overlay_independent_after_take();
+    test_overlay_publishes_only_complete_tracked_snapshots();
     test_pub_payload_serializes_tracking_metadata();
     test_overlay_tracking_label_glyphs_supported();
 }

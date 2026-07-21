@@ -51,9 +51,6 @@ void SsvDetectionStore::set(SsvFrameDetections det) {
         return;  // unpublished data, don't overwrite
     normalize_frame_detections(det);
     current_ = std::move(det);
-    overlay_current_.frame_id = current_.frame_id;
-    std::snprintf(overlay_current_.source_id, sizeof(overlay_current_.source_id), "%s", current_.source_id);
-    overlay_current_.detections = current_.detections;
     state_ = State::HAS_DETECTIONS;
 }
 

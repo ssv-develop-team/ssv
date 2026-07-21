@@ -66,20 +66,23 @@ class SsvDetectionStore {
 public:
     static SsvDetectionStore &instance();
 
-    /// Called by ssvinfer.  Overwrites EMPTY or HAS_DETECTIONS (stale).
+    /// Called by ssvinfer.  Overwrites EMPTY or HAS_DETECTIONS (stale), but
+    /// does not publish the untracked intermediate result to overlay.
     /// Skips if HAS_TRACKS (unpublished data waiting for ssvpub).
     void set(SsvFrameDetections det);
 
     /// Called by ssvtrack.  Returns data only when HAS_DETECTIONS.
     SsvFrameDetections take_for_tracking();
 
-    /// Called by ssvtrack.  Writes tracked results.
+    /// Called by ssvtrack.  Writes tracked results and publishes the overlay
+    /// snapshot, including empty results that clear stale boxes.
     void set_tracked(SsvFrameDetections det);
 
     /// Called by ssvpub.  Returns data only when HAS_TRACKS.
     SsvFrameDetections take();
 
-    /// Called by ssvoverlay.  Returns the latest tracked result without consuming it.
+    /// Called by ssvoverlay.  Returns the latest complete tracked result
+    /// without consuming it.
     SsvOverlayFrame peek_latest();
 
 private:
