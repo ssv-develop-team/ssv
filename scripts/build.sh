@@ -34,6 +34,10 @@ if [ "${#missing_deps[@]}" -gt 0 ]; then
     exit 1
 fi
 
+if [ -d "$SSV_BUILD_DIR" ] && [ ! -f "$SSV_BUILD_DIR/build.ninja" ]; then
+    ssv_warn "构建目录存在但不是有效的 Meson build，重新创建: ${SSV_BUILD_DIR#"$SSV_ROOT"/}"
+    rm -rf -- "$SSV_BUILD_DIR"
+fi
 mkdir -p "$SSV_BUILD_DIR"
 pending_env="$SSV_BUILD_DIR/ssv-deps.env.pending"
 cleanup_pending_env() {
@@ -57,10 +61,6 @@ if [ -f "$SSV_BUILD_DIR/build.ninja" ]; then
         meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
     fi
 else
-    if [ -d "$SSV_BUILD_DIR" ]; then
-        ssv_warn "构建目录存在但不是有效的 Meson build，重新创建: ${SSV_BUILD_DIR#"$SSV_ROOT"/}"
-        rm -rf "$SSV_BUILD_DIR"
-    fi
     meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
 fi
 

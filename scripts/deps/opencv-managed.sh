@@ -152,8 +152,7 @@ ssv_opencv_make_pc() {
         "Name: opencv4" \
         "Description: OpenCV runtime" \
         "Version: $version" \
-        'Libs: -L${libdir} -Wl,-rpath-link,${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core' \
-        "Libs.private: $host_math_libs" \
+        "Libs: -L\${libdir} -Wl,-rpath-link,\${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core $host_math_libs" \
         'Cflags: -I${includedir}'
 }
 

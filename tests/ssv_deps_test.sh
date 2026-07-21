@@ -199,6 +199,11 @@ grep -q 'nlohmann-json cblas blas lapack' "$ROOT/README.md" \
 grep -q 'pkg-config --exists cblas' "$ROOT/scripts/deps/opencv-managed.sh" \
     && pass 'OpenCV provider adapts to a separate system CBLAS package' \
     || fail 'OpenCV provider adapts to a separate system CBLAS package'
+if rg -n 'Libs\.private:.*host_math_libs' "$ROOT/scripts/deps/opencv-managed.sh" >/dev/null; then
+    fail 'OpenCV provider exposes host math libraries to dynamic consumers'
+else
+    pass 'OpenCV provider exposes host math libraries to dynamic consumers'
+fi
 if rg -n 'SSV_ONNXRUNTIME_FLAVOR|SSV_TENSORRT_VERSION' "$ROOT/scripts" "$ROOT/.env.example" >/dev/null; then fail 'legacy dependency variables are absent'; else pass 'legacy dependency variables are absent'; fi
 
 printf '%s tests passed, %s failed\n' "$passed" "$failed"

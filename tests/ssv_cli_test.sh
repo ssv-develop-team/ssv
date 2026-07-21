@@ -122,6 +122,11 @@ grep -q 'SSV_BUILD_DIR.*build' scripts/lib.sh || fail "scripts/lib.sh does not d
 grep -q 'rm -rf.*SSV_BUILD_DIR' scripts/clean.sh || fail "scripts/clean.sh does not remove SSV_BUILD_DIR"
 
 grep -q 'ssv_deps_prepare' scripts/build.sh || fail 'build script does not prepare dependencies through deps.sh'
+awk '
+    /rm -rf -- "\$SSV_BUILD_DIR"/ { cleanup = NR }
+    /^[[:space:]]*ssv_deps_prepare$/ { prepare = NR }
+    END { exit !(cleanup && prepare && cleanup < prepare) }
+' scripts/build.sh || fail 'build script must reset an invalid Meson directory before writing the pending dependency snapshot'
 grep -q 'downloads/opencv' scripts/deps/opencv-managed.sh || fail 'OpenCV packages are not cached by its provider'
 grep -q 'SSV_OPENCV_PACKAGE_REVISION' scripts/deps/opencv-managed.sh || fail 'OpenCV package details are not private to its provider'
 grep -q 'pc_dir/opencv4.pc' scripts/deps/opencv-managed.sh || fail 'OpenCV provider does not generate opencv4.pc'
