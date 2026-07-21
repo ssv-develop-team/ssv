@@ -1,4 +1,3 @@
-tensorrt_opt = get_option('tensorrt')
 ssv_infer_sources = [
   'gstssvinfer.cpp',
   'ssv_backend_factory.cpp',
@@ -10,13 +9,13 @@ ssv_infer_sources = [
 ]
 ssv_infer_deps = [gst_deps, gst_base_dep, gst_video_dep, ssv_common_dep, onnx_dep]
 
-if tensorrt_opt != 'disabled'
-  if tensorrt_dep.found()
+if tensorrt_mode != 'disabled'
+  if tensorrt_enabled
     message('Building TensorRT inference backend')
     ssv_infer_sources += ['ssv_tensorrt_backend.cpp']
     ssv_infer_deps += [tensorrt_dep]
-  elif tensorrt_opt == 'enabled'
-    error('TensorRT SDK not found; install TensorRT headers/libs or use -Dtensorrt=disabled')
+  elif tensorrt_mode == 'enabled'
+    error('TensorRT SDK not found; install TensorRT headers/libs or build with tensorrt_mode=disabled')
   else
     message('TensorRT SDK not found; building TensorRT unavailable stub')
     ssv_infer_sources += ['ssv_tensorrt_backend_stub.cpp']

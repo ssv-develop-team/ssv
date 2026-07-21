@@ -1,6 +1,9 @@
 option('tests', type : 'boolean', value : false, description : 'Build tests')
-option('tensorrt', type : 'combo', choices : ['auto', 'enabled', 'disabled'], value : 'auto',
+option('tensorrt_mode', type : 'combo', choices : ['auto', 'enabled', 'disabled'], value : 'auto',
   description : 'Build TensorRT inference backend when the SDK is available')
 
-option('opencv', type : 'combo', choices : ['enabled', 'disabled'], value : 'enabled',
+option('opencv_mode', type : 'combo', choices : ['enabled', 'disabled'], value : 'enabled',
   description : 'Build OpenCV-based GMC when the local OpenCV SDK is enabled')
+
+option('deps_runtime_path', type : 'string', value : '',
+  description : 'Colon-separated runtime library path resolved by scripts/deps.sh')

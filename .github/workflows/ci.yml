@@ -17,6 +17,10 @@ jobs:
     env:
       SSV_RTSP_URL: ""
       SSV_REQUIRE_SMOKE: "false"
+      SSV_ONNXRUNTIME_SOURCE: managed
+      SSV_OPENCV_SOURCE: managed
+      SSV_OPENCV_MODE: enabled
+      SSV_TENSORRT_MODE: auto
 
     steps:
       - name: Checkout
@@ -44,6 +48,7 @@ jobs:
             libhiredis-dev \
             libyaml-cpp-dev \
             libblas-dev \
+            libcblas-dev \
             liblapack-dev \
             libprotobuf-dev \
             libtbb-dev \
@@ -56,13 +61,19 @@ jobs:
             tar \
             util-linux
 
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps/downloads
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/deps/versions.sh', 'scripts/deps/*-managed.sh') }}
+
       - name: Install Python tooling
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv PyYAML
 
       - name: Check shell syntax
-        run: bash -n ssv scripts/*.sh tests/*.sh
+        run: bash -n ssv scripts/*.sh scripts/deps/*.sh tests/*.sh
 
       - name: Run test suite
         run: ./ssv test

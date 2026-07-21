@@ -49,6 +49,7 @@ GStreamer C++ 插件链
 | nlohmann-json | >= 3 | 事件 JSON 序列化 |
 | ONNX Runtime | >= 1.20 | YOLO ONNX 推理 |
 | OpenCV | >= 4.5 | 图像处理依赖 |
+| CBLAS + BLAS + LAPACK | 系统开发包 | managed OpenCV 的宿主数学运行库 |
 | Python | >= 3.12 | Agent 服务 |
 | uv | >= 0.11 | Python 包管理 |
 | Docker + Compose | Docker >= 24 | 本地 Redis |
@@ -63,18 +64,19 @@ sudo apt-get install -y \
   gstreamer1.0-tools \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   libyaml-cpp-dev libhiredis-dev nlohmann-json3-dev \
+  libcblas-dev libblas-dev liblapack-dev \
   python3 python3-venv docker.io docker-compose-plugin
 ```
 
-Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。`./ssv build` 在找不到 `onnxruntime.pc` 时会自动下载官方 CPU release 到 `.deps/onnxruntime/`，并生成 Meson 可识别的 `pkg-config` 文件。
+Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。默认 `./ssv build` 会准备 managed ONNX Runtime `1.25.1` 和 managed OpenCV `4.10.0`；TensorRT 使用 `auto`，没有完整 SDK 时编译明确报错的 unavailable stub。三类依赖都遵循同一条路径：`SOURCE -> provider/system -> pkg-config -> Meson`。
 
-默认 `./ssv build` 由 Ubuntu pool 下载 13 个固定 OpenCV 4.10 `.deb`（六个模块的开发/运行时包，以及 `libopencv-dnn410` 运行时递归依赖）到 `.deps/downloads/opencv/`，解包到 `.deps/opencv/usr/`，并在 `.deps/opencv/lib/pkgconfig/opencv4.pc` 生成本地描述。不调用 `apt`，也不链接系统 OpenCV；glibc、libstdc++ 和其他通用 ABI 运行库仍由宿主提供。若不需要 GMC，使用 `SSV_OPENCV=disabled ./ssv build` 跳过下载和链接，以无 OpenCV 退化路径构建。
+managed OpenCV 当前由 provider 获取预编译包，使用 `ar` 和 `tar` 解包，不依赖 `apt` 或 `dpkg-deb`。它对项目公开链接 `core`、`imgproc`、`video`、`calib3d`、`features2d`、`flann`，并额外携带 `dnn` 及其特定 SONAME 的 protobuf 运行库以闭合 `libopencv_video` 的动态依赖；这些私有运行库不进入 `opencv4.pc` 的公开 OpenCV 模块列表。包来源属于 provider 内部实现，对外只声明 OpenCV `4.10.0`。
 
 Arch Linux:
 
 ```bash
 sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
-  yaml-cpp hiredis nlohmann-json onnxruntime-cpu meson python uv docker docker-compose opencv
+  yaml-cpp hiredis nlohmann-json cblas blas lapack meson python uv docker docker-compose
 ```
 
 ## 快速开始
@@ -144,38 +146,62 @@ cp config/ssv.example.yaml config/ssv.yaml
 
 `pipeline.analysis_fps` 控制推理/跟踪/事件发布分支的抽帧频率，默认示例为 `5`，用于降低 GPU 和事件吞吐压力。需要测试 TensorRT 或让分析分支按源视频可用帧率运行时，将它设为 `0` 表示不限流；显示窗口帧率仍由 `display.fps` 控制。
 
-ONNX Runtime 下载和路径覆盖：
+三类 SDK 使用一致的配置维度：`SOURCE=managed|system` 选择来源，managed 使用稳定 `ROOT`，可选能力再使用 `MODE`。当前 shell 优先于根 `.env`，`.env` 优先于项目默认版本。
+
+ONNX Runtime 是必需依赖，默认 managed CPU：
 
 ```bash
-# 指定自动下载版本
-SSV_ONNXRUNTIME_VERSION=1.25.1 ./ssv build
-
-# 使用已有安装
-export PKG_CONFIG_PATH="/path/to/onnxruntime/lib/pkgconfig:$PKG_CONFIG_PATH"
-export LD_LIBRARY_PATH="/path/to/onnxruntime/lib:$LD_LIBRARY_PATH"
+# 默认 managed CPU
+SSV_ONNXRUNTIME_SOURCE=managed \
+SSV_ONNXRUNTIME_VERSION=1.25.1 \
+SSV_ONNXRUNTIME_ROOT=.deps/onnxruntime \
 ./ssv build
 
-# 修改自动下载目录
-SSV_ONNXRUNTIME_ROOT=/path/to/onnxruntime ./ssv build
+# GPU 归档通过版本后缀选择；CUDA/cuDNN 仍由本机提供
+SSV_ONNXRUNTIME_VERSION=1.25.1-gpu ./ssv build
+
+# 使用系统 onnxruntime.pc
+SSV_ONNXRUNTIME_SOURCE=system ./ssv build
 ```
 
-TensorRT 按仓库内依赖管理，不要求安装到系统目录。默认 `./ssv build` 使用 `SSV_TENSORRT=auto`，检测不到 TensorRT 时编译明确报错的占位后端；需要真实 TensorRT 后端时显式启用：
+OpenCV 默认 enabled；不需要 GMC 时完全跳过准备和发现：
 
 ```bash
-SSV_TENSORRT=enabled ./ssv build
+SSV_OPENCV_MODE=disabled ./ssv build
+SSV_OPENCV_SOURCE=system ./ssv build
 ```
 
-启用后，脚本只使用显式配置的本地 TensorRT SDK 来源：可以预先解包到 `.deps/tensorrt/`，也可以通过 `SSV_TENSORRT_ARCHIVE` 指向本地归档，或通过 `SSV_TENSORRT_URL` 指向你确认兼容的 NVIDIA 归档 URL。TensorRT engine 与 TensorRT/CUDA/driver/硬件组合强相关，脚本不会替使用者静默选择默认 TensorRT 版本。脚本会根据本地目录生成 Meson 可识别的 `nvinfer.pc`。可用变量：
+TensorRT 与 CUDA Runtime 作为一个依赖单元。默认 managed `auto` 只复用已有完整 ROOT，没有 SDK 时不下载并使用 stub。`enabled` 要求 provider 成功；版本从 `NvInferVersion.h` 自动读取：
+
+```bash
+# 已解包 SDK，或用户明确提供归档
+SSV_TENSORRT_MODE=enabled SSV_TENSORRT_ROOT=.deps/tensorrt ./ssv build
+SSV_TENSORRT_MODE=enabled SSV_TENSORRT_ARCHIVE=/path/to/TensorRT.tar.zst ./ssv build
+
+# URL 必须可直接下载；需要 NVIDIA 认证时先下载，再使用 ARCHIVE
+SSV_TENSORRT_MODE=enabled SSV_TENSORRT_URL=https://example.invalid/TensorRT.tar.zst ./ssv build
+
+# 使用系统 nvinfer.pc，或明确关闭
+SSV_TENSORRT_SOURCE=system SSV_TENSORRT_MODE=auto ./ssv build
+SSV_TENSORRT_MODE=disabled ./ssv build
+```
+
+公开构建变量：
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
-| `SSV_OPENCV` | OpenCV/GMC 构建模式：`enabled`、`disabled` | `enabled` |
-| `SSV_TENSORRT` | TensorRT 构建模式：`auto`、`enabled`、`disabled` | `auto` |
-| `SSV_TENSORRT_ROOT` | 已解包的 TensorRT SDK 目录，也作为归档解包目标 | `.deps/tensorrt` |
+| `SSV_ONNXRUNTIME_SOURCE` | ONNX Runtime 来源：`managed`、`system` | `managed` |
+| `SSV_ONNXRUNTIME_VERSION` | managed 版本：`x.y.z` 或 `x.y.z-gpu` | `1.25.1` |
+| `SSV_ONNXRUNTIME_ROOT` | managed 安装目录 | `.deps/onnxruntime` |
+| `SSV_OPENCV_SOURCE` | OpenCV 来源：`managed`、`system` | `managed` |
+| `SSV_OPENCV_MODE` | OpenCV/GMC：`enabled`、`disabled` | `enabled` |
+| `SSV_OPENCV_ROOT` | managed 安装目录 | `.deps/opencv` |
+| `SSV_TENSORRT_SOURCE` | TensorRT 来源：`managed`、`system` | `managed` |
+| `SSV_TENSORRT_MODE` | TensorRT：`auto`、`enabled`、`disabled` | `auto` |
+| `SSV_TENSORRT_ROOT` | managed SDK 目录 | `.deps/tensorrt` |
 | `SSV_TENSORRT_ARCHIVE` | 本地 TensorRT SDK 归档路径，支持 `.tar.*` 和 `.zip` | 无 |
-| `SSV_TENSORRT_URL` | TensorRT SDK 归档 URL，需使用者显式设置 | 无 |
-| `SSV_TENSORRT_VERSION` | 写入本地 `nvinfer.pc` 的版本字符串 | `local` |
-| `CUDA_HOME` | CUDA Toolkit 根目录；未设置时尝试 `/usr/local/cuda*` | 自动检测 |
+| `SSV_TENSORRT_URL` | 可直接下载的 SDK 归档 URL | 无 |
+| `CUDA_HOME` | managed TensorRT 的 CUDA Toolkit 补充路径 | 自动发现 |
 | `SSV_EXTRA_PKG_CONFIG_PATH` | 额外 pkg-config 搜索路径 | 无 |
 
 TensorRT 后端只加载已构建好的 `.engine` 文件，不在插件内把 `.onnx` 转成 `.engine`。

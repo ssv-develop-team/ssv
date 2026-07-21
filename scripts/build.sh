@@ -2,6 +2,7 @@
 # scripts/build.sh — 编译 C++ GStreamer 插件
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/deps.sh"
 cd "$SSV_ROOT"
 
 ssv_header "编译 GStreamer 插件"
@@ -14,453 +15,12 @@ exec 9>"$SSV_ROOT/.deps/build.lock"
 ssv_info "等待构建锁..."
 flock 9
 
-prepend_pkg_config_path() {
-    local dir="$1"
-    if [ -d "$dir" ]; then
-        export PKG_CONFIG_PATH="$dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    fi
-}
-
-use_local_pkg_config_paths() {
-    if [ -n "${SSV_EXTRA_PKG_CONFIG_PATH:-}" ]; then
-        export PKG_CONFIG_PATH="$SSV_EXTRA_PKG_CONFIG_PATH${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    fi
-
-    local dir
-    for dir in \
-        "$SSV_ROOT"/.deps/pkgdeps/*/lib/pkgconfig \
-        "$SSV_ROOT"/.deps/pkgdeps/*/usr/lib/*/pkgconfig; do
-        prepend_pkg_config_path "$dir"
-    done
-}
-
-download_file() {
-    local url="$1"
-    local output="$2"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL "$url" -o "$output"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$output" "$url"
-    else
-        ssv_error "curl or wget is required to download $url"
-        return 1
-    fi
-}
-
-extract_archive() {
-    local archive="$1"
-    local dest="$2"
-
-    rm -rf "$dest"
-    mkdir -p "$dest"
-    case "$archive" in
-        *.tar.zst|*.tzst)
-            if tar --help 2>/dev/null | grep -q -- '--zstd'; then
-                tar --zstd -xf "$archive" -C "$dest"
-            else
-                ssv_require_command "zstd" \
-                    "install zstd" \
-                    "your package manager"
-                zstd -dc "$archive" | tar -xf - -C "$dest"
-            fi
-            ;;
-        *.tar.gz|*.tgz) tar -xzf "$archive" -C "$dest" ;;
-        *.tar.xz|*.txz) tar -xJf "$archive" -C "$dest" ;;
-        *.tar.bz2|*.tbz2) tar -xjf "$archive" -C "$dest" ;;
-        *.tar) tar -xf "$archive" -C "$dest" ;;
-        *.zip)
-            ssv_require_command "unzip" \
-                "install unzip" \
-                "your package manager"
-            unzip -q "$archive" -d "$dest"
-            ;;
-        *)
-            ssv_error "unsupported archive format: $archive"
-            return 1
-            ;;
-    esac
-}
-
-ensure_opencv() {
-    local mode="${SSV_OPENCV:-enabled}"
-    case "$mode" in
-        enabled) SSV_OPENCV_MESON_MODE=enabled ;;
-        disabled) SSV_OPENCV_MESON_MODE=disabled; return 0 ;;
-        *)
-            ssv_error "unsupported SSV_OPENCV: $mode (expected enabled or disabled)"
-            return 1
-            ;;
-    esac
-
-    local version="4.10.0"
-    local deb_revision="4.10.0+dfsg-5ubuntu1"
-    local pool_base="https://archive.ubuntu.com/ubuntu/pool/universe/o/opencv"
-    local root="$SSV_OPENCV_ROOT"
-    local pc_dir="$root/lib/pkgconfig"
-    local deb_arch multiarch
-    case "$(uname -m)" in
-        x86_64|amd64) deb_arch='amd64'; multiarch='x86_64-linux-gnu' ;;
-        aarch64|arm64) deb_arch='arm64'; multiarch='aarch64-linux-gnu' ;;
-        *) ssv_error "unsupported OpenCV architecture: $(uname -m)"; return 1 ;;
-    esac
-    local lib_dir="$root/usr/lib/$multiarch"
-    local modules=(core imgproc video calib3d features2d flann dnn)
-    local complete=true
-    local required
-    local required_files=(
-        "$root/usr/include/opencv4/opencv2/core.hpp"
-        "$root/usr/include/opencv4/opencv2/imgproc.hpp"
-        "$root/usr/include/opencv4/opencv2/video/tracking.hpp"
-        "$root/usr/include/opencv4/opencv2/calib3d.hpp"
-        "$root/usr/include/opencv4/opencv2/features2d.hpp"
-        "$root/usr/include/opencv4/opencv2/flann.hpp"
-        "$lib_dir/libopencv_core.so"
-        "$lib_dir/libopencv_imgproc.so"
-        "$lib_dir/libopencv_video.so"
-        "$lib_dir/libopencv_calib3d.so"
-        "$lib_dir/libopencv_features2d.so"
-        "$lib_dir/libopencv_flann.so"
-        "$lib_dir/libopencv_dnn.so.410"
-        "$lib_dir/libopencv_core.so.410"
-        "$lib_dir/libopencv_imgproc.so.410"
-        "$lib_dir/libopencv_video.so.410"
-        "$lib_dir/libopencv_calib3d.so.410"
-        "$lib_dir/libopencv_features2d.so.410"
-        "$lib_dir/libopencv_flann.so.410"
-        "$pc_dir/opencv4.pc"
-    )
-    for required in "${required_files[@]}"; do
-        [ -e "$required" ] || complete=false
-    done
-    if [ "$complete" = true ]; then
-        export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-        export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        pkg-config --exists opencv4
-        return $?
-    fi
-
-    ssv_require_command "dpkg-deb" "install dpkg" "local system" || return 1
-    local download_dir="$SSV_ROOT/.deps/downloads/opencv"
-    mkdir -p "$download_dir"
-    local module kind filename expected_name cache_file actual_name actual_version actual_arch
-    for module in "${modules[@]}"; do
-        local kinds=(dev runtime)
-        [ "$module" = dnn ] && kinds=(runtime)
-        for kind in "${kinds[@]}"; do
-            if [ "$kind" = dev ]; then
-                filename="libopencv-${module}-dev_${deb_revision}_${deb_arch}.deb"
-                expected_name="libopencv-${module}-dev"
-            else
-                filename="libopencv-${module}410_${deb_revision}_${deb_arch}.deb"
-                expected_name="libopencv-${module}410"
-            fi
-            cache_file="$download_dir/$filename"
-            if [ ! -f "$cache_file" ]; then
-                ssv_info "OpenCV package not found; downloading $filename"
-                download_file "$pool_base/$filename" "$cache_file" || return 1
-            fi
-            actual_name="$(dpkg-deb -f "$cache_file" Package 2>/dev/null)" || {
-                ssv_error "invalid OpenCV Debian package: $cache_file"
-                return 1
-            }
-            actual_version="$(dpkg-deb -f "$cache_file" Version 2>/dev/null)" || return 1
-            actual_arch="$(dpkg-deb -f "$cache_file" Architecture 2>/dev/null)" || return 1
-            if [ "$actual_name" != "$expected_name" ] || [ "$actual_version" != "$deb_revision" ] || [ "$actual_arch" != "$deb_arch" ]; then
-                ssv_error "OpenCV package metadata mismatch: $cache_file (expected ${expected_name}, ${deb_revision}, ${deb_arch}; got ${actual_name}, ${actual_version}, ${actual_arch})"
-                return 1
-            fi
-        done
-    done
-
-    local temp_root="$SSV_ROOT/.deps/tmp/opencv-${version}-$$"
-    trap 'rm -rf "$temp_root"' RETURN
-    rm -rf "$temp_root"
-    mkdir -p "$temp_root/usr"
-    for module in "${modules[@]}"; do
-        local kinds=(dev runtime)
-        [ "$module" = dnn ] && kinds=(runtime)
-        for kind in "${kinds[@]}"; do
-            if [ "$kind" = dev ]; then
-                filename="libopencv-${module}-dev_${deb_revision}_${deb_arch}.deb"
-            else
-                filename="libopencv-${module}410_${deb_revision}_${deb_arch}.deb"
-            fi
-            dpkg-deb -x "$download_dir/$filename" "$temp_root" || return 1
-        done
-    done
-    mkdir -p "$temp_root/lib/pkgconfig"
-    cat > "$temp_root/lib/pkgconfig/opencv4.pc" <<EOF
-prefix=$root
-exec_prefix=\${prefix}
-libdir=\${prefix}/usr/lib/$multiarch
-includedir=\${prefix}/usr/include/opencv4
-
-Name: opencv4
-Description: Local OpenCV 4.10 runtime from Ubuntu packages
-Version: $version
-Libs: -L\${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core -lprotobuf -ltbb -llapack -lblas
-Cflags: -I\${includedir}
-EOF
-    for required in "${required_files[@]}"; do
-        required="${required/$root/$temp_root}"
-        [ -e "$required" ] || {
-            ssv_error "OpenCV SDK is incomplete after extraction: $required"
-            return 1
-        }
-    done
-    rm -rf "$root"
-    mkdir -p "$(dirname "$root")"
-    mv "$temp_root" "$root" || return 1
-    trap - RETURN
-    export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    pkg-config --exists opencv4
-}
-
-ensure_onnxruntime() {
-    local version="${SSV_ONNXRUNTIME_VERSION:-1.25.1}"
-    local flavor="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
-    local default_root="$SSV_ROOT/.deps/onnxruntime"
-    if [ "$flavor" = "gpu" ]; then
-        default_root="$SSV_ROOT/.deps/onnxruntime-gpu"
-    elif [ "$flavor" != "cpu" ]; then
-        ssv_error "unsupported SSV_ONNXRUNTIME_FLAVOR: $flavor (expected cpu or gpu)"
-        return 1
-    fi
-    local root="${SSV_ONNXRUNTIME_ROOT:-$default_root}"
-    local pc_file="$root/lib/pkgconfig/onnxruntime.pc"
-
-    if [ "$flavor" = "cpu" ] && pkg-config --exists onnxruntime; then
-        return 0
-    fi
-
-    if [ -f "$pc_file" ]; then
-        export PKG_CONFIG_PATH="$root/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-        export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        pkg-config --exists onnxruntime && return 0
-    fi
-
-    local arch
-    case "$(uname -m)" in
-        x86_64|amd64) arch="x64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *)
-            ssv_error "unsupported ONNX Runtime architecture: $(uname -m)"
-            return 1
-            ;;
-    esac
-
-    local archive
-    if [ "$flavor" = "gpu" ]; then
-        archive="onnxruntime-linux-${arch}-gpu-${version}.tgz"
-    else
-        archive="onnxruntime-linux-${arch}-${version}.tgz"
-    fi
-    local url="https://github.com/microsoft/onnxruntime/releases/download/v${version}/${archive}"
-    local tmp_dir="$SSV_ROOT/.deps/tmp/onnxruntime-${flavor}-${version}"
-
-    ssv_info "ONNX Runtime not found; downloading ${archive}"
-    rm -rf "$tmp_dir"
-    mkdir -p "$tmp_dir" "$(dirname "$root")"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL "$url" -o "$tmp_dir/$archive"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$tmp_dir/$archive" "$url"
-    else
-        ssv_error "curl or wget is required to download ONNX Runtime"
-        return 1
-    fi
-
-    tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
-    rm -rf "$root"
-    if [ "$flavor" = "gpu" ]; then
-        mv "$tmp_dir/onnxruntime-linux-${arch}-gpu-${version}" "$root"
-    else
-        mv "$tmp_dir/onnxruntime-linux-${arch}-${version}" "$root"
-    fi
-    rm -rf "$tmp_dir"
-
-    mkdir -p "$root/lib/pkgconfig"
-    cat > "$pc_file" <<EOF
-prefix=$root
-exec_prefix=\${prefix}
-libdir=\${prefix}/lib
-includedir=\${prefix}/include
-
-Name: onnxruntime
-Description: ONNX Runtime C/C++ inference runtime
-Version: $version
-Libs: -L\${libdir} -lonnxruntime
-Cflags: -I\${includedir}
-EOF
-
-    export PKG_CONFIG_PATH="$root/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    pkg-config --exists onnxruntime
-}
-
-ensure_tensorrt() {
-    local mode="${SSV_TENSORRT:-auto}"
-    SSV_TENSORRT_MESON_MODE="$mode"
-    case "$mode" in
-        auto|enabled|disabled) ;;
-        *)
-            ssv_error "unsupported SSV_TENSORRT: $mode (expected auto, enabled, or disabled)"
-            return 1
-            ;;
-    esac
-
-    if [ "$mode" = "disabled" ]; then
-        SSV_TENSORRT_MESON_MODE="disabled"
-        return 0
-    fi
-
-    local root="${SSV_TENSORRT_ROOT:-$SSV_ROOT/.deps/tensorrt}"
-    local pc_dir="$root/lib/pkgconfig"
-    local pc_file="$pc_dir/nvinfer.pc"
-
-    if [ -f "$pc_file" ]; then
-        export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-        local existing_lib_dir
-        existing_lib_dir="$(pkg-config --variable=libdir nvinfer 2>/dev/null || true)"
-        if [ -n "$existing_lib_dir" ]; then
-            export LD_LIBRARY_PATH="$existing_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        fi
-        if pkg-config --exists nvinfer; then
-            SSV_TENSORRT_MESON_MODE="enabled"
-            return 0
-        fi
-    fi
-
-    if [ -n "${SSV_TENSORRT_ARCHIVE:-}" ]; then
-        if [ ! -f "$SSV_TENSORRT_ARCHIVE" ]; then
-            ssv_error "SSV_TENSORRT_ARCHIVE does not exist: $SSV_TENSORRT_ARCHIVE"
-            return 1
-        fi
-        ssv_info "Extracting TensorRT archive to ${root#$SSV_ROOT/}"
-        extract_archive "$SSV_TENSORRT_ARCHIVE" "$root"
-    elif [ -n "${SSV_TENSORRT_URL:-}" ]; then
-        local archive_name
-        archive_name="${SSV_TENSORRT_URL##*/}"
-        local archive_path="$SSV_ROOT/.deps/downloads/$archive_name"
-        mkdir -p "$(dirname "$archive_path")"
-        if [ ! -f "$archive_path" ]; then
-            ssv_info "Downloading TensorRT archive to ${archive_path#$SSV_ROOT/}"
-            download_file "$SSV_TENSORRT_URL" "$archive_path"
-        fi
-        ssv_info "Extracting TensorRT archive to ${root#$SSV_ROOT/}"
-        extract_archive "$archive_path" "$root"
-    fi
-
-    local include_dir=""
-    local lib_dir=""
-    local found_path=""
-    found_path="$(find "$root" -type f -name NvInfer.h -print -quit 2>/dev/null || true)"
-    if [ -n "$found_path" ]; then
-        include_dir="$(dirname "$found_path")"
-    fi
-    found_path="$(find "$root" -type f \( -name 'libnvinfer.so' -o -name 'libnvinfer.so.*' \) -print -quit 2>/dev/null || true)"
-    if [ -n "$found_path" ]; then
-        lib_dir="$(dirname "$found_path")"
-    fi
-
-    if [ "$mode" = "auto" ]; then
-        if [ -n "$include_dir" ] && [ -n "$lib_dir" ]; then
-            :
-        else
-            SSV_TENSORRT_MESON_MODE="disabled"
-            return 0
-        fi
-    fi
-
-    if [ -z "$include_dir" ] || [ -z "$lib_dir" ]; then
-        ssv_error "TensorRT SDK not found under $root"
-        ssv_warn "Set SSV_TENSORRT_ROOT to an unpacked TensorRT SDK, or explicitly set SSV_TENSORRT_ARCHIVE/SSV_TENSORRT_URL."
-        if [ "$mode" = "enabled" ]; then
-            return 1
-        fi
-        SSV_TENSORRT_MESON_MODE="disabled"
-        return 0
-    fi
-
-    if [ ! -e "$lib_dir/libnvinfer.so" ]; then
-        local versioned_lib
-        versioned_lib="$(find "$lib_dir" -maxdepth 1 -type f -name 'libnvinfer.so.*' -print -quit)"
-        if [ -n "$versioned_lib" ] && [ -w "$lib_dir" ]; then
-            ln -sf "$(basename "$versioned_lib")" "$lib_dir/libnvinfer.so"
-        fi
-    fi
-
-    if [ ! -e "$lib_dir/libnvinfer.so" ]; then
-        ssv_error "TensorRT SDK under $root does not provide linkable libnvinfer.so"
-        return 1
-    fi
-
-    local cuda_root="${CUDA_HOME:-}"
-    local candidate
-    if [ -z "$cuda_root" ]; then
-        for candidate in /usr/local/cuda /usr/local/cuda-*; do
-            if [ -f "$candidate/targets/x86_64-linux/include/cuda_runtime_api.h" ] || [ -f "$candidate/include/cuda_runtime_api.h" ]; then
-                cuda_root="$candidate"
-                break
-            fi
-        done
-    fi
-
-    local cuda_include=""
-    local cuda_lib=""
-    for candidate in \
-        "$cuda_root/targets/x86_64-linux/include" \
-        "$cuda_root/include"; do
-        if [ -f "$candidate/cuda_runtime_api.h" ]; then
-            cuda_include="$candidate"
-            break
-        fi
-    done
-    for candidate in \
-        "$cuda_root/targets/x86_64-linux/lib" \
-        "$cuda_root/lib64" \
-        "$cuda_root/lib"; do
-        if [ -e "$candidate/libcudart.so" ]; then
-            cuda_lib="$candidate"
-            break
-        fi
-    done
-
-    if [ ! -f "$cuda_include/cuda_runtime_api.h" ] || [ ! -e "$cuda_lib/libcudart.so" ]; then
-        ssv_error "CUDA toolkit not found; set CUDA_HOME before building TensorRT"
-        return 1
-    fi
-
-    local version="${SSV_TENSORRT_VERSION:-local}"
-    mkdir -p "$pc_dir"
-    cat > "$pc_file" <<EOF
-prefix=$root
-exec_prefix=\${prefix}
-libdir=$lib_dir
-includedir=$include_dir
-cudaincludedir=$cuda_include
-cudalibdir=$cuda_lib
-
-Name: nvinfer
-Description: NVIDIA TensorRT inference runtime
-Version: ${version%%-*}
-Libs: -L\${libdir} -lnvinfer -L\${cudalibdir} -lcudart
-Cflags: -I\${includedir} -I\${cudaincludedir}
-EOF
-
-    export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export LD_LIBRARY_PATH="$lib_dir:$cuda_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    SSV_TENSORRT_MESON_MODE="enabled"
-    pkg-config --exists nvinfer
-}
-
-use_local_pkg_config_paths
+if [ -n "${SSV_EXTRA_PKG_CONFIG_PATH:-}" ]; then
+    export PKG_CONFIG_PATH="$SSV_EXTRA_PKG_CONFIG_PATH${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
 
 missing_deps=()
-for dep in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 yaml-cpp hiredis nlohmann_json; do
+for dep in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 yaml-cpp hiredis nlohmann_json cblas blas lapack; do
     if ! pkg-config --exists "$dep"; then
         missing_deps+=("$dep")
     fi
@@ -468,43 +28,40 @@ done
 
 if [ "${#missing_deps[@]}" -gt 0 ]; then
     ssv_error "缺少 C/C++ 开发依赖: ${missing_deps[*]}"
-    ssv_warn "Install GStreamer, yaml-cpp, hiredis, and nlohmann-json development packages with your system package manager."
+    ssv_warn "Install GStreamer, yaml-cpp, hiredis, nlohmann-json, CBLAS, BLAS, and LAPACK development packages with your system package manager."
     ssv_warn "If pkg-config files live outside the default search path, set SSV_EXTRA_PKG_CONFIG_PATH or PKG_CONFIG_PATH."
     ssv_warn "ONNX Runtime: ./ssv build can download a local CPU release after base dependencies are installed"
     exit 1
 fi
 
-ensure_onnxruntime
-ensure_tensorrt
-ensure_opencv
+mkdir -p "$SSV_BUILD_DIR"
+pending_env="$SSV_BUILD_DIR/ssv-deps.env.pending"
+cleanup_pending_env() {
+    rm -f -- "$pending_env"
+}
+trap cleanup_pending_env EXIT
+ssv_deps_prepare
+old_signature="$(sed -n 's/^SSV_DEPS_SIGNATURE=//p' "$SSV_BUILD_DIR/ssv-deps.env" 2>/dev/null || true)"
 
-if ! pkg-config --exists onnxruntime; then
-    ssv_error "缺少 C/C++ 开发依赖: onnxruntime"
-    ssv_warn "ONNX Runtime: see README.md for automatic local CPU release installation details"
-    exit 1
-fi
-
-meson_opencv_args=(-Dopencv="$SSV_OPENCV_MESON_MODE")
-meson_tensorrt_args=()
-case "${SSV_TENSORRT_MESON_MODE:-${SSV_TENSORRT:-auto}}" in
-    enabled) meson_tensorrt_args=(-Dtensorrt=enabled) ;;
-    disabled) meson_tensorrt_args=(-Dtensorrt=disabled) ;;
-    *) meson_tensorrt_args=(-Dtensorrt=auto) ;;
-esac
+meson_opencv_args=(-Dopencv_mode="$SSV_DEPS_OPENCV_MODE")
+meson_tensorrt_args=(-Dtensorrt_mode="$SSV_DEPS_TENSORRT_MESON_MODE")
+meson_runtime_args=(-Ddeps_runtime_path="$SSV_DEPS_RUNTIME_PATH")
 meson_pkg_config_args=()
-if [ -n "${PKG_CONFIG_PATH:-}" ]; then
-    meson_pkg_config_args=(-Dpkg_config_path="$PKG_CONFIG_PATH")
+if [ -n "$SSV_DEPS_PKG_CONFIG_PATH" ]; then
+    meson_pkg_config_args=(-Dpkg_config_path="$SSV_DEPS_PKG_CONFIG_PATH")
 fi
 
 if [ -f "$SSV_BUILD_DIR/build.ninja" ]; then
-    ssv_info "使用已有 Meson 构建目录: ${SSV_BUILD_DIR#$SSV_ROOT/}"
-    meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
+    ssv_info "使用已有 Meson 构建目录: ${SSV_BUILD_DIR#"$SSV_ROOT"/}"
+    if [ "$old_signature" != "$SSV_DEPS_SIGNATURE" ]; then
+        meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
+    fi
 else
     if [ -d "$SSV_BUILD_DIR" ]; then
-        ssv_warn "构建目录存在但不是有效的 Meson build，重新创建: ${SSV_BUILD_DIR#$SSV_ROOT/}"
+        ssv_warn "构建目录存在但不是有效的 Meson build，重新创建: ${SSV_BUILD_DIR#"$SSV_ROOT"/}"
         rm -rf "$SSV_BUILD_DIR"
     fi
-    meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_pkg_config_args[@]}"
+    meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
 fi
 
 meson compile -C "$SSV_BUILD_DIR"
@@ -521,13 +78,17 @@ plugins=(
 ok=true
 for p in "${plugins[@]}"; do
     if [ -f "$p" ]; then
-        ssv_info "编译成功: ${p#$SSV_ROOT/}"
+        ssv_info "编译成功: ${p#"$SSV_ROOT"/}"
     else
-        ssv_warn "插件未生成: ${p#$SSV_ROOT/} (可能缺少依赖)"
+        ssv_warn "插件未生成: ${p#"$SSV_ROOT"/} (可能缺少依赖)"
         ok=false
     fi
 done
 
 if [ "$ok" = false ]; then
-    ssv_warn "部分插件未编译 (请安装依赖: onnxruntime-cpu hiredis nlohmann-json)"
+    ssv_error "部分插件未生成，构建结果不完整"
+    exit 1
 fi
+
+mv -f -- "$pending_env" "$SSV_BUILD_DIR/ssv-deps.env"
+trap - EXIT

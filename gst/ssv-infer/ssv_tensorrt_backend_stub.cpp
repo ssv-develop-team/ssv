@@ -19,7 +19,7 @@ public:
     ModelMetadata load(const InferenceConfig &) override
     {
         throw std::runtime_error(
-            "TensorRT backend is not built; rebuild with -Dtensorrt=enabled on a host with TensorRT SDK");
+            "TensorRT backend is not built; set SSV_TENSORRT_MODE=enabled and rerun ./ssv build on a host with TensorRT SDK");
     }
 
     std::vector<Tensor> infer(std::span<const Tensor>) override

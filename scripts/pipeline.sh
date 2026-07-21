@@ -6,6 +6,7 @@
 #     ./ssv test            由 scripts/test.sh 调用的有界 smoke 路径
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/deps.sh"
 cd "$SSV_ROOT"
 
 MODE="run"
@@ -85,6 +86,7 @@ if [ "$SKIP_BUILD" = false ]; then
     bash "$SSV_ROOT/scripts/build.sh"
 fi
 
+ssv_deps_load_runtime
 export_ssv_plugin_path
 
 RTSP_URL="${SSV_RTSP_URL:-$(ssv_yaml_get sources.0.uri "")}"

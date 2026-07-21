@@ -27,18 +27,11 @@ elif [ -f "$SSV_ROOT/config/ssv.yaml" ]; then
 else
     SSV_CONFIG="$SSV_ROOT/config/ssv.example.yaml"
 fi
-SSV_ONNXRUNTIME_FLAVOR="${SSV_ONNXRUNTIME_FLAVOR:-cpu}"
-SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime"
-if [ "$SSV_ONNXRUNTIME_FLAVOR" = "gpu" ]; then
-    SSV_ONNXRUNTIME_DEFAULT_ROOT="$SSV_ROOT/.deps/onnxruntime-gpu"
-elif [ "$SSV_ONNXRUNTIME_FLAVOR" != "cpu" ]; then
-    echo "[SSV] unsupported SSV_ONNXRUNTIME_FLAVOR: $SSV_ONNXRUNTIME_FLAVOR (expected cpu or gpu)" >&2
-    exit 1
-fi
-SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-$SSV_ONNXRUNTIME_DEFAULT_ROOT}"
-SSV_TENSORRT_ROOT="${SSV_TENSORRT_ROOT:-$SSV_ROOT/.deps/tensorrt}"
-SSV_OPENCV_ROOT="${SSV_OPENCV_ROOT:-$SSV_ROOT/.deps/opencv}"
 SSV_BUILD_DIR="${SSV_BUILD_DIR:-$SSV_ROOT/build}"
+case "$SSV_BUILD_DIR" in
+    /*) ;;
+    *) SSV_BUILD_DIR="$SSV_ROOT/$SSV_BUILD_DIR" ;;
+esac
 SSV_PLUGIN_DIR="$SSV_BUILD_DIR/gst/ssv-template"
 
 ssv_yaml_get() {
@@ -92,39 +85,11 @@ SSV_PLUGIN_PATHS="$SSV_PLUGIN_PATHS:$SSV_BUILD_DIR/gst/ssv-track"
 SSV_PLUGIN_PATHS="$SSV_PLUGIN_PATHS:$SSV_BUILD_DIR/gst/ssv-pub"
 SSV_PLUGIN_PATHS="$SSV_PLUGIN_PATHS:$SSV_BUILD_DIR/gst/ssv-overlay"
 
-append_ld_path_if_dir() {
-    local dir="$1"
-    if [ -d "$dir" ]; then
-        SSV_LD_PATHS="$SSV_LD_PATHS:$dir"
-    fi
-}
-
-append_nvidia_wheel_libs() {
-    local site_packages
-    for site_packages in \
-        "$SSV_ROOT"/.venv/lib/python*/site-packages \
-        "$SSV_ROOT"/.deps/python-site-packages \
-        "$SSV_ROOT"/.deps/venvs/*/lib/python*/site-packages; do
-        [ -d "$site_packages/nvidia" ] || continue
-        local lib_dir
-        for lib_dir in "$site_packages"/nvidia/*/lib; do
-            append_ld_path_if_dir "$lib_dir"
-        done
-    done
-}
-
 # 导出 GST_PLUGIN_PATH 和 LD_LIBRARY_PATH
 export_ssv_plugin_path() {
     export GST_PLUGIN_PATH="$SSV_PLUGIN_PATHS"
     # ssv-common 是共享库，需要让动态链接器能找到
-    SSV_LD_PATHS="$SSV_BUILD_DIR/gst/ssv-common"
-    append_ld_path_if_dir "$SSV_OPENCV_ROOT"/usr/lib/*
-    append_ld_path_if_dir "$SSV_ONNXRUNTIME_ROOT/lib"
-    append_ld_path_if_dir "$SSV_TENSORRT_ROOT/usr/lib/x86_64-linux-gnu"
-    append_ld_path_if_dir "$SSV_TENSORRT_ROOT/lib"
-    append_ld_path_if_dir "$SSV_TENSORRT_ROOT/TensorRT-11.1.0.106/lib"
-    append_nvidia_wheel_libs
-    export LD_LIBRARY_PATH="$SSV_LD_PATHS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="$SSV_BUILD_DIR/gst/ssv-common${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 }
 
 ssv_require_command() {

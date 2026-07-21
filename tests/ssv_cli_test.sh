@@ -87,19 +87,22 @@ grep -q 'device-id=\$INFER_DEVICE_ID' scripts/pipeline.sh || fail "pipeline scri
 grep -q 'precision=\$INFER_PRECISION' scripts/pipeline.sh || fail "pipeline script does not pass precision to ssvinfer"
 grep -q 'model-family=\$MODEL_FAMILY' scripts/pipeline.sh || fail "pipeline script does not pass model family to ssvinfer"
 grep -q 'output-format=\$OUTPUT_FORMAT' scripts/pipeline.sh || fail "pipeline script does not pass output format to ssvinfer"
-grep -q 'SSV_ONNXRUNTIME_FLAVOR' scripts/build.sh || fail "build script does not expose ONNX Runtime flavor"
-grep -q 'onnxruntime-gpu' scripts/build.sh || fail "build script does not isolate ONNX Runtime GPU package"
+grep -q 'source "$(dirname "$0")/deps.sh"' scripts/build.sh || fail "build script does not use the unified dependency entry point"
+grep -q 'SSV_ONNXRUNTIME_VERSION=1.25.1-gpu' .env.example || fail ".env.example does not document the ONNX Runtime GPU version suffix"
+grep -q 'managed 当前固定使用 OpenCV 4.10.0' .env.example || fail ".env.example does not document the managed OpenCV version"
+grep -q 'opencv-managed.sh 的包来源、模块 SONAME 和运行库闭包' .env.example || fail ".env.example does not document managed OpenCV upgrade requirements"
 grep -q 'SSV_TENSORRT_URL' .env.example || fail ".env.example does not document explicit TensorRT URL configuration"
 grep -q 'SSV_TENSORRT_ARCHIVE' .env.example || fail ".env.example does not document TensorRT archive configuration"
-grep -q 'SSV_TENSORRT_MESON_MODE' scripts/build.sh || fail "build script does not resolve TensorRT mode before Meson"
-if rg -n 'TensorRT-Enterprise|default_url' scripts/build.sh >/tmp/ssv-tensorrt-default-url-matches.txt; then
+grep -q 'SSV_DEPS_TENSORRT_MESON_MODE' scripts/build.sh || fail "build script does not pass the resolved TensorRT status to Meson"
+if rg -n 'TensorRT-Enterprise|default_url' scripts/deps/tensorrt-managed.sh >/tmp/ssv-tensorrt-default-url-matches.txt; then
     cat /tmp/ssv-tensorrt-default-url-matches.txt >&2
     fail "build script must not choose a default TensorRT SDK URL"
 fi
-grep -q 'SSV_ONNXRUNTIME_FLAVOR' scripts/lib.sh || fail "runtime script does not use ONNX Runtime flavor"
-grep -q 'onnxruntime-gpu' scripts/lib.sh || fail "runtime script does not select ONNX Runtime GPU path"
-grep -q 'site-packages' scripts/lib.sh || fail "runtime script does not discover Python site-packages"
-grep -q 'nvidia/.*/lib' scripts/lib.sh || grep -q 'nvidia/\*/lib' scripts/lib.sh || fail "runtime script does not add NVIDIA wheel lib directories"
+grep -q 'ssv_deps_load_runtime' scripts/pipeline.sh || fail "pipeline does not load the successful dependency snapshot"
+grep -q 'ssv_deps_load_runtime' scripts/inspect.sh || fail "inspect does not load the successful dependency snapshot"
+if rg -n 'site-packages|nvidia/.*/lib|nvidia/\*/lib' scripts/lib.sh; then
+    fail "runtime script must not scan Python NVIDIA wheel paths"
+fi
 grep -q 'if \[ -n "\$TARGET_CLASS" \]' scripts/pipeline.sh || fail "pipeline script does not omit empty target class"
 grep -q 'infer_props+=("target-class=\$TARGET_CLASS")' scripts/pipeline.sh || fail "pipeline script does not pass non-empty target class to ssvinfer"
 grep -q 'label-map=\$LABEL_MAP' scripts/pipeline.sh || fail "pipeline script does not pass label map to ssvinfer"
@@ -118,21 +121,23 @@ fi
 grep -q 'SSV_BUILD_DIR.*build' scripts/lib.sh || fail "scripts/lib.sh does not define SSV_BUILD_DIR"
 grep -q 'rm -rf.*SSV_BUILD_DIR' scripts/clean.sh || fail "scripts/clean.sh does not remove SSV_BUILD_DIR"
 
-grep -q 'ensure_opencv' scripts/build.sh || fail 'build script does not prepare local OpenCV'
-grep -q 'local pool_base="https://archive.ubuntu.com/ubuntu/pool/universe/o/opencv"' scripts/build.sh || fail 'build script does not pin Ubuntu OpenCV pool locally'
-grep -q 'local version="4.10.0"' scripts/build.sh || fail 'build script does not pin OpenCV version locally'
-grep -q 'local deb_revision="4.10.0+dfsg-5ubuntu1"' scripts/build.sh || fail 'build script does not pin OpenCV package revision locally'
-grep -q 'downloads/opencv' scripts/build.sh || fail 'OpenCV packages are not cached under .deps/downloads/opencv'
-grep -q 'SSV_OPENCV_MESON_MODE' scripts/build.sh || fail 'build script does not map OpenCV build mode to Meson'
-grep -q 'case "\$mode" in' scripts/build.sh || fail 'build script does not handle OpenCV mode like TensorRT'
-grep -q 'lib/pkgconfig/opencv4.pc' scripts/build.sh || fail 'build script does not generate local opencv4.pc'
-grep -q 'SSV_OPENCV_ROOT=' scripts/lib.sh || fail 'runtime script does not expose OpenCV root override'
-grep -q '"\$SSV_OPENCV_ROOT"/usr/lib/\*' scripts/lib.sh || fail 'runtime script does not discover OpenCV library directory'
-if rg -n 'SSV_OPENCV_(VERSION|DEB_REVISION|POOL_BASE|PC_DIR|LIB_DIR|DEB_ARCH|MULTIARCH)' scripts/lib.sh; then
-    fail 'runtime script exposes OpenCV build implementation details'
-fi
-grep -q "option('opencv'" meson.options || fail 'Meson does not expose OpenCV build mode'
-grep -q "opencv_opt = get_option('opencv')" meson.build || fail 'Meson does not read OpenCV build mode'
+grep -q 'ssv_deps_prepare' scripts/build.sh || fail 'build script does not prepare dependencies through deps.sh'
+grep -q 'downloads/opencv' scripts/deps/opencv-managed.sh || fail 'OpenCV packages are not cached by its provider'
+grep -q 'SSV_OPENCV_PACKAGE_REVISION' scripts/deps/opencv-managed.sh || fail 'OpenCV package details are not private to its provider'
+grep -q 'pc_dir/opencv4.pc' scripts/deps/opencv-managed.sh || fail 'OpenCV provider does not generate opencv4.pc'
+if rg -n 'dpkg-deb' scripts/deps/opencv-managed.sh; then fail 'OpenCV provider must use ar and tar, not dpkg-deb'; fi
+grep -q "option('opencv_mode'" meson.options || fail 'Meson does not expose the unified OpenCV mode'
+grep -q "opencv_mode = get_option('opencv_mode')" meson.build || fail 'Meson does not read the unified OpenCV mode'
 grep -q 'opencv_enabled' meson.build || fail 'Meson does not gate OpenCV discovery by build mode'
 grep -q 'opencv_enabled' gst/ssv-track/meson.build || fail 'track does not gate GMC on OpenCV mode'
 grep -q 'opencv_enabled' gst/tests/meson.build || fail 'tests do not gate OpenCV on build mode'
+
+if rg -n 'SSV_ONNXRUNTIME_FLAVOR|SSV_TENSORRT_VERSION|SSV_OPENCV=|SSV_TENSORRT=' scripts .env.example README.md; then
+    fail 'legacy dependency variable names remain in active scripts or user docs'
+fi
+if rg -n "option\('(opencv|tensorrt)'|-D(opencv|tensorrt)=" meson.options meson.build gst scripts README.md .env.example; then
+    fail 'legacy Meson dependency options remain'
+fi
+if rg -n "method *: *'cmake'|find_library|\.deps.*onnxruntime|TensorRT-[0-9].*/lib" meson.build gst/tests/meson.build; then
+    fail 'Meson still contains SDK discovery fallbacks or fixed paths'
+fi

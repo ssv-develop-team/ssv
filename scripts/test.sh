@@ -2,27 +2,33 @@
 # scripts/test.sh — 测试编排
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/deps.sh"
 cd "$SSV_ROOT"
 
 ssv_header "运行测试套件"
 
-ssv_info "步骤 1/5: 编译 C++ 插件"
+ssv_info "步骤 1/6: 运行依赖脚本测试"
+bash "$SSV_ROOT/tests/ssv_deps_test.sh"
+
+ssv_info "步骤 2/6: 编译 C++ 插件"
 bash "$SSV_ROOT/scripts/build.sh"
 
-ssv_info "步骤 2/5: 运行 Meson 测试"
+ssv_deps_load_runtime
+
+ssv_info "步骤 3/6: 运行 Meson 测试"
 meson test -C "$SSV_BUILD_DIR"
 
-ssv_info "步骤 3/5: 运行 CLI 脚本测试"
+ssv_info "步骤 4/6: 运行 CLI 脚本测试"
 bash "$SSV_ROOT/tests/ssv_cli_test.sh"
 
-ssv_info "步骤 4/5: 运行 Python Agent 测试"
+ssv_info "步骤 5/6: 运行 Python Agent 测试"
 ssv_require_command "uv" "pip install uv" "All"
 (cd "$SSV_ROOT/agent" && uv run --extra dev pytest)
 
 MODEL="$(ssv_yaml_get inference.model_path models/yolov8n.onnx)"
 RTSP_URL="${SSV_RTSP_URL:-$(ssv_yaml_get sources.0.uri "")}"
 if [ -n "$RTSP_URL" ] && [ -f "$MODEL" ]; then
-    ssv_info "步骤 5/5: 运行链路冒烟测试"
+    ssv_info "步骤 6/6: 运行链路冒烟测试"
     set +e
     bash "$SSV_ROOT/scripts/pipeline.sh" --smoke --skip-build
     smoke_status=$?
