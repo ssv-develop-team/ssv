@@ -47,12 +47,26 @@ ssv_tensorrt_find_library() {
     printf '%s\n' "${matches[0]}"
 }
 
+ssv_tensorrt_resolve_version_macro() {
+    local header="$1" macro="$2" value target
+    value="$(awk -v macro="$macro" '$1 == "#define" && $2 == macro {print $3; exit}' "$header")"
+    for _ in 1 2 3 4 5; do
+        [[ "$value" =~ ^[0-9]+$ ]] && { printf '%s\n' "$value"; return 0; }
+        [ -n "$value" ] || return 1
+        target="$(awk -v macro="$value" '$1 == "#define" && $2 == macro {print $3; exit}' "$header")"
+        [ -n "$target" ] || return 1
+        value="$target"
+    done
+    return 1
+}
+
 ssv_tensorrt_version() {
     local header="$1"
     local major minor patch
-    major="$(awk '/^[[:space:]]*#define[[:space:]]+NV_TENSORRT_MAJOR[[:space:]]+/ {print $3; exit}' "$header")"
-    minor="$(awk '/^[[:space:]]*#define[[:space:]]+NV_TENSORRT_MINOR[[:space:]]+/ {print $3; exit}' "$header")"
-    patch="$(awk '/^[[:space:]]*#define[[:space:]]+NV_TENSORRT_PATCH[[:space:]]+/ {print $3; exit}' "$header")"
+    # Enterprise headers may expose NV_TENSORRT_* through TRT_* aliases.
+    major="$(ssv_tensorrt_resolve_version_macro "$header" NV_TENSORRT_MAJOR || true)"
+    minor="$(ssv_tensorrt_resolve_version_macro "$header" NV_TENSORRT_MINOR || true)"
+    patch="$(ssv_tensorrt_resolve_version_macro "$header" NV_TENSORRT_PATCH || true)"
     if [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ]; then
         printf '%s.%s.%s\n' "$major" "$minor" "$patch"
         return 0
@@ -93,7 +107,7 @@ ssv_tensorrt_locate_cuda() {
     if [ -z "$cuda_home" ]; then
         for candidate in "$root" /usr/local/cuda /usr/local/cuda-*; do
             [ -d "$candidate" ] || continue
-            if find "$candidate" -type f -name cuda_runtime_api.h -print -quit | grep -q .; then
+            if find -H "$candidate" -type f -name cuda_runtime_api.h -print -quit | grep -q .; then
                 cuda_home="$candidate"
                 break
             fi
@@ -102,8 +116,8 @@ ssv_tensorrt_locate_cuda() {
     local cuda_include="" cuda_lib=""
     if [ -n "$cuda_home" ]; then
         local cuda_header cuda_library
-        cuda_header="$(find "$cuda_home" -type f -name cuda_runtime_api.h -print -quit 2>/dev/null)"
-        cuda_library="$(find "$cuda_home" \( -type f -o -type l \) -name libcudart.so -print -quit 2>/dev/null)"
+        cuda_header="$(find -H "$cuda_home" -type f -name cuda_runtime_api.h -print -quit 2>/dev/null)"
+        cuda_library="$(find -H "$cuda_home" \( -type f -o -type l \) -name libcudart.so -print -quit 2>/dev/null)"
         [ -z "$cuda_header" ] || cuda_include="$(dirname -- "$cuda_header")"
         [ -z "$cuda_library" ] || cuda_lib="$(dirname -- "$cuda_library")"
     fi
@@ -142,7 +156,10 @@ ssv_tensorrt_validate_layout() {
 #include <NvInferVersion.h>
 #include <cuda_runtime_api.h>
 int main() {
-    return NV_TENSORRT_MAJOR > 0 && cudaSuccess == 0 ? 0 : 1;
+    int cuda_version = 0;
+    if (cudaRuntimeGetVersion(&cuda_version) != cudaSuccess)
+        return 1;
+    return getInferLibVersion() > 0 && cuda_version > 0 ? 0 : 1;
 }' \
         nvinfer "$runtime_dirs" || { ssv_deps_die "TensorRT/CUDA compile/load probe failed"; return 1; }
     printf 'version=%s\n' "$version"

@@ -162,6 +162,20 @@ printf '%s\n' '#pragma once' > "$fake_tensorrt/cuda/include/cuda_runtime_api.h"
 : > "$fake_tensorrt/cuda/lib/libcudart.so"
 assert_eq '11.2.3' "$(run_clean_shell "source scripts/deps.sh; ssv_tensorrt_version '$fake_tensorrt/include/NvInferVersion.h'")" 'TensorRT version comes from NvInferVersion.h'
 
+fake_enterprise_version="$TEST_DIR/NvInferVersion-enterprise.h"
+printf '%s\n' \
+    '#define TRT_MAJOR_ENTERPRISE 11' \
+    '#define TRT_MINOR_ENTERPRISE 1' \
+    '#define TRT_PATCH_ENTERPRISE 0' \
+    '#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE' \
+    '#define NV_TENSORRT_MINOR TRT_MINOR_ENTERPRISE' \
+    '#define NV_TENSORRT_PATCH TRT_PATCH_ENTERPRISE' > "$fake_enterprise_version"
+assert_eq '11.1.0' "$(run_clean_shell "source scripts/deps.sh; ssv_tensorrt_version '$fake_enterprise_version'")" 'TensorRT version resolves Enterprise header aliases'
+
+fake_cuda_link="$TEST_DIR/fake-cuda-link"
+ln -s "$fake_tensorrt/cuda" "$fake_cuda_link"
+assert_success 'TensorRT follows a symlinked CUDA_HOME' run_clean_shell "CUDA_HOME='$fake_cuda_link'; source scripts/deps.sh; ssv_tensorrt_locate_cuda '$fake_tensorrt'"
+
 multi_tensorrt="$TEST_DIR/multi-tensorrt"
 mkdir -p "$multi_tensorrt/TensorRT-a/include" "$multi_tensorrt/TensorRT-b/include"
 : > "$multi_tensorrt/TensorRT-a/include/NvInfer.h"
