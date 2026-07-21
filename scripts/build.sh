@@ -20,7 +20,7 @@ if [ -n "${SSV_EXTRA_PKG_CONFIG_PATH:-}" ]; then
 fi
 
 missing_deps=()
-for dep in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 yaml-cpp hiredis nlohmann_json cblas blas lapack; do
+for dep in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 yaml-cpp hiredis nlohmann_json blas lapack; do
     if ! pkg-config --exists "$dep"; then
         missing_deps+=("$dep")
     fi
@@ -28,7 +28,7 @@ done
 
 if [ "${#missing_deps[@]}" -gt 0 ]; then
     ssv_error "缺少 C/C++ 开发依赖: ${missing_deps[*]}"
-    ssv_warn "Install GStreamer, yaml-cpp, hiredis, nlohmann-json, CBLAS, BLAS, and LAPACK development packages with your system package manager."
+    ssv_warn "Install GStreamer, yaml-cpp, hiredis, nlohmann-json, BLAS, and LAPACK development packages with your system package manager."
     ssv_warn "If pkg-config files live outside the default search path, set SSV_EXTRA_PKG_CONFIG_PATH or PKG_CONFIG_PATH."
     ssv_warn "ONNX Runtime: ./ssv build can download a local CPU release after base dependencies are installed"
     exit 1

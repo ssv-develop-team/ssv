@@ -48,7 +48,6 @@ jobs:
             libhiredis-dev \
             libyaml-cpp-dev \
             libblas-dev \
-            libcblas-dev \
             liblapack-dev \
             libprotobuf-dev \
             libtbb-dev \

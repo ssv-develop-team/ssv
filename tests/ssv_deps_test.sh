@@ -186,6 +186,18 @@ PATH="$fake_bin:$PATH" FAKE_CURL_COUNT="$download_count" run_clean_shell "source
 assert_eq '1' "$(cat "$download_count")" 'cached download avoids a second network request'
 
 if rg -n 'dpkg-deb' "$ROOT/scripts/deps/opencv-managed.sh" >/dev/null; then fail 'OpenCV provider has no dpkg-deb dependency'; else pass 'OpenCV provider has no dpkg-deb dependency'; fi
+if rg -n 'libcblas-dev' "$ROOT/.github/workflows/ci.yml" "$ROOT/README.md" >/dev/null || \
+    rg -n 'for dep .* cblas' "$ROOT/scripts/build.sh" >/dev/null; then
+    fail 'OpenCV host math dependencies use portable BLAS and LAPACK names'
+else
+    pass 'OpenCV host math dependencies use portable BLAS and LAPACK names'
+fi
+grep -q 'nlohmann-json cblas blas lapack' "$ROOT/README.md" \
+    && pass 'Arch install instructions include its separate CBLAS package' \
+    || fail 'Arch install instructions include its separate CBLAS package'
+grep -q 'pkg-config --exists cblas' "$ROOT/scripts/deps/opencv-managed.sh" \
+    && pass 'OpenCV provider adapts to a separate system CBLAS package' \
+    || fail 'OpenCV provider adapts to a separate system CBLAS package'
 if rg -n 'SSV_ONNXRUNTIME_FLAVOR|SSV_TENSORRT_VERSION' "$ROOT/scripts" "$ROOT/.env.example" >/dev/null; then fail 'legacy dependency variables are absent'; else pass 'legacy dependency variables are absent'; fi
 
 printf '%s tests passed, %s failed\n' "$passed" "$failed"

@@ -49,7 +49,7 @@ GStreamer C++ 插件链
 | nlohmann-json | >= 3 | 事件 JSON 序列化 |
 | ONNX Runtime | >= 1.20 | YOLO ONNX 推理 |
 | OpenCV | >= 4.5 | 图像处理依赖 |
-| CBLAS + BLAS + LAPACK | 系统开发包 | managed OpenCV 的宿主数学运行库 |
+| BLAS + LAPACK | 系统开发包 | managed OpenCV 的宿主数学运行库 |
 | Python | >= 3.12 | Agent 服务 |
 | uv | >= 0.11 | Python 包管理 |
 | Docker + Compose | Docker >= 24 | 本地 Redis |
@@ -64,7 +64,7 @@ sudo apt-get install -y \
   gstreamer1.0-tools \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   libyaml-cpp-dev libhiredis-dev nlohmann-json3-dev \
-  libcblas-dev libblas-dev liblapack-dev \
+  libblas-dev liblapack-dev \
   python3 python3-venv docker.io docker-compose-plugin
 ```
 

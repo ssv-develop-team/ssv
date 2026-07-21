@@ -136,6 +136,12 @@ ssv_opencv_validate_runtime_closure() {
 ssv_opencv_make_pc() {
     local root="$1" version="$2" include_dir="$3" lib_dir="$4"
     local pc_dir="$root/lib/pkgconfig"
+    local host_math_libs
+    if pkg-config --exists cblas; then
+        host_math_libs="$(pkg-config --libs cblas lapack blas)" || return 1
+    else
+        host_math_libs="$(pkg-config --libs lapack blas)" || return 1
+    fi
     mkdir -p -- "$pc_dir"
     ssv_deps_write_pc "$pc_dir/opencv4.pc" \
         "prefix=$root" \
@@ -147,7 +153,7 @@ ssv_opencv_make_pc() {
         "Description: OpenCV runtime" \
         "Version: $version" \
         'Libs: -L${libdir} -Wl,-rpath-link,${libdir} -lopencv_calib3d -lopencv_video -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core' \
-        'Libs.private: -lcblas -llapack -lblas' \
+        "Libs.private: $host_math_libs" \
         'Cflags: -I${includedir}'
 }
 
