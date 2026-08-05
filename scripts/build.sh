@@ -3,8 +3,66 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/deps.sh"
-cd "$SSV_ROOT"
 
+ssv_build_usage() {
+    printf 'usage: ./ssv build [--profile auto|cpu|nvidia|intel|amd]\n'
+}
+
+ssv_build_parse_args() {
+    requested_profile=auto
+    profile_seen=false
+    show_build_help=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --profile)
+                [ "$profile_seen" = false ] || {
+                    ssv_deps_die "--profile may be specified only once"
+                    return 1
+                }
+                if [ "$#" -lt 2 ] || [[ "${2:-}" == -* ]]; then
+                    ssv_deps_die "--profile requires a value"
+                    return 1
+                fi
+                requested_profile="$2"
+                profile_seen=true
+                shift 2
+                ;;
+            --profile=*)
+                [ "$profile_seen" = false ] || {
+                    ssv_deps_die "--profile may be specified only once"
+                    return 1
+                }
+                requested_profile="${1#--profile=}"
+                [ -n "$requested_profile" ] || {
+                    ssv_deps_die "--profile requires a value"
+                    return 1
+                }
+                profile_seen=true
+                shift
+                ;;
+            -h|--help)
+                show_build_help=true
+                shift
+                ;;
+            *)
+                ssv_deps_die "unknown build argument: $1"
+                return 1
+                ;;
+        esac
+    done
+    ssv_onnxruntime_validate_profile "$requested_profile"
+}
+
+if ! ssv_build_parse_args "$@"; then
+    ssv_build_usage >&2
+    exit 2
+fi
+if [ "$show_build_help" = true ]; then
+    ssv_build_usage
+    exit 0
+fi
+
+cd "$SSV_ROOT"
 ssv_header "编译 GStreamer 插件"
 
 mkdir -p "$SSV_ROOT/.deps"
@@ -44,11 +102,26 @@ cleanup_pending_env() {
     rm -f -- "$pending_env"
 }
 trap cleanup_pending_env EXIT
-ssv_deps_prepare
-old_signature="$(sed -n 's/^SSV_DEPS_SIGNATURE=//p' "$SSV_BUILD_DIR/ssv-deps.env" 2>/dev/null || true)"
+ssv_deps_prepare "$requested_profile"
+
+previous_dependency_signature=""
+if [ -f "$SSV_BUILD_DIR/ssv-deps.env" ]; then
+    previous_dependency_signature="$(
+        sed -n 's/^SSV_DEPS_SIGNATURE=//p' \
+            "$SSV_BUILD_DIR/ssv-deps.env"
+    )"
+fi
+dependency_cache_changed=false
+if [ "$previous_dependency_signature" != "$SSV_DEPS_SIGNATURE" ]; then
+    dependency_cache_changed=true
+fi
 
 meson_opencv_args=(-Dopencv_mode="$SSV_DEPS_OPENCV_MODE")
-meson_tensorrt_args=(-Dtensorrt_mode="$SSV_DEPS_TENSORRT_MESON_MODE")
+meson_tensorrt_args=(-Dtensorrt_mode="$SSV_DEPS_TENSORRT_MODE")
+meson_profile_args=(
+    -Donnxruntime_profile="$SSV_DEPS_PROFILE"
+    -Donnxruntime_dependency_signature="$SSV_DEPS_SIGNATURE"
+)
 meson_runtime_args=(-Ddeps_runtime_path="$SSV_DEPS_RUNTIME_PATH")
 meson_pkg_config_args=()
 if [ -n "$SSV_DEPS_PKG_CONFIG_PATH" ]; then
@@ -57,11 +130,32 @@ fi
 
 if [ -f "$SSV_BUILD_DIR/build.ninja" ]; then
     ssv_info "使用已有 Meson 构建目录: ${SSV_BUILD_DIR#"$SSV_ROOT"/}"
-    if [ "$old_signature" != "$SSV_DEPS_SIGNATURE" ]; then
-        meson setup "$SSV_BUILD_DIR" --reconfigure "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
+    # Refresh project option definitions before applying options introduced
+    # after this build directory was first configured.
+    meson setup "$SSV_BUILD_DIR" --reconfigure
+    if [ "$dependency_cache_changed" = true ]; then
+        if meson setup --help 2>/dev/null | grep -Fq -- '--clearcache'; then
+            meson setup "$SSV_BUILD_DIR" --reconfigure --clearcache \
+                "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" \
+                "${meson_profile_args[@]}" "${meson_runtime_args[@]}" \
+                "${meson_pkg_config_args[@]}"
+        else
+            # Meson 1.1-1.2 has no supported dependency-cache reset. Its
+            # documented wipe path is required when resolved SDKs change.
+            meson setup "$SSV_BUILD_DIR" --wipe \
+                "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" \
+                "${meson_profile_args[@]}" "${meson_runtime_args[@]}" \
+                "${meson_pkg_config_args[@]}"
+            ssv_deps_write_env "$pending_env"
+        fi
+    else
+        meson setup "$SSV_BUILD_DIR" --reconfigure \
+            "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" \
+            "${meson_profile_args[@]}" "${meson_runtime_args[@]}" \
+            "${meson_pkg_config_args[@]}"
     fi
 else
-    meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
+    meson setup "$SSV_BUILD_DIR" "${meson_opencv_args[@]}" "${meson_tensorrt_args[@]}" "${meson_profile_args[@]}" "${meson_runtime_args[@]}" "${meson_pkg_config_args[@]}"
 fi
 
 meson compile -C "$SSV_BUILD_DIR"

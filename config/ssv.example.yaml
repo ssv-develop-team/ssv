@@ -1,107 +1,97 @@
-# Site Safety Vision - 运行时配置文件
-# 本仓库只保留这一份 YAML 示例配置；本地覆盖推荐使用 config/ssv.yaml，也可用项目根目录 ssv.yaml 或 SSV_CONFIG_PATH。
+# Site Safety Vision - YAML 运行时配置示例
+# 此文件只用于复制，不参与默认配置搜索。请复制为 config/ssv.yaml 或项目根目录 ssv.yaml 后修改，
+# 也可以通过 SSV_CONFIG_PATH 或 ./ssv run --config PATH 显式指定配置文件。
 #
-# 环境变量覆盖 (优先级高于 YAML)，只保留适合部署和临时调试的少量变量:
-#   REDIS_HOST        → redis.host
-#   REDIS_PORT        → redis.port
-#   SSV_RTSP_URL      → sources[0].uri
-#   GST_DEBUG         → logging.cpp_debug_level
+# 仅保留适合部署和临时调试的环境变量覆盖：
+#   REDIS_HOST   -> redis.host
+#   REDIS_PORT   -> redis.port
+#   SSV_RTSP_URL -> sources[0].uri
+#   GST_DEBUG    -> logging.cpp_debug_level
 
-# 配置版本号
-version: "1.0"
+version: "2.0"
 
-# 日志配置
 logging:
-  # C++ GStreamer 插件的 GST_DEBUG 模式（如 "ssv*:5" 启用所有 SSV 插件 DEBUG 级别）
+  # GStreamer C++ 插件的 GST_DEBUG 模式。
   cpp_debug_level: "ssv*:4"
-  # Python agent 服务日志级别（DEBUG, INFO, WARNING, ERROR）
+  # Python Agent 日志级别：DEBUG、INFO、WARNING 或 ERROR。
   python_log_level: "INFO"
 
-# Redis 连接配置（M5 起使用）
 redis:
   host: "localhost"
   port: 6379
   db: 0
-  # Redis Streams 键名，检测事件写入此流
   stream_key: "ssv:events"
-  # 消费者组名称，agent 服务从此组消费事件
   consumer_group: "ssv-agent"
 
-# 视频源配置（M2 起使用）
-sources: []
-#  示例：
-#  - name: "camera-01"
-#    type: "rtsp"
-#    uri: "rtsp://192.168.1.100:554/stream"
-#    protocols: "tcp"
-#    latency_ms: 200
-#  - name: "test-video"
-#    type: "file"
-#    uri: "/path/to/video.mp4"
+# 本阶段必须且只能配置一个 RTSP H.264 8-bit source。
+sources:
+  - id: "camera-01"
+    uri: "rtsp://localhost:8554/test"
+    codec: "h264"
+    protocols: "tcp"
+    latency_ms: 200
+    decode:
+      # auto、vaapi、nvdec 或 software；显式模式不静默回退。
+      mode: "auto"
+      # auto、drm:/dev/dri/renderD<N> 或 cuda:<N>。
+      device: "auto"
 
-# 显示配置（M2 起使用）
 display:
-  # 是否开启 GStreamer 本地显示窗口
-  enabled: false
-  # 是否默认开启检测框 overlay；当前仍为调试路径
-  overlay: false
-  # 显示分支帧率
-  fps: 30
-  # 视频 sink 元素（autovideosink 自动选择，或指定 waylandsink/xvimagesink）
-  sink: "autovideosink"
-
-# Pipeline 配置（M2 起使用）
-pipeline:
-  # 链路冒烟测试超时
-  check_timeout: "30s"
-  # 分析帧率（每秒抽取多少帧进行分析）；设为 0 表示不限流
-  analysis_fps: 5
-  # 分析帧宽度
-  frame_width: 640
-  # 分析帧高度
-  frame_height: 480
-
-# 推理配置（M3 起使用）
-inference:
-  # 推理运行时：auto 根据模型后缀选择；onnxruntime 加载 .onnx；tensorrt 加载 .engine
-  runtime: "auto"
-  # 模型文件路径；工程实时链路不直接加载 .pt
-  model_path: "models/yolov8n.onnx"
-  # 检测置信度阈值
-  confidence_threshold: 0.5
-  # 推理设备：auto、cpu、gpu
-  device: "auto"
-  # 通用设备编号；GPU 后端使用
-  device_id: 0
-  # 推理精度意图：auto、fp32、fp16、int8
-  precision: "auto"
-  # 模型家族；本阶段支持 yolo
-  model_family: "yolo"
-  # 输出格式：auto、yolov5、yolov8、yolo_nx6
-  output_format: "auto"
-  # 只输出指定类别；空字符串表示不过滤
-  target_class: "person"
-  # 模型类别表，每行一个类别名，行号对应 class_id
-  label_map: "config/model-labels/coco80.txt"
-
-# 跟踪配置（M2 起使用）
-tracking:
-  # 是否启用跟踪插件
   enabled: true
-  # 跟踪算法使用的帧率估计
-  frame_rate: 30
-  # 保留检测进入跟踪的置信度阈值
-  track_threshold: 0.5
-  # 轨迹丢失后的保留帧数
-  track_buffer: 30
-  # IoU 匹配阈值
-  match_threshold: 0.3
-  # 无真实检测时使用 mock track
-  mock_track: false
+  # auto、gtkglsink 或 gtksink；显式 backend 不静默回退。
+  backend: "auto"
+  # drop-only 显示上限，不复制旧帧补足帧率。
+  fps: 30
+  # auto、x11 或 wayland。
+  gl_backend: "auto"
+  overlay:
+    enabled: true
+    font:
+      face: "regular"
+      size: 12
+    # 只影响 GTK 绘制，不回写 tracker、Redis、事件或证据。
+    motion_prediction:
+      enabled: true
+      max_horizon_ms: 300
 
-# Agent 配置（M6 起使用）
+inference:
+  enabled: true
+  # drop-only 分析上限；0 表示不限流，但仍不允许积压。
+  analysis_fps: 15
+  model:
+    # 必须是离线生成并带 SSV 输入 metadata 的 wrapper ONNX。
+    path: "models/yolov8n-preproc.onnx"
+    family: "yolo"
+    output_format: "yolov8"
+    label_map: "config/model-labels/coco80.txt"
+  runtime:
+    type: "onnxruntime"
+    providers:
+      # auto，或改为 explicit 并提供非空 order。
+      mode: "auto"
+    device_id: 0
+    precision: "auto"
+    # auto 或正整数。
+    cpu_threads: "auto"
+    cache:
+      enabled: true
+      # 空字符串表示使用 XDG/HOME 下的默认 ORT cache 目录。
+      directory: ""
+  confidence_threshold: 0.5
+  # 空字符串表示不过滤类别。
+  target_class: "person"
+
+tracking:
+  enabled: true
+  track_threshold: 0.5
+  track_buffer: 30
+  match_threshold: 0.3
+  mock_track: false
+  gmc:
+    # sparse-opt-flow 或 none；只有 sparse-opt-flow 使用 OpenCV。
+    method: "sparse-opt-flow"
+    downscale: 2
+
 agent:
-  # 状态机单次处理超时（秒）
   state_machine_timeout: 300
-  # 工具调用最大重试次数
   max_retries: 3

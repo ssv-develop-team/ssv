@@ -5,15 +5,17 @@
 # 用法: ./ssv <command> [args...]
 #
 # 命令:
-#   build                    编译 C++ GStreamer 插件
+#   build [--profile NAME]   按 runtime profile 编译 runner、插件和测试
 #   clean                    删除 Meson 构建目录
 #   redis                    启动 Docker Redis (后台)
 #   test                     运行代码测试和链路冒烟测试后退出
-#   run                      运行整套 GStreamer 实时链路
+#   run [--config PATH]      运行 C++ 实时链路
+#   run --headless           强制无头运行
 #   run --display            实时链路 + 视频观察窗口
 #   run --display --overlay  实时链路 + 视频观察窗口 + 检测框
-#   run --display --sink X   实时链路 + 指定视频 sink
+#   run --display --display-backend gtkglsink|gtksink
 #   download-model           下载 YOLOv8n ONNX 模型
+#   prepare-model            生成 RGBA uint8 wrapper ONNX 模型
 #   agent                    启动 Python Agent 服务 (消费 Redis 事件)
 #   inspect                  查看插件详细信息
 #   stop                     停止所有后台服务
@@ -29,38 +31,49 @@ usage() {
     echo "用法: ./ssv <command> [args...]"
     echo ""
     echo "命令:"
-    echo "  build                    编译 C++ GStreamer 插件"
+    echo "  build [--profile NAME]   编译，NAME: auto|cpu|nvidia|intel|amd"
     echo "  clean                    删除 Meson 构建目录"
     echo "  redis                    启动 Docker Redis (后台)"
     echo "  test                     运行代码测试和链路冒烟测试后退出"
-    echo "  run                      运行整套 GStreamer 实时链路"
+    echo "  run --config PATH        使用指定 YAML 运行 C++ 实时链路"
+    echo "  run --headless           强制无头运行"
     echo "  run --display            实时链路 + 视频观察窗口"
     echo "  run --display --overlay  实时链路 + 视频观察窗口 + 检测框"
-    echo "  run --display --sink X   实时链路 + 指定视频 sink"
+    echo "  run --display --display-backend gtkglsink|gtksink"
     echo "  download-model           下载 YOLOv8n ONNX 模型"
+    echo "  prepare-model            生成 RGBA uint8 wrapper ONNX 模型"
     echo "  agent                    启动 Agent (消费 Redis 事件并打印)"
     echo "  inspect                  查看插件信息"
     echo "  stop                     停止所有后台服务"
     echo ""
     echo "环境变量:"
-    echo "  SSV_CONFIG_PATH    配置文件路径 (默认优先: ssv.yaml)"
+    echo "  SSV_CONFIG_PATH    显式配置文件路径"
     echo "  SSV_RTSP_URL       临时覆盖 RTSP 视频源地址"
     echo "  GST_DEBUG          临时覆盖 GStreamer 调试级别"
+    echo "  REDIS_HOST         临时覆盖 Redis 主机"
+    echo "  REDIS_PORT         临时覆盖 Redis 端口"
     echo ""
     echo "运行参数优先写入 ssv.yaml；示例模板见 config/ssv.example.yaml。"
     echo ""
 }
 
 case "${1:-}" in
-    build)    exec bash "$SCRIPTS_DIR/build.sh" ;;
+    build)
+        shift
+        exec bash "$SCRIPTS_DIR/build.sh" "$@"
+        ;;
     clean)    exec bash "$SCRIPTS_DIR/clean.sh" ;;
     redis)    exec bash "$SCRIPTS_DIR/redis.sh" ;;
     test)     exec bash "$SCRIPTS_DIR/test.sh" ;;
     run)
         shift
-        exec bash "$SCRIPTS_DIR/pipeline.sh" --run "$@"
+        exec bash "$SCRIPTS_DIR/run.sh" "$@"
         ;;
     download-model) exec bash "$SCRIPTS_DIR/download-model.sh" ;;
+    prepare-model)
+        shift
+        exec bash "$SCRIPTS_DIR/prepare-model.sh" "$@"
+        ;;
     agent)    exec bash "$SCRIPTS_DIR/agent.sh" ;;
     inspect)  exec bash "$SCRIPTS_DIR/inspect.sh" ;;
     stop)     exec bash "$SCRIPTS_DIR/stop.sh" ;;

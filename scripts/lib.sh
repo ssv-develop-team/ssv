@@ -25,58 +25,13 @@ elif [ -f "$SSV_ROOT/ssv.yaml" ]; then
 elif [ -f "$SSV_ROOT/config/ssv.yaml" ]; then
     SSV_CONFIG="$SSV_ROOT/config/ssv.yaml"
 else
-    SSV_CONFIG="$SSV_ROOT/config/ssv.example.yaml"
+    SSV_CONFIG=""
 fi
 SSV_BUILD_DIR="${SSV_BUILD_DIR:-$SSV_ROOT/build}"
 case "$SSV_BUILD_DIR" in
     /*) ;;
     *) SSV_BUILD_DIR="$SSV_ROOT/$SSV_BUILD_DIR" ;;
 esac
-SSV_PLUGIN_DIR="$SSV_BUILD_DIR/gst/ssv-template"
-
-ssv_yaml_get() {
-    local key_path="$1"
-    local default_value="${2:-}"
-    if [ ! -f "$SSV_CONFIG" ]; then
-        printf '%s' "$default_value"
-        return 0
-    fi
-
-    python3 - "$SSV_CONFIG" "$key_path" "$default_value" <<'PY'
-import sys
-from pathlib import Path
-
-import yaml
-
-config_path, key_path, default_value = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(Path(config_path), encoding="utf-8") as f:
-    data = yaml.safe_load(f) or {}
-
-value = data
-for part in key_path.split("."):
-    if isinstance(value, dict):
-        if part not in value:
-            print(default_value, end="")
-            raise SystemExit(0)
-        value = value[part]
-    elif isinstance(value, list) and part.isdigit():
-        index = int(part)
-        if index >= len(value):
-            print(default_value, end="")
-            raise SystemExit(0)
-        value = value[index]
-    else:
-        print(default_value, end="")
-        raise SystemExit(0)
-
-if value is None:
-    print(default_value, end="")
-elif isinstance(value, bool):
-    print("true" if value else "false", end="")
-else:
-    print(value, end="")
-PY
-}
 
 # 所有插件目录 (用于 GST_PLUGIN_PATH)
 SSV_PLUGIN_PATHS="$SSV_BUILD_DIR/gst/ssv-template"

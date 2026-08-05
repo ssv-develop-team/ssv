@@ -1,16 +1,12 @@
 #include "gstssvtemplate.hpp"
-#include "ssv_config.hpp"
 #include "ssv_logging.hpp"
 
 #include <gst/video/video.h>
-
-#include <new>
 
 GST_DEBUG_CATEGORY_STATIC(ssv_template_debug);
 
 struct _SsvTemplate {
     GstBaseTransform parent;
-    ssv::SsvConfig *config;
 };
 
 G_DEFINE_TYPE(SsvTemplate, ssv_template, GST_TYPE_BASE_TRANSFORM)
@@ -37,35 +33,6 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
     )
 );
 
-static gboolean
-ssv_template_start(GstBaseTransform *trans) {
-    SsvTemplate *self = SSV_TEMPLATE(trans);
-
-    self->config = new (std::nothrow) ssv::SsvConfig();
-    if (!self->config)
-        return FALSE;
-
-    try {
-        *self->config = ssv::ssv_config_load();
-        GST_INFO_OBJECT(self, "loaded config: analysis_fps=%d, frame=%dx%d",
-            self->config->analysis_fps,
-            self->config->frame_width,
-            self->config->frame_height);
-    } catch (const std::exception &e) {
-        GST_WARNING_OBJECT(self, "config load failed, using defaults: %s", e.what());
-    }
-
-    return TRUE;
-}
-
-static gboolean
-ssv_template_stop(GstBaseTransform *trans) {
-    SsvTemplate *self = SSV_TEMPLATE(trans);
-    delete self->config;
-    self->config = nullptr;
-    return TRUE;
-}
-
 static GstFlowReturn
 ssv_template_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
     SsvTemplate *self = SSV_TEMPLATE(trans);
@@ -90,14 +57,12 @@ ssv_template_class_init(SsvTemplateClass *klass) {
     gst_element_class_add_static_pad_template(element_class, &sink_template);
     gst_element_class_add_static_pad_template(element_class, &src_template);
 
-    base_class->start = ssv_template_start;
-    base_class->stop = ssv_template_stop;
     base_class->transform_ip = ssv_template_transform_ip;
 }
 
 static void
-ssv_template_init(SsvTemplate *self) {
-    self->config = nullptr;
+ssv_template_init(SsvTemplate *)
+{
 }
 
 GST_ELEMENT_REGISTER_DEFINE(ssv_template, "ssvtemplate",

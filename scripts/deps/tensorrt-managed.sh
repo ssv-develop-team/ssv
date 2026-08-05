@@ -1,5 +1,67 @@
 #!/usr/bin/env bash
 
+SSV_TENSORRT_MANAGED_VERSION="10.16.1"
+SSV_TENSORRT_MANAGED_PACKAGE_REVISION="10.16.1.11-1+cuda13.2"
+SSV_TENSORRT_MANAGED_CUDNN_REVISION="9.25.0.15-1"
+SSV_TENSORRT_MANAGED_CUDA_MAJOR="13"
+SSV_TENSORRT_MANAGED_REPOSITORY="https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64"
+
+ssv_tensorrt_managed_package_manifest() {
+    case "$(uname -m)" in
+        x86_64|amd64) ;;
+        *)
+            ssv_deps_die "managed NVIDIA runtime supports Linux x86_64 only"
+            return 1
+            ;;
+    esac
+    printf '%s|%s\n' \
+        "libnvinfer-headers-dev_${SSV_TENSORRT_MANAGED_PACKAGE_REVISION}_amd64.deb" \
+        "4945a01b9be143091c89fd8366224159cd01648c25befabe7e1271ff6b9774ca" \
+        "libnvinfer10_${SSV_TENSORRT_MANAGED_PACKAGE_REVISION}_amd64.deb" \
+        "8232ccdc8be82815411879a589ba08df039b9f01a997effdb3f60d3b8a05e6bd" \
+        "libnvonnxparsers10_${SSV_TENSORRT_MANAGED_PACKAGE_REVISION}_amd64.deb" \
+        "1f70eb168ec0c5a2714585e2458464476d6529ef11fc54cad51fac2396a09e6f" \
+        "libcudnn9-cuda-13_${SSV_TENSORRT_MANAGED_CUDNN_REVISION}_amd64.deb" \
+        "5b2ef35d332c903fb81f000c883c36f41fd57de3972aa82e007f944478db0099"
+}
+
+ssv_tensorrt_validate_deb() {
+    local archive="$1" expected_sha256="$2"
+    local actual_sha256
+    actual_sha256="$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')"
+    [ "$actual_sha256" = "$expected_sha256" ] || {
+        ssv_deps_die "NVIDIA package checksum mismatch: $(basename -- "$archive")"
+        return 1
+    }
+    dpkg-deb --info "$archive" >/dev/null 2>&1 || {
+        ssv_deps_die "NVIDIA package is not a readable Debian archive: $(basename -- "$archive")"
+        return 1
+    }
+}
+
+ssv_tensorrt_install_managed_packages() {
+    local destination="$1"
+    local manifest
+    manifest="$(ssv_tensorrt_managed_package_manifest)" || return 1
+    ssv_deps_have_command sha256sum || { ssv_deps_die "sha256sum is required for managed NVIDIA packages"; return 1; }
+    ssv_deps_have_command dpkg-deb || { ssv_deps_die "dpkg-deb is required for managed NVIDIA packages"; return 1; }
+    local cache_dir="$SSV_ROOT/.deps/downloads/tensorrt/${SSV_TENSORRT_MANAGED_VERSION}-cuda13.2-cudnn9"
+    mkdir -p -- "$cache_dir"
+    local package_file expected_sha256 cache_file url
+    while IFS='|' read -r package_file expected_sha256; do
+        [ -n "$package_file" ] || continue
+        cache_file="$cache_dir/$package_file"
+        url="$SSV_TENSORRT_MANAGED_REPOSITORY/$package_file"
+        ssv_deps_cached_download "$url" "$cache_file" >/dev/null || return 1
+        ssv_deps_with_cache_retry "$cache_file" "$url" \
+            ssv_tensorrt_validate_deb "$cache_file" "$expected_sha256" || return 1
+        dpkg-deb --extract "$cache_file" "$destination" || {
+            ssv_deps_die "failed to extract NVIDIA package: $package_file"
+            return 1
+        }
+    done <<< "$manifest"
+}
+
 ssv_tensorrt_find_unique_file() {
     local root="$1" name="$2"
     local matches=()
@@ -14,37 +76,42 @@ ssv_tensorrt_find_unique_file() {
 
 ssv_tensorrt_sdk_roots() {
     local root="$1"
-    local candidates=()
-    if [ -f "$root/include/NvInfer.h" ] || [ -f "$root/NvInfer.h" ]; then candidates+=("$root"); fi
-    local child
-    for child in "$root"/TensorRT-*; do
-        [ -d "$child" ] || continue
-        if [ -f "$child/include/NvInfer.h" ] || [ -f "$child/NvInfer.h" ]; then candidates+=("$child"); fi
-    done
-    if [ "${#candidates[@]}" -gt 1 ]; then
-        ssv_deps_die "multiple TensorRT SDK roots found under $root"
-        return 1
-    fi
-    [ "${#candidates[@]}" -eq 1 ] || return 1
-    printf '%s\n' "${candidates[0]}"
+    ssv_tensorrt_find_unique_file "$root" NvInfer.h >/dev/null || return 1
+    printf '%s\n' "$root"
 }
 
-ssv_tensorrt_find_library() {
-    local root="$1" pattern="$2"
+ssv_tensorrt_library_soname() {
+    local library="$1"
+    readelf -d "$library" 2>/dev/null \
+        | sed -n 's/.*Library soname: \[\([^]]*\)\].*/\1/p' \
+        | head -n 1
+}
+
+ssv_tensorrt_find_soname_library() {
+    local root="$1" expected_soname="$2"
+    local stem="${expected_soname%%.so*}"
     local matches=()
+    local item resolved actual_soname known
     while IFS= read -r -d '' item; do
-        if [[ "$item" =~ /${pattern}$ ]]; then matches+=("$item"); fi
-    done < <(find "$root" \( -type f -o -type l \) -print0 2>/dev/null)
+        resolved="$(readlink -f -- "$item" 2>/dev/null)" || continue
+        [ -f "$resolved" ] || continue
+        actual_soname="$(ssv_tensorrt_library_soname "$resolved")"
+        [ "$actual_soname" = "$expected_soname" ] || continue
+        known=false
+        local match
+        for match in "${matches[@]}"; do [ "$match" = "$resolved" ] && known=true; done
+        [ "$known" = true ] || matches+=("$resolved")
+    done < <(find -H "$root" \( -type f -o -type l \) -name "${stem}.so*" -print0 2>/dev/null)
     if [ "${#matches[@]}" -gt 1 ]; then
-        # A versioned soname plus its unversioned linker name is expected; use
-        # the unversioned file when available.
-        local item
-        for item in "${matches[@]}"; do [[ "$item" == *.so ]] && { printf '%s\n' "$item"; return 0; }; done
-        ssv_deps_die "multiple TensorRT library candidates found for $pattern under $root"
+        ssv_deps_die "multiple NVIDIA libraries provide $expected_soname under $root"
         return 1
     fi
     [ "${#matches[@]}" -eq 1 ] || return 1
     printf '%s\n' "${matches[0]}"
+}
+
+ssv_tensorrt_find_library() {
+    ssv_tensorrt_find_soname_library "$@"
 }
 
 ssv_tensorrt_resolve_version_macro() {
@@ -81,8 +148,30 @@ ssv_tensorrt_version() {
     return 1
 }
 
+ssv_tensorrt_validate_required_version() {
+    local version="$1"
+    case "$version" in
+        10.*) ;;
+        *)
+            ssv_deps_die "NVIDIA runtime requires TensorRT ABI major 10, got $version"
+            return 1
+            ;;
+    esac
+}
+
+ssv_tensorrt_cuda_version() {
+    local header="$1" encoded
+    encoded="$(awk '$1 == "#define" && $2 == "CUDART_VERSION" {print $3; exit}' "$header")"
+    [[ "$encoded" =~ ^[0-9]+$ ]] || {
+        ssv_deps_die "unable to read CUDA Runtime version from $header"
+        return 1
+    }
+    printf '%s.%s\n' "$((encoded / 1000))" "$(((encoded % 1000) / 10))"
+}
+
 ssv_tensorrt_make_pc() {
     local root="$1" version="$2" include_dir="$3" lib_dir="$4" cuda_include="$5" cuda_lib="$6"
+    local nvinfer_soname="$7"
     local pc_dir="$root/lib/pkgconfig"
     mkdir -p -- "$pc_dir"
     ssv_deps_write_pc "$pc_dir/nvinfer.pc" \
@@ -96,7 +185,7 @@ ssv_tensorrt_make_pc() {
         "Name: nvinfer" \
         "Description: NVIDIA TensorRT and CUDA Runtime" \
         "Version: $version" \
-        'Libs: -L${libdir} -lnvinfer -L${cudalibdir} -lcudart' \
+        "Libs: -L\${libdir} -l:${nvinfer_soname} -L\${cudalibdir} -lcudart" \
         'Cflags: -I${includedir} -I${cudaincludedir}'
 }
 
@@ -125,24 +214,62 @@ ssv_tensorrt_locate_cuda() {
     printf '%s\n%s\n' "$cuda_include" "$cuda_lib"
 }
 
+ssv_tensorrt_validate_runtime_closure() {
+    local runtime_dirs="$1"
+    shift
+    local library ldd_output
+    for library in "$@"; do
+        ldd_output="$(LD_LIBRARY_PATH="$runtime_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd -r "$library" 2>&1)" || {
+            ssv_deps_die "NVIDIA runtime load check failed for $(basename -- "$library"): $ldd_output"
+            return 1
+        }
+        if grep -Eq 'not found|undefined symbol:' <<< "$ldd_output"; then
+            ssv_deps_die "NVIDIA runtime closure is incomplete for $(basename -- "$library"): $ldd_output"
+            return 1
+        fi
+    done
+}
+
 ssv_tensorrt_validate_layout() {
     local root="$1"
+    ssv_deps_have_command readelf || { ssv_deps_die "readelf is required to validate NVIDIA libraries"; return 1; }
+    ssv_deps_have_command ldd || { ssv_deps_die "ldd is required to validate NVIDIA libraries"; return 1; }
     local sdk_root
     sdk_root="$(ssv_tensorrt_sdk_roots "$root")" || { ssv_deps_die "TensorRT SDK root not found under $root"; return 1; }
-    local header version_header lib_file
+    local header version_header
     header="$(ssv_tensorrt_find_unique_file "$sdk_root" NvInfer.h)" || { ssv_deps_die "TensorRT NvInfer.h not found under $sdk_root"; return 1; }
     version_header="$(ssv_tensorrt_find_unique_file "$sdk_root" NvInferVersion.h)" || { ssv_deps_die "TensorRT NvInferVersion.h not found under $sdk_root"; return 1; }
-    lib_file="$(ssv_tensorrt_find_library "$sdk_root" 'libnvinfer\.so(\..*)?')" || { ssv_deps_die "TensorRT libnvinfer.so not found under $sdk_root"; return 1; }
+    local version
+    version="$(ssv_tensorrt_version "$version_header")" || return 1
+    ssv_tensorrt_validate_required_version "$version" || return 1
+    local nvinfer_file nvonnxparser_file cudnn_file
+    nvinfer_file="$(ssv_tensorrt_find_library "$sdk_root" libnvinfer.so.10)" \
+        || { ssv_deps_die "TensorRT libnvinfer.so.10 not found under $sdk_root"; return 1; }
+    nvonnxparser_file="$(ssv_tensorrt_find_soname_library "$sdk_root" libnvonnxparser.so.10)" \
+        || { ssv_deps_die "TensorRT libnvonnxparser.so.10 not found under $sdk_root"; return 1; }
+    cudnn_file="$(ssv_tensorrt_find_soname_library "$sdk_root" libcudnn.so.9)" \
+        || { ssv_deps_die "NVIDIA runtime libcudnn.so.9 not found under $sdk_root"; return 1; }
     local cuda_info cuda_include cuda_lib
     cuda_info="$(ssv_tensorrt_locate_cuda "$sdk_root")" || { ssv_deps_die "CUDA Runtime (cuda_runtime_api.h and libcudart.so) not found for TensorRT"; return 1; }
     cuda_include="$(printf '%s\n' "$cuda_info" | sed -n '1p')"
     cuda_lib="$(printf '%s\n' "$cuda_info" | sed -n '2p')"
+    local cuda_version
+    cuda_version="$(ssv_tensorrt_cuda_version "$cuda_include/cuda_runtime_api.h")" || return 1
+    case "$cuda_version" in
+        "${SSV_TENSORRT_MANAGED_CUDA_MAJOR}."*) ;;
+        *)
+            ssv_deps_die "NVIDIA runtime requires CUDA ABI major ${SSV_TENSORRT_MANAGED_CUDA_MAJOR}, got $cuda_version"
+            return 1
+            ;;
+    esac
+    local cudart_file
+    cudart_file="$(ssv_tensorrt_find_soname_library "$cuda_lib" "libcudart.so.${SSV_TENSORRT_MANAGED_CUDA_MAJOR}")" \
+        || { ssv_deps_die "CUDA Runtime libcudart.so.${SSV_TENSORRT_MANAGED_CUDA_MAJOR} not found under $cuda_lib"; return 1; }
     local include_dir lib_dir
     include_dir="$(dirname -- "$header")"
-    lib_dir="$(dirname -- "$lib_file")"
-    local version
-    version="$(ssv_tensorrt_version "$version_header")" || return 1
-    ssv_tensorrt_make_pc "$root" "$version" "$include_dir" "$lib_dir" "$cuda_include" "$cuda_lib"
+    lib_dir="$(dirname -- "$nvinfer_file")"
+    ssv_tensorrt_make_pc "$root" "$version" "$include_dir" "$lib_dir" \
+        "$cuda_include" "$cuda_lib" libnvinfer.so.10
     local old_pkg_config_path="${PKG_CONFIG_PATH:-}"
     export PKG_CONFIG_PATH="$root/lib/pkgconfig${old_pkg_config_path:+:$old_pkg_config_path}"
     local pc_dir
@@ -150,7 +277,13 @@ ssv_tensorrt_validate_layout() {
     [ "$pc_dir" = "$(cd -- "$root/lib/pkgconfig" && pwd -P)" ] || { ssv_deps_die "TensorRT pkg-config source mismatch: $pc_dir"; return 1; }
     ssv_deps_pkgconfig_version_at_least nvinfer "$version" || { ssv_deps_die "TensorRT pkg-config version check failed"; return 1; }
     local runtime_dirs
-    runtime_dirs="$(ssv_deps_runtime_dirs "$lib_dir" "$cuda_lib")"
+    runtime_dirs="$(ssv_deps_runtime_dirs \
+        "$lib_dir" \
+        "$(dirname -- "$nvonnxparser_file")" \
+        "$(dirname -- "$cudnn_file")" \
+        "$cuda_lib")"
+    ssv_tensorrt_validate_runtime_closure "$runtime_dirs" \
+        "$nvinfer_file" "$nvonnxparser_file" "$cudnn_file" "$cudart_file" || return 1
     ssv_deps_compile_probe \
         '#include <NvInfer.h>
 #include <NvInferVersion.h>
@@ -159,7 +292,7 @@ int main() {
     int cuda_version = 0;
     if (cudaRuntimeGetVersion(&cuda_version) != cudaSuccess)
         return 1;
-    return getInferLibVersion() > 0 && cuda_version > 0 ? 0 : 1;
+    return getInferLibVersion() > 0 && cuda_version >= 13000 && cuda_version < 14000 ? 0 : 1;
 }' \
         nvinfer "$runtime_dirs" || { ssv_deps_die "TensorRT/CUDA compile/load probe failed"; return 1; }
     printf 'version=%s\n' "$version"
@@ -168,7 +301,14 @@ int main() {
 }
 
 ssv_tensorrt_managed_validate() {
-    ssv_tensorrt_validate_layout "$1"
+    local result version
+    result="$(ssv_tensorrt_validate_layout "$1")" || return 1
+    version="$(printf '%s\n' "$result" | sed -n 's/^version=//p')"
+    [ "$version" = "$SSV_TENSORRT_MANAGED_VERSION" ] || {
+        ssv_deps_die "managed TensorRT version mismatch: expected $SSV_TENSORRT_MANAGED_VERSION, got $version"
+        return 1
+    }
+    printf '%s\n' "$result"
 }
 
 ssv_tensorrt_managed_prepare() {
@@ -180,26 +320,38 @@ ssv_tensorrt_managed_prepare() {
         return 1
     fi
     if [ -z "$archive" ] && [ -z "$url" ] && [ -d "$root" ]; then
-        ssv_tensorrt_managed_validate "$root"
-        return $?
+        local existing_result
+        if existing_result="$(ssv_tensorrt_managed_validate "$root" 2>/dev/null)"; then
+            printf '%s\n' "$existing_result"
+            return 0
+        fi
     fi
     ssv_deps_require_replaceable_root "$root" ssv_tensorrt_managed_validate || return 1
-    local source_archive="$archive"
-    if [ -n "$url" ]; then
-        local identity
-        identity="$(printf '%s' "$url" | sha256sum | awk '{print $1}')"
-        local filename="${url##*/}"
-        source_archive="$SSV_ROOT/.deps/downloads/tensorrt/${identity}-${filename%%\?*}"
-        ssv_deps_cached_download "$url" "$source_archive" >/dev/null || return 1
-    fi
-    [ -n "$source_archive" ] && [ -f "$source_archive" ] || { ssv_deps_die "TensorRT archive does not exist: $source_archive"; return 1; }
     local candidate
     candidate="$(ssv_deps_make_candidate_dir "$root" tensorrt)"
-    ssv_deps_extract_archive "$source_archive" "$candidate" || { rm -rf -- "$candidate"; return 1; }
+    if [ -z "$archive" ] && [ -z "$url" ]; then
+        ssv_tensorrt_install_managed_packages "$candidate" || { rm -rf -- "$candidate"; return 1; }
+    else
+        local source_archive="$archive"
+        if [ -n "$url" ]; then
+            local identity
+            identity="$(printf '%s' "$url" | sha256sum | awk '{print $1}')"
+            local filename="${url##*/}"
+            source_archive="$SSV_ROOT/.deps/downloads/tensorrt/${identity}-${filename%%\?*}"
+            ssv_deps_cached_download "$url" "$source_archive" >/dev/null || { rm -rf -- "$candidate"; return 1; }
+        fi
+        if [ -z "$source_archive" ] || [ ! -f "$source_archive" ]; then
+            rm -rf -- "$candidate"
+            ssv_deps_die "TensorRT archive does not exist: $source_archive"
+            return 1
+        fi
+        ssv_deps_extract_archive "$source_archive" "$candidate" \
+            || { rm -rf -- "$candidate"; return 1; }
+    fi
     local result_file error_file
     result_file="$(mktemp "${TMPDIR:-/tmp}/ssv-tensorrt-result.XXXXXX")"
     error_file="$(mktemp "${TMPDIR:-/tmp}/ssv-tensorrt-error.XXXXXX")"
-    ssv_tensorrt_validate_layout "$candidate" >"$result_file" 2>"$error_file" || {
+    ssv_tensorrt_managed_validate "$candidate" >"$result_file" 2>"$error_file" || {
         cat "$error_file" >&2 || true
         rm -f -- "$result_file" "$error_file"
         rm -rf -- "$candidate"

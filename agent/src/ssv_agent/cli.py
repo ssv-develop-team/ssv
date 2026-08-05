@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -19,7 +18,7 @@ def main() -> None:
         "--config",
         type=str,
         default=None,
-        help="Path to YAML config file (default: SSV_CONFIG_PATH, ssv.yaml, config/ssv.yaml, or config/ssv.example.yaml)",
+        help="Path to YAML config file (default: SSV_CONFIG_PATH, ssv.yaml, or config/ssv.yaml)",
     )
     parser.add_argument(
         "--log-level",
@@ -30,12 +29,6 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = args.config or os.environ.get("SSV_CONFIG_PATH")
-    if config_path is None:
-        # Default: look relative to agent package
-        candidate = Path(__file__).resolve().parent.parent.parent.parent / "config" / "ssv.example.yaml"
-        if candidate.exists():
-            config_path = str(candidate)
-
     cfg = load_config(config_path)
 
     log_level = args.log_level or cfg.logging.python_log_level

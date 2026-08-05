@@ -2,89 +2,88 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 
-class LoggingConfig(BaseModel):
+_CONFIG_KEYS = frozenset(
+    {
+        "version",
+        "logging",
+        "redis",
+        "sources",
+        "display",
+        "inference",
+        "tracking",
+        "agent",
+    }
+)
+_AGENT_CONFIG_KEYS = frozenset({"version", "logging", "redis", "agent"})
+
+
+class _StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class LoggingConfig(_StrictConfigModel):
     cpp_debug_level: str = "ssv*:4"
     python_log_level: str = "INFO"
 
 
-class RedisConfig(BaseModel):
+class RedisConfig(_StrictConfigModel):
     host: str = "localhost"
-    port: int = 6379
-    db: int = 0
+    port: int = Field(default=6379, ge=1, le=65535)
+    db: int = Field(default=0, ge=0)
     stream_key: str = "ssv:events"
     consumer_group: str = "ssv-agent"
 
 
-class DisplayConfig(BaseModel):
-    enabled: bool = False
-    overlay: bool = False
-    fps: int = 30
-    sink: str = "autovideosink"
+class AgentConfig(_StrictConfigModel):
+    state_machine_timeout: int = Field(default=300, gt=0)
+    max_retries: int = Field(default=3, ge=0)
 
 
-class PipelineConfig(BaseModel):
-    check_timeout: str = "30s"
-    analysis_fps: int = 5
-    frame_width: int = 640
-    frame_height: int = 480
-
-
-class InferenceConfig(BaseModel):
-    runtime: str = "auto"
-    model_path: str = ""
-    confidence_threshold: float = 0.5
-    device: str = "auto"
-    device_id: int = 0
-    precision: str = "auto"
-    model_family: str = "yolo"
-    output_format: str = "auto"
-    target_class: str = "person"
-    label_map: str = "config/model-labels/coco80.txt"
-
-
-class TrackingConfig(BaseModel):
-    enabled: bool = True
-    frame_rate: int = 30
-    track_threshold: float = 0.5
-    track_buffer: int = 30
-    match_threshold: float = 0.3
-    mock_track: bool = False
-
-
-class AgentConfig(BaseModel):
-    state_machine_timeout: int = 300
-    max_retries: int = 3
-
-
-class SsvConfig(BaseModel):
-    version: str = "1.0"
+class SsvConfig(_StrictConfigModel):
+    version: Literal["2.0"] = "2.0"
     logging: LoggingConfig = LoggingConfig()
     redis: RedisConfig = RedisConfig()
-    display: DisplayConfig = DisplayConfig()
-    pipeline: PipelineConfig = PipelineConfig()
-    inference: InferenceConfig = InferenceConfig()
-    tracking: TrackingConfig = TrackingConfig()
     agent: AgentConfig = AgentConfig()
-    sources: list[dict] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_shared_root(cls, value: object, info: ValidationInfo) -> object:
+        if not isinstance(value, dict):
+            return value
+        if info.context and info.context.get("require_version") and "version" not in value:
+            raise ValueError("version is required")
+        for key in value:
+            if key not in _CONFIG_KEYS:
+                raise ValueError(f"unknown configuration key: {key}")
+
+        # The Agent owns only these sections; the runner validates the rest.
+        return {key: item for key, item in value.items() if key in _AGENT_CONFIG_KEYS}
+
+
+def _validate_loaded_config(data: object) -> SsvConfig:
+    return SsvConfig.model_validate(data, context={"require_version": True})
 
 
 def _apply_env_overrides(cfg: SsvConfig) -> None:
     """Override deployment-sensitive config fields from environment variables."""
+    redis = cfg.redis.model_dump()
     if v := os.environ.get("REDIS_HOST"):
-        cfg.redis.host = v
+        redis["host"] = v
     if v := os.environ.get("REDIS_PORT"):
-        cfg.redis.port = int(v)
+        redis["port"] = int(v)
+    cfg.redis = RedisConfig.model_validate(redis)
 
 
 def load_config(path: str | Path | None = None) -> SsvConfig:
     """Load configuration from YAML file.
 
-    Search order: explicit path -> SSV_CONFIG_PATH env -> ssv.yaml -> config/ssv.yaml -> config/ssv.example.yaml -> defaults.
+    Search order: explicit path -> SSV_CONFIG_PATH env -> ssv.yaml -> config/ssv.yaml -> defaults.
     Environment variables REDIS_HOST and REDIS_PORT override corresponding YAML values.
     """
     cfg: SsvConfig | None = None
@@ -94,7 +93,7 @@ def load_config(path: str | Path | None = None) -> SsvConfig:
         if p.exists():
             with open(p) as f:
                 data = yaml.safe_load(f) or {}
-            cfg = SsvConfig.model_validate(data)
+            cfg = _validate_loaded_config(data)
         else:
             raise FileNotFoundError(f"Config file not found: {p}")
 
@@ -103,28 +102,21 @@ def load_config(path: str | Path | None = None) -> SsvConfig:
         if env_path and Path(env_path).exists():
             with open(env_path) as f:
                 data = yaml.safe_load(f) or {}
-            cfg = SsvConfig.model_validate(data)
+            cfg = _validate_loaded_config(data)
 
     if cfg is None:
         local = Path("ssv.yaml")
         if local.exists():
             with open(local) as f:
                 data = yaml.safe_load(f) or {}
-            cfg = SsvConfig.model_validate(data)
+            cfg = _validate_loaded_config(data)
 
     if cfg is None:
         config_local = Path("config/ssv.yaml")
         if config_local.exists():
             with open(config_local) as f:
                 data = yaml.safe_load(f) or {}
-            cfg = SsvConfig.model_validate(data)
-
-    if cfg is None:
-        relative = Path("config/ssv.example.yaml")
-        if relative.exists():
-            with open(relative) as f:
-                data = yaml.safe_load(f) or {}
-            cfg = SsvConfig.model_validate(data)
+            cfg = _validate_loaded_config(data)
 
     if cfg is None:
         cfg = SsvConfig()

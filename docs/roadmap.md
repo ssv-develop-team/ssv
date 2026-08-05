@@ -65,6 +65,12 @@ spec 和 plan 使用中文；代码标识、命令、路径、配置键保持英
 - 事件判定、证据输出、完整 Agent 状态机尚未完成。
 - 生产级 C++ pipeline runner 尚未完成。
 
+2026-07-31 增量状态：长期实时链路已迁移到 C++ runner，生产入口不再使用
+`scripts/pipeline.sh`；严格配置、VA/DMABuf/GL memory contract、ONNX Runtime Provider、
+模型尺寸 host boundary、GTK 独立框层、结构化日志和退出码已完成自动回归。
+原生 Linux 各 GPU profile 的真机强验收仍待分机记录；WSL2/WSLg 只完成了 GTK sink
+与 GL context 的兼容性诊断，不作为 VA 强验收。
+
 ## 里程碑总览
 
 | 里程碑 | 阶段目标 | 主要输出 |

@@ -7,3 +7,10 @@ option('opencv_mode', type : 'combo', choices : ['enabled', 'disabled'], value :
 
 option('deps_runtime_path', type : 'string', value : '',
   description : 'Colon-separated runtime library path resolved by scripts/deps.sh')
+
+option('onnxruntime_profile', type : 'combo',
+  choices : ['cpu', 'nvidia', 'intel', 'amd'], value : 'cpu',
+  description : 'Resolved ONNX Runtime Provider profile from the dependency snapshot')
+
+option('onnxruntime_dependency_signature', type : 'string', value : '',
+  description : 'SHA-256 identity of the resolved Provider and runtime dependency snapshot')

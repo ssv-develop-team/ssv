@@ -5,5 +5,8 @@ ssv_display_window_test = executable('ssv-display-window-test',
 )
 
 test('ssv-display-window', ssv_display_window_test,
+  env : {
+    'GST_REGISTRY' : meson.project_build_root() / 'gst-display-window-test-registry.bin',
+  },
   suite : 'display',
 )

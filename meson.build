@@ -8,10 +8,12 @@ gst_deps = dependency('gstreamer-1.0')
 gst_base_dep = dependency('gstreamer-base-1.0')
 gst_app_dep = dependency('gstreamer-app-1.0')
 gst_video_dep = dependency('gstreamer-video-1.0')
+gst_gl_dep = dependency('gstreamer-gl-1.0')
 gst_check_dep = dependency('gstreamer-check-1.0')
+gtk_dep = dependency('gtk+-3.0')
 yaml_dep = dependency('yaml-cpp')
 hiredis_dep = dependency('hiredis', required : false)
-json_dep = dependency('nlohmann_json', required : false)
+json_dep = dependency('nlohmann_json')
 
 tensorrt_mode = get_option('tensorrt_mode')
 tensorrt_dep = declare_dependency()
@@ -27,6 +29,8 @@ else
 endif
 
 onnx_dep = dependency('onnxruntime', required : true)
+onnxruntime_profile = get_option('onnxruntime_profile')
+onnxruntime_dependency_signature = get_option('onnxruntime_dependency_signature')
 
 opencv_mode = get_option('opencv_mode')
 opencv_enabled = opencv_mode == 'enabled'
@@ -45,3 +49,4 @@ conf_data.set_quoted('SSV_VERSION', meson.project_version())
 conf_data.set_quoted('SSV_PACKAGE_NAME', 'site-safety-vision')
 
 subdir('gst')
+subdir('runner')
