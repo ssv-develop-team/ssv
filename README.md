@@ -53,7 +53,7 @@ C++ pipeline 与运行时
 | hiredis | >= 0.14 | Redis 发布插件 |
 | nlohmann-json | >= 3 | 事件 JSON 序列化 |
 | ONNX Runtime | >= 1.20 | YOLO ONNX 推理 |
-| OpenCV | >= 4.5 | sparse optical flow GMC；不参与解码、显示或推理预处理 |
+| OpenCV | >= 4.5（managed 默认源码构建 4.10.0） | sparse optical flow GMC；不参与解码、显示或推理预处理 |
 | BLAS + LAPACK | 系统开发包 | managed OpenCV 的宿主数学运行库 |
 | Python | >= 3.12 | Agent 服务 |
 | uv | >= 0.11 | Python 包管理 |
@@ -64,16 +64,28 @@ Debian/Ubuntu:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  build-essential pkg-config cmake ninja-build meson \
+  build-essential pkg-config cmake ninja-build meson curl ca-certificates \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-tools \
+  libgtk-3-dev gstreamer1.0-tools gstreamer1.0-libav \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   libyaml-cpp-dev libhiredis-dev nlohmann-json3-dev \
   libblas-dev liblapack-dev \
   python3 python3-venv docker.io docker-compose-plugin
 ```
 
-Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。无 GPU 的宿主上，默认 `./ssv build` 解析为 CPU profile，并准备 managed ONNX Runtime `1.25.1` 和 managed OpenCV `4.10.0`；其他 profile 会在 Meson 前严格验证对应 ORT artifact 和 Provider 运行库。三类依赖都遵循同一条路径：`SOURCE -> provider/system -> pkg-config -> Meson`。
+`./ssv prepare-model`、`./ssv test` 和默认模型导出还需要 `uv`。请按本机发行版安装
+`uv`，然后确认 `uv --version` 可执行；`./ssv build` 不会替你安装 Python 工具、GPU 驱动或
+Docker 服务。
+
+没有发行版包时，可使用官方安装脚本：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+exec "$SHELL"
+uv --version
+```
+
+Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。无 GPU 的宿主上，默认 `./ssv build` 解析为 CPU profile，并准备 managed ONNX Runtime `1.25.1` 和 managed OpenCV `4.10.0` 源码构建；其他 profile 会在 Meson 前严格验证对应 ORT artifact 和 Provider 运行库。三类依赖都遵循同一条路径：`SOURCE -> provider/system -> pkg-config -> Meson`。
 
 NVIDIA managed profile 使用官方 ONNX Runtime `1.25.1` CUDA 13 artifact。默认 provider
 下载 TensorRT `10.16.1` 与 cuDNN `9.25` 包；所有 managed 来源都精确要求 TensorRT
@@ -82,7 +94,7 @@ toolkit/runtime，当前验证组合为 13.2；版本或 SONAME 不匹配会在 
 伪造链接兼容。依赖签名变化时，构建入口会清理 Meson dependency cache，因此同一 `build`
 目录可以在 CPU 与 NVIDIA profile 间安全切换。
 
-managed OpenCV 当前由 provider 获取预编译包，使用 `ar` 和 `tar` 解包，不依赖 `apt` 或 `dpkg-deb`。它对项目公开链接 `core`、`imgproc`、`video`、`calib3d`、`features2d`、`flann`，并额外携带 `dnn` 及其特定 SONAME 的 protobuf 运行库以闭合 `libopencv_video` 的动态依赖；这些私有运行库不进入 `opencv4.pc` 的公开 OpenCV 模块列表。包来源属于 provider 内部实现，对外只声明 OpenCV `4.10.0`。
+managed OpenCV 当前由 provider 下载 OpenCV `4.10.0` 源码并使用 CMake 编译，安装到 `.deps/opencv/install`；源码和构建目录分别保留在 `.deps/opencv/source`、`.deps/opencv/build`，下载归档位于 `.deps/downloads/opencv/4.10.0`。构建关闭 CUDA、GStreamer、GUI、视频解码后端和可选图像编解码器，只生成 BoT-SORT GMC 所需的 CPU 模块及 DNN 依赖，不依赖 `apt` 或 `dpkg-deb`。provider 随后生成并验证 `.deps/opencv/install/lib/pkgconfig/opencv4.pc`，并检查所有 OpenCV 动态库的运行时闭包。首次构建需要宿主提供 CMake、C++ 编译器、make 或 Ninja，以及 BLAS/LAPACK；可用 `SSV_OPENCV_BUILD_JOBS` 覆盖并行线程数。
 
 如果你在当前宿主机自行编译 OpenCV 4.10.0，可以使用 `local` provider。它只读取你填写的头文件目录和库目录，不修改或复制 OpenCV 安装目录：
 
@@ -93,56 +105,142 @@ SSV_OPENCV_LIB_DIR=/path/to/opencv/lib \
 ./ssv build
 ```
 
-provider 会生成 `.deps/opencv/local/lib/pkgconfig/opencv4.pc`，并执行 C++ 编译/加载探针；只有实际版本为 `4.10.0` 且所需模块和运行库完整时才会继续构建。项目内自行编译时统一使用 `.deps/opencv/local/{source,build,install}`，managed 解包结果放在 `.deps/opencv/managed`；下载文件仍与其他依赖一起保存在 `.deps/downloads/opencv`。Python `cv2` 文件不能代替 C++ OpenCV SDK。
+provider 会生成 `.deps/opencv/local/lib/pkgconfig/opencv4.pc`，并执行 C++ 编译/加载探针；只有实际版本为 `4.10.0` 且所需模块和运行库完整时才会继续构建。local provider 不复制或修改用户提供的 SDK，项目内仅在 `.deps/opencv/local` 保存私有 pkg-config 文件。managed provider 的源码、构建和安装结果分别位于 `.deps/opencv/{source,build,install}`，下载归档位于 `.deps/downloads/opencv`。Python `cv2` 文件不能代替 C++ OpenCV SDK。
 
 Arch Linux:
 
 ```bash
-sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
-  yaml-cpp hiredis nlohmann-json cblas blas lapack meson python uv docker docker-compose
+sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav gtk3 \
+  yaml-cpp hiredis nlohmann-json cblas blas lapack meson python uv docker docker-compose \
+  curl ca-certificates
 ```
 
 ## 快速开始
 
+下面按“硬件 profile → 输入和模型 → 编译 → Redis → 运行”的顺序执行。`./ssv build` 是
+构建入口，不是系统安装器；它不会安装驱动、CUDA、TensorRT、GTK、Redis 或 MediaMTX，也
+不会自动创建 YAML、下载任意模型或猜测 RTSP 地址。
+
+### 1. 先按本机硬件选择 runtime profile
+
+| 本机情况 | 首选命令 | 构建前必须确认 |
+| --- | --- | --- |
+| 没有可用 GPU，或只想用 CPU | `./ssv build --profile cpu` | 使用 managed ONNX Runtime CPU 和 managed OpenCV |
+| NVIDIA GPU，宿主可见 CUDA 13 | `./ssv build --profile nvidia` | NVIDIA 驱动、CUDA 13 toolkit/runtime；默认还会准备 TensorRT 10.16.1 与 cuDNN 9 |
+| Intel GPU | `./ssv build --profile intel` | 系统 `onnxruntime.pc`，且包含 OpenVINO Provider |
+| AMD GPU | `./ssv build --profile amd` | 系统 `onnxruntime.pc`，且包含 MIGraphX Provider |
+| 不确定，或混合 GPU | `./ssv build --profile auto` | `/sys/class/drm` 能看到设备；选择顺序为 `nvidia → intel → amd → cpu` |
+
+`--profile` 只选择 ONNX Runtime 的推理 Provider，不决定视频解码。`auto` 只负责检测并选择
+profile，不会在依赖缺失时自动退回 CPU；例如检测到 NVIDIA 但 CUDA/TensorRT 不完整时，命令
+会在 Meson 前失败。新克隆且没有 `.env` 时，CPU/NVIDIA 默认使用 managed provider，Intel/AMD
+默认使用 system provider。
+
+Intel/AMD profile 不是“下载即用”的 managed 路径。若本机没有带 OpenVINO 或 MIGraphX 的
+`onnxruntime.pc`，请先准备对应 system/local artifact，或选择 `cpu` profile。容器中使用
+`auto` 时还必须透传 GPU 和 `/sys`；否则它会按 CPU 处理。
+
+NVIDIA 机器可先检查 `nvidia-smi`、CUDA 头文件和 `libcudart.so.13` 是否可见。managed NVIDIA
+依赖下载和解包还需要 `curl`、`ca-certificates` 与 `dpkg-deb`；非 Debian 主机可改用已安装的
+系统 TensorRT：
+
 ```bash
-# 1. 进入项目
+SSV_TENSORRT_SOURCE=system ./ssv build --profile nvidia
+```
+
+如果希望 NVIDIA 解码也走 NVDEC，在 YAML 中显式设置 `sources[0].decode.mode: nvdec` 和
+`sources[0].decode.device: cuda:0`。默认 `decode.mode: auto` 会按可用 GStreamer 元素选择
+VAAPI、NVDEC 或 software；显式硬件模式不可用时不会静默回退。
+
+### 2. 克隆仓库并准备本机配置
+
+```bash
 cd site-safety-vision
-
-# 2. 准备本机 YAML 配置
 cp config/ssv.example.yaml config/ssv.yaml
+```
 
-# 3. 编辑 config/ssv.yaml，至少设置 sources[0].uri
+编辑 `config/ssv.yaml`，至少修改 `sources[0].uri`。输入必须是可访问的 H.264 8-bit RTSP
+源；仓库不会启动 MediaMTX。默认 Redis 地址是 `localhost:6379`，如果使用外部 Redis，请
+同步修改 `redis.host`、`redis.port` 和 `redis.stream_key`。
 
-# 4. 下载默认的原始 YOLOv8n ONNX 模型
+配置文件按 `ssv.yaml`、`config/ssv.yaml`、`/etc/ssv/ssv.yaml` 搜索；`config/ssv.example.yaml`
+只是模板，不会被自动运行。也可以用 `./ssv run --config PATH` 或 `SSV_CONFIG_PATH` 指定
+文件。仓库已有 `.env` 时，构建脚本会加载其中的 provider/OpenCV 设置；先检查它是否指向
+本机真实 SDK，不要把无效路径带入新机器。
+
+### 3. 准备模型
+
+默认示例使用 YOLOv8n。`download-model` 会尝试用 `uv`/`pip` 和 `ultralytics` 导出原始
+`models/yolov8n.onnx`，它不是任意模型下载器；已有自己的 ONNX 文件时可以跳过该命令。
+
+```bash
 ./ssv download-model
-
-# 5. 生成正式运行使用的 RGBA uint8 wrapper，并设置 inference.model.path
 ./ssv prepare-model \
   --input models/yolov8n.onnx \
   --output models/yolov8n-preproc.onnx \
   --family yolo \
   --output-format yolov8
-
-# 6. 编译 C++ runner、插件和测试
-./ssv build
-
-# 7. 启动本地 Redis
-./ssv redis
-
-# 8. 运行测试套件
-./ssv test
-
-# 9. 打开显示窗口观察实时链路
-./ssv run --display
 ```
 
-`./ssv test` 先跑代码测试；存在本地运行配置时，再通过生产 runner 做一次 30 秒无头 smoke。timeout 属于测试编排，不写入也不改写 YAML。`./ssv run` 是长期运行模式，按 `Ctrl+C` 退出；`./ssv run --display` 关闭视频窗口或中断进程后退出。
+然后把 `config/ssv.yaml` 中的 `inference.model.path` 改为
+`models/yolov8n-preproc.onnx`。原始 float32 NCHW ONNX 不能直接运行；如果输出已经是
+`[1,N,6]` 的 `x1,y1,x2,y2,score,class_id`，使用 `--output-format yolo_nx6`。输出格式应按
+实际图结构选择，不能只看模型文件名。
+
+如果手上的模型已经带有 `rgba_u8_nhwc_v1` wrapper metadata，可跳过 `download-model` 和
+`prepare-model`，直接把 `inference.model.path` 指向该 wrapper；仍需确保 `family`、
+`output_format` 和 label map 与模型实际输出一致。
+
+### 4. 编译并检查插件
+
+```bash
+./ssv build --profile cpu    # 将 cpu 替换为第 1 步选定的 profile
+./ssv inspect
+```
+
+首次 managed 构建会下载 ONNX Runtime，并从源码编译 OpenCV 4.10.0；OpenCV 的源码、构建和
+安装目录位于 `.deps/opencv/{source,build,install}`。构建较慢时可用
+`SSV_OPENCV_BUILD_JOBS=4 ./ssv build --profile cpu` 限制并行度。
+
+### 5. 启动 Redis，并先做一次验证
+
+```bash
+./ssv redis
+./ssv test
+```
+
+`./ssv redis` 只启动 Docker Redis，不启动 RTSP 服务。`./ssv test` 会运行契约、C++、CLI 和
+Agent 测试；存在 `config/ssv.yaml` 时还会尝试 30 秒无头 runner smoke，RTSP 不可达时该项
+会以警告结束。要直接运行而不打开窗口，可使用 `./ssv run --headless`。
+
+注意：当前 `./ssv test` 内部会用默认 `auto` profile 重新调用构建。若你在 NVIDIA 主机上
+刻意选择了 `--profile cpu`，可跳过该编排命令，改用 `./ssv inspect`、相关单项测试和
+`./ssv run`，避免它重新选择 NVIDIA 依赖。
+
+### 6. 打开视频观测窗口
+
+在有本地图形桌面的机器上运行：
+
+```bash
+./ssv run --display --overlay
+```
+
+`--display` 打开 GTK 视频窗口，`--overlay` 在独立 GTK 框层绘制检测框；两个参数会覆盖
+YAML 中相应的显示开关。`--display` 需要可用的 `DISPLAY` 或 Wayland 会话。若 GL/DMABuf
+路径不可用，先尝试兼容的 SystemMemory sink：
+
+```bash
+./ssv run --display --display-backend gtksink
+```
+
+按 `Ctrl+C` 退出长期运行的 runner。无桌面或 SSH 会话使用 `--headless`；不要把 GTK 弹窗
+问题误判为 ONNX Runtime 或 Redis 问题。
 
 ## 命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `./ssv build [--profile auto|cpu|nvidia|intel|amd]` | 按单一 runtime profile 编译 C++ runner、插件和测试 |
+| `./ssv build [--profile auto|cpu|nvidia|intel|amd]` | 准备依赖并按单一 runtime profile 编译 C++ runner、插件和测试 |
 | `./ssv clean` | 删除 Meson 构建目录 `build` |
 | `./ssv redis` | 启动 Docker Redis 开发环境 |
 | `./ssv test` | 运行代码测试和链路冒烟测试后退出 |
@@ -155,7 +253,7 @@ cp config/ssv.example.yaml config/ssv.yaml
 | `./ssv agent` | 启动 Python Agent 服务 |
 | `./ssv inspect` | 查看插件注册和属性信息 |
 | `./ssv stop` | 停止后台服务 |
-| `./ssv download-model` | 下载默认 YOLOv8n ONNX 模型 |
+| `./ssv download-model` | 用 `ultralytics` 导出默认 YOLOv8n ONNX 模型 |
 | `./ssv prepare-model ...` | 生成经过校验的 RGBA uint8 wrapper ONNX 模型 |
 
 ## 配置

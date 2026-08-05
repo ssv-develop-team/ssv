@@ -521,15 +521,70 @@ fake_local_opencv="$TEST_DIR/local-opencv-sdk"
 build_fake_local_opencv "$fake_local_opencv" 4.10.0
 
 fake_managed_workspace="$TEST_DIR/managed-opencv-project/.deps/opencv"
-build_fake_local_opencv "$fake_managed_workspace/managed/usr" 4.10.0
-mkdir -p "$fake_managed_workspace/local/source"
+fake_source_dir="$fake_managed_workspace/source/opencv-4.10.0"
+mkdir -p "$fake_source_dir" "$fake_managed_workspace/local/source" "$fake_managed_workspace/managed"
+: > "$fake_source_dir/CMakeLists.txt"
 printf 'keep local source\n' > "$fake_managed_workspace/local/source/.ssv-test-sentinel"
-assert_success 'managed OpenCV publishes only inside the shared workspace managed subtree' run_clean_shell "source scripts/deps.sh
+printf 'keep legacy managed\n' > "$fake_managed_workspace/managed/.ssv-test-sentinel"
+fake_cmake_bin="$TEST_DIR/fake-cmake-bin"
+mkdir -p "$fake_cmake_bin"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'build_dir=""' \
+    'install_dir=""' \
+    'for ((index = 1; index <= $#; index++)); do' \
+    '    arg="${!index}"' \
+    '    case "$arg" in' \
+    '        -B) next=$((index + 1)); build_dir="${!next}" ;;' \
+    '        -DCMAKE_INSTALL_PREFIX=*) install_dir="${arg#*=}" ;;' \
+    '    esac' \
+    'done' \
+    'if [[ "${1:-}" == --build ]]; then exit 0; fi' \
+    'if [[ "${1:-}" == --install ]]; then' \
+    '    build_dir="${2:?}"' \
+    '    install_dir="$(<"$build_dir/.install-prefix")"' \
+    '    for ((index = 3; index <= $#; index++)); do' \
+    '        arg="${!index}"' \
+    '        [[ "$arg" == --prefix ]] || continue' \
+    '        next=$((index + 1)); install_dir="${!next}"' \
+    '    done' \
+    '    mkdir -p "$install_dir"' \
+    '    cp -a "${FAKE_OPENCV_SDK:?}/include" "$install_dir/"' \
+    '    cp -a "${FAKE_OPENCV_SDK:?}/lib" "$install_dir/"' \
+    '    exit 0' \
+    'fi' \
+    'mkdir -p "$build_dir"' \
+    'printf "%s\\n" "$install_dir" > "$build_dir/.install-prefix"' \
+    > "$fake_cmake_bin/cmake"
+chmod +x "$fake_cmake_bin/cmake"
+assert_success 'managed OpenCV builds into source/build/install workspace directories' run_clean_shell "export PATH='$fake_cmake_bin':\$PATH
+export FAKE_OPENCV_SDK='$fake_local_opencv'
+source scripts/deps.sh
 result=\"\$(ssv_opencv_managed_prepare '$fake_managed_workspace' 4.10.0)\"
-case \"\$result\" in *'pkgconfig_dir=$fake_managed_workspace/managed/lib/pkgconfig'*) ;; *) exit 1 ;; esac
-[ -f '$fake_managed_workspace/managed/lib/pkgconfig/opencv4.pc' ]
-[ ! -e '$fake_managed_workspace/lib/pkgconfig/opencv4.pc' ]
-grep -Fqx 'keep local source' '$fake_managed_workspace/local/source/.ssv-test-sentinel'"
+case \"\$result\" in *'pkgconfig_dir=$fake_managed_workspace/install/lib/pkgconfig'*) ;; *) exit 1 ;; esac
+[ -f '$fake_managed_workspace/install/lib/pkgconfig/opencv4.pc' ]
+[ -f '$fake_managed_workspace/build/.install-prefix' ]
+grep -Fqx 'keep local source' '$fake_managed_workspace/local/source/.ssv-test-sentinel'
+grep -Fqx 'keep legacy managed' '$fake_managed_workspace/managed/.ssv-test-sentinel'"
+
+fake_invalid_workspace="$TEST_DIR/managed-opencv-invalid/.deps/opencv"
+mkdir -p "$fake_invalid_workspace/source/opencv-4.10.0" "$fake_invalid_workspace/install"
+: > "$fake_invalid_workspace/source/opencv-4.10.0/CMakeLists.txt"
+cp -a "$fake_local_opencv/include" "$fake_invalid_workspace/install/"
+cp -a "$fake_local_opencv/lib" "$fake_invalid_workspace/install/"
+rm -f "$fake_invalid_workspace/install/lib/libopencv_dnn.so"
+printf 'broken\n' > "$fake_invalid_workspace/install/lib/libopencv_dnn.so"
+printf 'keep invalid install\n' > "$fake_invalid_workspace/install/.ssv-test-sentinel"
+fake_failing_cmake_bin="$TEST_DIR/fake-failing-cmake-bin"
+mkdir -p "$fake_failing_cmake_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fake_failing_cmake_bin/cmake"
+chmod +x "$fake_failing_cmake_bin/cmake"
+assert_failure 'managed OpenCV preserves an invalid install when candidate configuration fails' run_clean_shell "export PATH='$fake_failing_cmake_bin':$PATH
+source scripts/deps.sh
+if ssv_opencv_managed_prepare '$fake_invalid_workspace' 4.10.0; then exit 1; fi
+grep -Fqx 'keep invalid install' '$fake_invalid_workspace/install/.ssv-test-sentinel'
+exit 1"
 
 assert_success 'local OpenCV provider generates and probes a private pkg-config package' run_clean_shell "source scripts/deps.sh
 SSV_ROOT='$TEST_DIR/local-provider-project'

@@ -414,7 +414,7 @@ grep -q 'SSV_ONNXRUNTIME_SOURCE=local' .env.example ||
     fail ".env.example does not document local ORT artifacts"
 grep -q 'managed 当前固定使用 OpenCV 4.10.0' .env.example ||
     fail ".env.example does not document the managed OpenCV version"
-grep -q 'opencv-managed.sh 的包来源、模块 SONAME 和运行库闭包' .env.example ||
+grep -q 'opencv-managed.sh 的源码归档、模块清单和运行库闭包' .env.example ||
     fail ".env.example does not document managed OpenCV upgrade requirements"
 grep -q 'SSV_TENSORRT_URL' .env.example ||
     fail ".env.example does not document explicit TensorRT URL configuration"
@@ -481,13 +481,29 @@ awk '
 ' scripts/build.sh ||
     fail "build must reset invalid Meson state before dependency preparation"
 grep -q 'downloads/opencv' scripts/deps/opencv-managed.sh ||
-    fail "OpenCV packages are not cached by its provider"
-grep -q 'SSV_OPENCV_PACKAGE_REVISION' scripts/deps/opencv-managed.sh ||
-    fail "OpenCV package details are not private to its provider"
+    fail "OpenCV source archive is not cached by its provider"
+grep -q 'SSV_OPENCV_SOURCE_URL' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV source URL is not owned by its provider"
+grep -q 'ssv_opencv_configure_and_build' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not own the CMake build flow"
+grep -q -- '-DCMAKE_BUILD_TYPE=Release' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not configure a Release build"
+grep -q 'source_dir=.*opencv-' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not keep a versioned source tree"
+grep -q 'workspace_root/build' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not keep a dedicated build tree"
+grep -q 'workspace_root/install' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not keep a dedicated install tree"
+grep -q 'SSV_OPENCV_BUILD_JOBS' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not expose build parallelism"
+grep -q 'ssv_deps_atomic_replace_dir' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not publish candidates atomically"
+grep -q 'ssv_deps_require_replaceable_root' scripts/deps/opencv-managed.sh ||
+    fail "OpenCV provider does not protect existing roots"
 grep -q 'pc_dir/opencv4.pc' scripts/deps/opencv-managed.sh ||
     fail "OpenCV provider does not generate opencv4.pc"
 if rg -n 'dpkg-deb' scripts/deps/opencv-managed.sh; then
-    fail "OpenCV provider must use ar and tar, not dpkg-deb"
+    fail "OpenCV provider must not depend on Debian package extraction"
 fi
 grep -q "option('opencv_mode'" meson.options ||
     fail "Meson does not expose the unified OpenCV mode"
