@@ -248,6 +248,163 @@ std::vector<EncodedField> parse_encoded_fields(std::string_view record)
     return fields;
 }
 
+constexpr std::size_t pretty_field_width = 15;
+
+void append_padded(
+    std::string &record,
+    std::string_view value,
+    std::size_t width)
+{
+    record.append(value);
+    if (value.size() < width)
+        record.append(width - value.size(), ' ');
+}
+
+void append_pretty_group(std::string &record, std::string_view name)
+{
+    record += "  ";
+    record.append(name);
+    record += ":\n";
+}
+
+void append_pretty_field(
+    std::string &record,
+    std::string_view name,
+    std::string_view value)
+{
+    record += "    ";
+    append_padded(record, name, pretty_field_width);
+    record += " = ";
+    record.append(value);
+    record += '\n';
+}
+
+std::string format_pretty_milliseconds(std::chrono::microseconds value)
+{
+    std::ostringstream formatted;
+    formatted.imbue(std::locale::classic());
+    formatted << std::fixed << std::setprecision(3)
+              << static_cast<double>(value.count()) / 1'000.0;
+    return formatted.str();
+}
+
+std::string format_pretty_fps(double value)
+{
+    std::ostringstream formatted;
+    formatted.imbue(std::locale::classic());
+    formatted << std::fixed << std::setprecision(3) << value;
+    return formatted.str();
+}
+
+void append_pretty_latency_header(std::string &record)
+{
+    record += "    ";
+    append_padded(record, "metric", pretty_field_width);
+    record += "  p50       p95\n";
+}
+
+void append_pretty_latency_row(
+    std::string &record,
+    std::string_view name,
+    const SsvLatencyPercentiles &percentiles)
+{
+    record += "    ";
+    append_padded(record, name, pretty_field_width);
+    record += "  ";
+    const auto p50 = format_pretty_milliseconds(percentiles.p50);
+    const auto p95 = format_pretty_milliseconds(percentiles.p95);
+    append_padded(record, p50, 9);
+    record.append(p95);
+    record += '\n';
+}
+
+std::string encode_pretty_event(const SsvEvent &event)
+{
+    const auto *runtime = std::get_if<SsvRuntimeResolvedEvent>(
+        &event.payload);
+    const auto *inference = std::get_if<SsvInferenceStatsEvent>(
+        &event.payload);
+
+    std::string record = "event=";
+    record.append(event_name(event.payload));
+    record += " source_id=" + encode_value(event.context.source_id);
+    if (event.context.run_attempt_id) {
+        record += " run_attempt_id="
+            + std::to_string(*event.context.run_attempt_id);
+    }
+    record += '\n';
+
+    if (runtime != nullptr) {
+        append_pretty_group(record, "decode");
+        append_pretty_field(record, "decoder", encode_value(runtime->decoder));
+        append_pretty_field(
+            record, "va_device", encode_value(runtime->va_device));
+        append_pretty_field(
+            record, "va_driver", encode_value(runtime->va_driver));
+        append_pretty_field(
+            record, "decode_memory", encode_value(runtime->decode_memory));
+        append_pretty_field(record, "vpp", encode_value(runtime->vpp));
+
+        append_pretty_group(record, "display");
+        append_pretty_field(
+            record, "display_backend", encode_value(runtime->display_backend));
+        append_pretty_field(
+            record, "egl_renderer", encode_value(runtime->egl_renderer));
+
+        append_pretty_group(record, "inference");
+        append_pretty_field(
+            record, "provider_chain", encode_value(runtime->provider_chain));
+        append_pretty_field(
+            record, "provider_device", encode_value(runtime->provider_device));
+        append_pretty_field(record, "precision", encode_value(runtime->precision));
+
+        append_pretty_group(record, "model");
+        append_pretty_field(record, "model_hash", encode_value(runtime->model_hash));
+        append_pretty_field(
+            record, "input_contract", encode_value(runtime->input_contract));
+        append_pretty_field(
+            record, "cache_status", encode_value(runtime->cache_status));
+        return record;
+    }
+
+    if (inference != nullptr) {
+        append_pretty_group(record, "throughput");
+        append_pretty_field(
+            record,
+            "frames",
+            std::to_string(inference->completed) + '/'
+                + std::to_string(inference->received));
+        append_pretty_field(
+            record, "dropped", std::to_string(inference->dropped));
+        append_pretty_field(
+            record, "fps", format_pretty_fps(inference->completed_fps));
+        append_pretty_field(
+            record,
+            "max_gap_ms",
+            format_pretty_milliseconds(inference->longest_result_gap));
+
+        append_pretty_group(record, "latency_ms");
+        append_pretty_latency_header(record);
+        append_pretty_latency_row(record, "queue", inference->queue);
+        append_pretty_latency_row(record, "device", inference->device);
+        append_pretty_latency_row(
+            record, "output_copy", inference->output_copy);
+        append_pretty_latency_row(record, "postprocess", inference->postprocess);
+        append_pretty_latency_row(record, "total", inference->total);
+        return record;
+    }
+
+    append_pretty_group(record, "details");
+    for (const auto &field : parse_encoded_fields(encode_event(event))) {
+        if (field.name == "event" || field.name == "source_id"
+            || field.name == "run_attempt_id") {
+            continue;
+        }
+        append_pretty_field(record, field.name, field.value);
+    }
+    return record;
+}
+
 std::string render_fields(const std::vector<EncodedField> &fields)
 {
     std::string record;
@@ -471,6 +628,14 @@ void SsvEventLog::emit(SsvEvent event) noexcept
             if (bytes.size() > options_.max_record_bytes) {
                 bytes = truncate_record(bytes, options_.max_record_bytes);
                 ++stats_.truncated;
+            } else if (options_.format == SsvEventLogFormat::Pretty) {
+                try {
+                    auto pretty = encode_pretty_event(event);
+                    if (pretty.size() <= options_.max_record_bytes)
+                        bytes = std::move(pretty);
+                } catch (...) {
+                    // Keep the valid structured record if presentation fails.
+                }
             }
         } catch (...) {
             ++stats_.encode_failed;

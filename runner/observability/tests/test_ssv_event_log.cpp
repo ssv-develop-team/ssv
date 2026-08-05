@@ -230,6 +230,110 @@ void test_runtime_resolved_uses_context_then_stable_snapshot_fields()
            "model_hash=abc123 input_contract=rgba-u8-nhwc cache_status=hit\n");
 }
 
+void test_runtime_resolved_pretty_output_groups_and_aligns_fields()
+{
+    auto sink_state = std::make_shared<CapturingSinkState>();
+    ssv::SsvEventLogOptions options;
+    options.format = ssv::SsvEventLogFormat::Pretty;
+    auto log = ssv::SsvEventLog::create(
+        options, std::make_unique<CapturingSink>(sink_state));
+
+    log->emit({
+        .context = {
+            .source_id = "camera-01",
+            .run_attempt_id = 3,
+        },
+        .payload = ssv::SsvRuntimeResolvedEvent {
+            .decoder = "nvh264dec",
+            .va_device = "not-applicable",
+            .va_driver = "not-applicable",
+            .decode_memory = "CUDAMemory",
+            .vpp = "disabled",
+            .display_backend = "gtkglsink",
+            .egl_renderer = "unknown",
+            .provider_chain = "TensorrtExecutionProvider,CPUExecutionProvider",
+            .provider_device = "device:0/compute_capability:8.9",
+            .precision = "fp16",
+            .model_hash = "abc123",
+            .input_contract = "rgba-u8-nhwc",
+            .cache_status = "hit",
+        },
+    });
+    static_cast<void>(log->close());
+
+    assert(sink_state->records.size() == 1);
+    const auto &bytes = sink_state->records.front().bytes;
+    assert(bytes.starts_with(
+        "event=runtime_resolved source_id=camera-01 run_attempt_id=3\n"));
+    assert(bytes.find(
+               "  decode:\n"
+               "    decoder         = nvh264dec\n"
+               "    va_device       = not-applicable\n"
+               "    va_driver       = not-applicable\n"
+               "    decode_memory   = CUDAMemory\n"
+               "    vpp             = disabled\n")
+        != std::string::npos);
+    assert(bytes.find(
+               "  display:\n"
+               "    display_backend = gtkglsink\n"
+               "    egl_renderer    = unknown\n")
+        != std::string::npos);
+    assert(bytes.find(
+               "  inference:\n"
+               "    provider_chain  = \"TensorrtExecutionProvider,CPUExecutionProvider\"\n"
+               "    provider_device = device:0/compute_capability:8.9\n"
+               "    precision       = fp16\n")
+        != std::string::npos);
+    assert(bytes.ends_with(
+        "  model:\n"
+        "    model_hash      = abc123\n"
+        "    input_contract  = rgba-u8-nhwc\n"
+        "    cache_status    = hit\n"));
+}
+
+void test_pretty_output_falls_back_when_display_would_exceed_limit()
+{
+    auto sink_state = std::make_shared<CapturingSinkState>();
+    ssv::SsvEventLogOptions options;
+    options.format = ssv::SsvEventLogFormat::Pretty;
+    options.max_record_bytes = 1024;
+    auto log = ssv::SsvEventLog::create(
+        options, std::make_unique<CapturingSink>(sink_state));
+    const std::string value(50, 'x');
+
+    log->emit({
+        .context = {
+            .source_id = "camera",
+            .run_attempt_id = 1,
+        },
+        .payload = ssv::SsvRuntimeResolvedEvent {
+            .decoder = value,
+            .va_device = value,
+            .va_driver = value,
+            .decode_memory = value,
+            .vpp = value,
+            .display_backend = value,
+            .egl_renderer = value,
+            .provider_chain = value,
+            .provider_device = value,
+            .precision = value,
+            .model_hash = value,
+            .input_contract = value,
+            .cache_status = value,
+        },
+    });
+    const auto stats = log->close();
+
+    assert(sink_state->records.size() == 1);
+    assert(stats.truncated == 0);
+    assert(sink_state->records.front().bytes.starts_with(
+        "event=runtime_resolved source_id=camera run_attempt_id=1 "));
+    assert(sink_state->records.front().bytes.find("\n")
+        == sink_state->records.front().bytes.size() - 1);
+    assert(sink_state->records.front().bytes.find("  decode:")
+        == std::string::npos);
+}
+
 void test_buffer_contract_failure_preserves_contract_snapshot()
 {
     auto sink_state = std::make_shared<CapturingSinkState>();
@@ -314,6 +418,68 @@ void test_inference_stats_groups_throughput_and_millisecond_latency()
            "latency_ms=\"p50/p95 queue=0.065/0.113 device=2.941/4.146 "
            "output_copy=0.000/0.000 postprocess=0.039/0.049 "
            "total=3.046/4.285\"\n");
+}
+
+void test_inference_stats_pretty_output_aligns_latency_percentiles()
+{
+    auto sink_state = std::make_shared<CapturingSinkState>();
+    ssv::SsvEventLogOptions options;
+    options.format = ssv::SsvEventLogFormat::Pretty;
+    auto log = ssv::SsvEventLog::create(
+        options, std::make_unique<CapturingSink>(sink_state));
+
+    log->emit({
+        .context = {
+            .source_id = "local-test",
+            .run_attempt_id = 1,
+        },
+        .payload = ssv::SsvInferenceStatsEvent {
+            .received = 34,
+            .dropped = 0,
+            .completed = 33,
+            .completed_fps = 6.048,
+            .longest_result_gap = std::chrono::microseconds {3'523'678},
+            .queue = {
+                .p50 = std::chrono::microseconds {45},
+                .p95 = std::chrono::microseconds {84},
+            },
+            .device = {
+                .p50 = std::chrono::microseconds {50'763},
+                .p95 = std::chrono::microseconds {52'370},
+            },
+            .output_copy = {},
+            .postprocess = {
+                .p50 = std::chrono::microseconds {50},
+                .p95 = std::chrono::microseconds {63},
+            },
+            .total = {
+                .p50 = std::chrono::microseconds {50'873},
+                .p95 = std::chrono::microseconds {52'509},
+            },
+        },
+    });
+    static_cast<void>(log->close());
+
+    assert(sink_state->records.size() == 1);
+    const auto &bytes = sink_state->records.front().bytes;
+    assert(bytes.starts_with(
+        "event=inference_stats source_id=local-test run_attempt_id=1\n"));
+    assert(bytes.find(
+               "  throughput:\n"
+               "    frames          = 33/34\n"
+               "    dropped         = 0\n"
+               "    fps             = 6.048\n"
+               "    max_gap_ms      = 3523.678\n")
+        != std::string::npos);
+    assert(bytes.find(
+               "  latency_ms:\n"
+               "    metric           p50       p95\n")
+        != std::string::npos);
+    assert(bytes.find("    queue            0.045    0.084\n")
+        != std::string::npos);
+    assert(bytes.find("    device           50.763   52.370\n")
+        != std::string::npos);
+    assert(bytes.ends_with("    total            50.873   52.509\n"));
 }
 
 void test_fatal_error_uses_fixed_code_and_force_flush_metadata()
@@ -869,8 +1035,11 @@ int main()
     test_repeated_fallback_events_are_submitted_in_order();
     test_context_and_free_text_are_escaped_as_one_physical_line();
     test_runtime_resolved_uses_context_then_stable_snapshot_fields();
+    test_runtime_resolved_pretty_output_groups_and_aligns_fields();
+    test_pretty_output_falls_back_when_display_would_exceed_limit();
     test_buffer_contract_failure_preserves_contract_snapshot();
     test_inference_stats_groups_throughput_and_millisecond_latency();
+    test_inference_stats_pretty_output_aligns_latency_percentiles();
     test_fatal_error_uses_fixed_code_and_force_flush_metadata();
     test_native_diagnostic_preserves_source_severity_and_optional_debug();
     test_create_rejects_invalid_options_and_null_sink();

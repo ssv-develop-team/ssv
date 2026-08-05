@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 namespace {
 
 struct ApplicationResult {
@@ -70,8 +72,12 @@ ApplicationResult run_application(
 
 int main(int argc, char **argv)
 {
+    ssv::SsvEventLogOptions log_options;
+    log_options.format = ::isatty(STDERR_FILENO) == 1
+        ? ssv::SsvEventLogFormat::Pretty
+        : ssv::SsvEventLogFormat::Structured;
     auto event_log = ssv::SsvEventLog::create(
-        {}, std::make_unique<ssv::SsvStderrLogSink>());
+        log_options, std::make_unique<ssv::SsvStderrLogSink>());
     auto result = run_application(argc, argv, *event_log);
     if (result.fatal_error) {
         auto fatal = std::move(*result.fatal_error);

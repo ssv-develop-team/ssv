@@ -11,11 +11,17 @@
 
 namespace ssv {
 
+enum class SsvEventLogFormat {
+    Structured,
+    Pretty,
+};
+
 struct SsvEventLogOptions {
     SsvEventSeverity minimum_severity = SsvEventSeverity::Info;
     std::size_t max_record_bytes = 16 * 1024;
     std::chrono::milliseconds fatal_flush_timeout {250};
     std::chrono::milliseconds shutdown_timeout {1000};
+    SsvEventLogFormat format = SsvEventLogFormat::Structured;
 };
 
 struct SsvEventLogStats {
