@@ -17,6 +17,7 @@
 namespace botsort {
 
 bool should_attempt_sparse_opt_flow(std::size_t previous_point_count);
+[[nodiscard]] bool gmc_method_available(GmcMethod method) noexcept;
 
 struct GmcWarp {
     double m00 = 1.0;
@@ -29,11 +30,17 @@ struct GmcWarp {
     bool is_identity() const;
 };
 
+[[nodiscard]] GmcWarp gmc_warp_to_source_coordinates(
+    const GmcWarp &model_warp,
+    float source_to_model_scale,
+    int pad_left,
+    int pad_top);
+
 class BoTSortGmc {
 public:
     BoTSortGmc(GmcMethod method, int downscale);
 
-    GmcWarp estimate(const FrameView *frame);
+    GmcWarp estimate(const GmcFrameView *frame);
     void reset();
     bool used_fallback_identity() const;
 
@@ -41,7 +48,7 @@ public:
 
 private:
     static GmcWarp identity();
-    GmcWarp estimate_sparse_opt_flow(const FrameView &frame);
+    GmcWarp estimate_sparse_opt_flow(const GmcFrameView &frame);
 
     GmcMethod method_;
     int downscale_ = 2;

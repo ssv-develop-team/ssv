@@ -1,61 +1,261 @@
 #pragma once
 
+#include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
 
 namespace ssv {
 
-struct SsvConfig {
-    // Logging
+enum class SsvExitCode : int {
+    Success = 0,
+    InvalidConfiguration = 2,
+    CapabilityUnavailable = 3,
+    ModelInitializationFailed = 4,
+    PipelineContractFailed = 5,
+    RuntimeFailure = 6,
+    DisplayInitializationFailed = 7,
+};
+
+enum class SsvConfigErrorKind {
+    FileNotFound,
+    ParseError,
+    MissingRequired,
+    UnknownKey,
+    InvalidType,
+    InvalidValue,
+    ConflictingFields,
+};
+
+class SsvConfigError : public std::runtime_error {
+public:
+    SsvConfigError(
+        SsvConfigErrorKind kind,
+        std::string path,
+        std::string message);
+
+    [[nodiscard]] SsvConfigErrorKind kind() const noexcept;
+    [[nodiscard]] const std::string &path() const noexcept;
+    [[nodiscard]] SsvExitCode exit_code() const noexcept;
+
+private:
+    SsvConfigErrorKind kind_;
+    std::string path_;
+};
+
+enum class SsvDecodeMode {
+    Auto,
+    Vaapi,
+    Nvdec,
+    Software,
+};
+
+enum class SsvDecodeDeviceKind {
+    Auto,
+    Drm,
+    Cuda,
+};
+
+struct SsvDecodeDevice {
+    SsvDecodeDeviceKind kind = SsvDecodeDeviceKind::Auto;
+    std::string value = "auto";
+};
+
+struct SsvDecodeConfig {
+    SsvDecodeMode mode = SsvDecodeMode::Auto;
+    SsvDecodeDevice device;
+};
+
+struct SsvSourceConfig {
+    std::string id;
+    std::string uri;
+    std::string codec = "h264";
+    std::string protocols = "tcp";
+    int latency_ms = 200;
+    SsvDecodeConfig decode;
+};
+
+enum class SsvDisplayBackend {
+    Auto,
+    GtkGlSink,
+    GtkSink,
+};
+
+enum class SsvGlBackend {
+    Auto,
+    X11,
+    Wayland,
+};
+
+struct SsvOverlayFontConfig {
+    std::string face = "regular";
+    int size = 12;
+};
+
+struct SsvMotionPredictionConfig {
+    bool enabled = true;
+    int max_horizon_ms = 300;
+};
+
+struct SsvOverlayConfig {
+    bool enabled = true;
+    SsvOverlayFontConfig font;
+    SsvMotionPredictionConfig motion_prediction;
+};
+
+struct SsvDisplayConfig {
+    bool enabled = true;
+    SsvDisplayBackend backend = SsvDisplayBackend::Auto;
+    int fps = 30;
+    SsvGlBackend gl_backend = SsvGlBackend::Auto;
+    SsvOverlayConfig overlay;
+};
+
+enum class SsvProviderMode {
+    Auto,
+    Explicit,
+};
+
+enum class SsvProvider {
+    TensorRt,
+    Cuda,
+    OpenVino,
+    MiGraphX,
+    Cpu,
+};
+
+enum class SsvPrecision {
+    Auto,
+    Fp32,
+    Fp16,
+};
+
+struct SsvProviderConfig {
+    SsvProviderMode mode = SsvProviderMode::Auto;
+    std::vector<SsvProvider> order;
+};
+
+struct SsvCacheConfig {
+    bool enabled = true;
+    std::string directory;
+};
+
+struct SsvOnnxRuntimeConfig {
+    SsvProviderConfig providers;
+    int device_id = 0;
+    SsvPrecision precision = SsvPrecision::Auto;
+    std::optional<int> cpu_threads;
+    SsvCacheConfig cache;
+};
+
+struct SsvTensorRtEngineConfig {
+    int device_id = 0;
+};
+
+using SsvRuntimeConfig =
+    std::variant<SsvOnnxRuntimeConfig, SsvTensorRtEngineConfig>;
+
+struct SsvModelConfig {
+    std::string path;
+    std::optional<std::string> manifest;
+    std::string family = "yolo";
+    std::string output_format = "yolov8";
+    std::string label_map = "config/model-labels/coco80.txt";
+};
+
+struct SsvInferenceConfig {
+    bool enabled = true;
+    int analysis_fps = 15;
+    SsvModelConfig model;
+    SsvRuntimeConfig runtime = SsvOnnxRuntimeConfig {};
+    float confidence_threshold = 0.5F;
+    std::string target_class = "person";
+};
+
+enum class SsvGmcMethod {
+    SparseOpticalFlow,
+    None,
+};
+
+struct SsvGmcConfig {
+    SsvGmcMethod method = SsvGmcMethod::SparseOpticalFlow;
+    int downscale = 2;
+};
+
+struct SsvTrackingConfig {
+    bool enabled = true;
+    float track_threshold = 0.5F;
+    int track_buffer = 30;
+    float match_threshold = 0.3F;
+    bool mock_track = false;
+    SsvGmcConfig gmc;
+};
+
+struct SsvLoggingConfig {
     std::string cpp_debug_level = "ssv*:4";
     std::string python_log_level = "INFO";
+};
 
-    // Redis
-    std::string redis_host = "localhost";
-    int redis_port = 6379;
-    int redis_db = 0;
-    std::string redis_stream_key = "ssv:events";
-    std::string redis_consumer_group = "ssv-agent";
+struct SsvRedisConfig {
+    std::string host = "localhost";
+    int port = 6379;
+    int db = 0;
+    std::string stream_key = "ssv:events";
+    std::string consumer_group = "ssv-agent";
+};
 
-    // Display
-    bool display_enabled = false;
-    bool display_overlay = false;
-    int display_fps = 30;
-    std::string display_sink = "autovideosink";
-
-    // Pipeline
-    std::string check_timeout = "30s";
-    int analysis_fps = 5;
-    int frame_width = 640;
-    int frame_height = 480;
-
-    // Inference
-    std::string runtime = "auto";
-    std::string model_path;
-    float confidence_threshold = 0.5f;
-    std::string device = "auto";
-    int device_id = 0;
-    std::string precision = "auto";
-    std::string model_family = "yolo";
-    std::string output_format = "auto";
-    std::string target_class = "person";
-    std::string label_map = "config/model-labels/coco80.txt";
-
-    // Tracking
-    bool tracking_enabled = true;
-    int tracking_frame_rate = 30;
-    float tracking_threshold = 0.5f;
-    int tracking_track_buffer = 30;
-    float tracking_match_threshold = 0.8f;
-    bool tracking_mock = false;
-
-    // Agent
+struct SsvAgentConfig {
     int state_machine_timeout = 300;
     int max_retries = 3;
 };
 
-/// Load configuration from YAML file.
-/// Search order: explicit path → SSV_CONFIG_PATH env → ssv.yaml → config/ssv.yaml → config/ssv.example.yaml → /etc/ssv/ssv.yaml
-/// Throws std::runtime_error if no config file found.
-SsvConfig ssv_config_load(const std::string& path = "");
+struct SsvConfig {
+    std::string version = "2.0";
+    SsvLoggingConfig logging;
+    SsvRedisConfig redis;
+    std::vector<SsvSourceConfig> sources;
+    SsvDisplayConfig display;
+    SsvInferenceConfig inference;
+    SsvTrackingConfig tracking;
+    SsvAgentConfig agent;
+};
+
+struct SsvConfigOverrides {
+    std::optional<bool> display_enabled;
+    std::optional<bool> overlay_enabled;
+    std::optional<SsvDisplayBackend> display_backend;
+};
+
+struct SsvRunOptions {
+    std::string config_path;
+    SsvConfigOverrides overrides;
+};
+
+struct SsvFatalError {
+    SsvExitCode exit_code;
+    std::string stage;
+    std::string source_id;
+    std::string error;
+};
+
+/// Load the strict runtime configuration. The example template is never
+/// considered by the implicit search order.
+SsvConfig ssv_config_load(const std::string &path = "");
+
+SsvRunOptions ssv_run_options_parse(
+    std::span<const std::string_view> arguments);
+
+void ssv_config_apply_overrides(
+    SsvConfig &config,
+    const SsvConfigOverrides &overrides);
+
+SsvFatalError ssv_make_fatal_error(
+    const SsvConfigError &error,
+    std::string source_id = "unresolved");
+
+std::string ssv_format_fatal_error(const SsvFatalError &error);
 
 } // namespace ssv

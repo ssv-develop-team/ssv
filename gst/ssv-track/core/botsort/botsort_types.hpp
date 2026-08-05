@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -35,11 +36,14 @@ struct Detection {
 
 using FrameDetections = std::vector<Detection>;
 
-struct FrameView {
-    const std::uint8_t *data = nullptr;
-    int width = 0;
-    int height = 0;
-    std::size_t stride = 0;
+struct GmcFrameView {
+    std::span<const std::uint8_t> rgba;
+    int model_width = 0;
+    int model_height = 0;
+    std::size_t rgba_stride = 0;
+    float source_to_model_scale = 0.0F;
+    int pad_left = 0;
+    int pad_top = 0;
 };
 
 struct DebugStats {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 #if SSV_HAS_OPENCV
 #include <opencv2/calib3d.hpp>
@@ -18,8 +19,47 @@ should_attempt_sparse_opt_flow(std::size_t previous_point_count) {
 }
 
 bool
+gmc_method_available(GmcMethod method) noexcept
+{
+    switch (method) {
+    case GmcMethod::kNone:
+        return true;
+    case GmcMethod::kSparseOptFlow:
+        return SSV_HAS_OPENCV;
+    }
+    return false;
+}
+
+bool
 GmcWarp::is_identity() const {
     return m00 == 1.0 && m01 == 0.0 && m02 == 0.0 && m10 == 0.0 && m11 == 1.0 && m12 == 0.0;
+}
+
+GmcWarp
+gmc_warp_to_source_coordinates(
+    const GmcWarp &model_warp,
+    float source_to_model_scale,
+    int pad_left,
+    int pad_top)
+{
+    if (!std::isfinite(source_to_model_scale)
+        || source_to_model_scale <= 0.0F) {
+        throw std::invalid_argument("GMC source-to-model scale must be positive");
+    }
+
+    GmcWarp source_warp = model_warp;
+    const double scale = source_to_model_scale;
+    const double pad_x = pad_left;
+    const double pad_y = pad_top;
+    // Conjugate by the per-frame letterbox transform so tracker state never
+    // mixes model-canvas motion with source-coordinate detections.
+    source_warp.m02 = (
+        model_warp.m00 * pad_x + model_warp.m01 * pad_y
+        + model_warp.m02 - pad_x) / scale;
+    source_warp.m12 = (
+        model_warp.m10 * pad_x + model_warp.m11 * pad_y
+        + model_warp.m12 - pad_y) / scale;
+    return source_warp;
 }
 
 BoTSortGmc::BoTSortGmc(GmcMethod method, int downscale)
@@ -46,16 +86,29 @@ BoTSortGmc::used_fallback_identity() const {
 }
 
 GmcWarp
-BoTSortGmc::estimate(const FrameView *frame) {
+BoTSortGmc::estimate(const GmcFrameView *frame) {
     used_fallback_identity_ = false;
     if (method_ == GmcMethod::kNone) {
         return identity();
     }
-    if (frame == nullptr || frame->data == nullptr || frame->width <= 0 || frame->height <= 0 || frame->stride == 0) {
+    if (!gmc_method_available(method_)) {
+        throw std::runtime_error(
+            "sparse-opt-flow GMC requires OpenCV support");
+    }
+    if (frame == nullptr
+        || frame->rgba.empty()
+        || frame->model_width <= 0
+        || frame->model_height <= 0
+        || frame->rgba_stride < static_cast<std::size_t>(frame->model_width) * 4
+        || frame->rgba.size() < frame->rgba_stride * static_cast<std::size_t>(frame->model_height)) {
         used_fallback_identity_ = true;
         return identity();
     }
-    return estimate_sparse_opt_flow(*frame);
+    return gmc_warp_to_source_coordinates(
+        estimate_sparse_opt_flow(*frame),
+        frame->source_to_model_scale,
+        frame->pad_left,
+        frame->pad_top);
 }
 
 std::array<float, 4>
@@ -100,15 +153,19 @@ GmcWarp to_warp(const cv::Mat &affine) {
 #endif
 
 GmcWarp
-BoTSortGmc::estimate_sparse_opt_flow(const FrameView &frame) {
+BoTSortGmc::estimate_sparse_opt_flow(const GmcFrameView &frame) {
 #if !SSV_HAS_OPENCV
     (void)frame;
-    used_fallback_identity_ = true;
-    return identity();
+    throw std::runtime_error("sparse-opt-flow GMC requires OpenCV support");
 #else
-    cv::Mat bgr(frame.height, frame.width, CV_8UC3, const_cast<std::uint8_t *>(frame.data), frame.stride);
+    cv::Mat rgba(
+        frame.model_height,
+        frame.model_width,
+        CV_8UC4,
+        const_cast<std::uint8_t *>(frame.rgba.data()),
+        frame.rgba_stride);
     cv::Mat gray;
-    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
     if (downscale_ > 1) {
         const int width = std::max(1, gray.cols / downscale_);
         const int height = std::max(1, gray.rows / downscale_);

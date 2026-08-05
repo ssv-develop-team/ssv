@@ -143,12 +143,9 @@ BoTSortTracker::remove_duplicates(std::vector<TrackRecord> &tracked_tracks, std:
 }
 
 UpdateResult
-BoTSortTracker::update(const FrameDetections &detections) {
-    return update(detections, FrameView{});
-}
-
-UpdateResult
-BoTSortTracker::update(const FrameDetections &detections, const FrameView &frame_bgr) {
+BoTSortTracker::update(
+    const FrameDetections &detections,
+    std::optional<GmcFrameView> gmc_frame) {
     ++frame_id_;
 
     UpdateResult out{};
@@ -157,8 +154,12 @@ BoTSortTracker::update(const FrameDetections &detections, const FrameView &frame
 
     GmcWarp warp;
     if (gmc_) {
-        warp = gmc_->estimate(frame_bgr.data ? &frame_bgr : nullptr);
-        out.stats.gmc_applied = frame_bgr.data != nullptr && config_.gmc_method == GmcMethod::kSparseOptFlow;
+        const auto *gmc_view = gmc_frame && !gmc_frame->rgba.empty()
+            ? &*gmc_frame
+            : nullptr;
+        warp = gmc_->estimate(gmc_view);
+        out.stats.gmc_applied = gmc_view != nullptr
+            && config_.gmc_method == GmcMethod::kSparseOptFlow;
         out.stats.gmc_fallback_identity = gmc_->used_fallback_identity();
     }
 

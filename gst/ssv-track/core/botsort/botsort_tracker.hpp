@@ -6,6 +6,7 @@
 #include "botsort_types.hpp"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace botsort {
@@ -14,8 +15,9 @@ class BoTSortTracker {
 public:
     explicit BoTSortTracker(TrackerConfig config);
 
-    UpdateResult update(const FrameDetections &detections);
-    UpdateResult update(const FrameDetections &detections, const FrameView &frame_bgr);
+    UpdateResult update(
+        const FrameDetections &detections,
+        std::optional<GmcFrameView> gmc_frame = std::nullopt);
 
     static KalmanState apply_gmc_to_state(const KalmanState &state, const GmcWarp &warp);
 
