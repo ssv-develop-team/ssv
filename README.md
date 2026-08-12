@@ -111,9 +111,28 @@ Arch Linux:
 
 ```bash
 sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav gtk3 \
-  yaml-cpp hiredis nlohmann-json cblas blas lapack meson python uv docker docker-compose \
-  curl ca-certificates
+  gst-plugin-gtk yaml-cpp hiredis nlohmann-json cblas blas lapack meson python uv \
+  docker docker-compose curl ca-certificates
 ```
+
+Arch 上按硬件能力补充安装：
+
+```bash
+# GTK 显示插件：gtksink/gtkglsink（独立包，不在 gst-plugins-bad 中）
+sudo pacman -S gst-plugin-gtk
+
+# Intel VAAPI 硬解驱动与诊断工具
+sudo pacman -S intel-media-driver libva libva-utils
+
+# Intel OpenVINO GPU 推理运行库（可选；不装则 OpenVINO 回退 CPU）
+sudo pacman -S intel-compute-runtime
+```
+
+注意：本仓库验证时，Arch 官方仓库没有 `gstreamer-vaapi` 包（AUR 只有旧的 1.24 git
+版本），`gst-plugins-bad` 的新 GstVA 插件也尚未打包，因此 `vah264dec`/`vapostproc`
+不可用，VAAPI 硬解路径暂不可用；`decode.mode: auto` 会记录原因并回退软件解码。
+`gtkglsink` 需要 VA 解码导出 DMABuf，软件解码下会回退 `gtksink`；软件解码路径的
+协商修复与验证结果见 `docs/specs/2026-08-07-T5-软件解码-NV12-协商修复-spec.md`。
 
 ## 快速开始
 

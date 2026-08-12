@@ -300,6 +300,7 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
         "rtph264depay",
         "h264parse",
         "avdec_h264",
+        "videoconvert",
         "clocksync",
         "tee",
         "queue",
@@ -319,13 +320,16 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
         GST_BIN(instance.pipeline()), "h264-depay");
     GstElement *queue = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "discard-queue");
+    GstElement *decode_format = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "decode-format");
     GstElement *decode_caps = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "decode-memory-caps");
     GstElement *tee = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "decoded-tee");
     GstElement *sink = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "discard-sink");
-    assert(depay != nullptr && queue != nullptr && decode_caps != nullptr
+    assert(depay != nullptr && queue != nullptr
+        && decode_format != nullptr && decode_caps != nullptr
         && tee != nullptr && sink != nullptr);
     gboolean wait_for_keyframe = FALSE;
     gboolean request_keyframe = FALSE;
@@ -363,6 +367,7 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
     gst_caps_unref(caps);
     gst_object_unref(depay);
     gst_object_unref(queue);
+    gst_object_unref(decode_format);
     gst_object_unref(decode_caps);
     gst_object_unref(sink);
 

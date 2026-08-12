@@ -528,10 +528,16 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
         stage("rtph264depay", "h264-depay"),
         stage("h264parse", "h264-parser"),
         stage(plan.decode.decoder_factory, "h264-decoder"),
-        stage("capsfilter", "decode-memory-caps"),
-        stage("clocksync", "decode-clock"),
-        stage("tee", "decoded-tee"),
     };
+    if (plan.decode.backend == SsvDecodeBackend::Software) {
+        // avdec_h264 commonly negotiates I420, while the shared decode
+        // contract requires NV12. Convert before the capsfilter so software
+        // decoding does not fail with not-negotiated.
+        topology.prefix.push_back(stage("videoconvert", "decode-format"));
+    }
+    topology.prefix.push_back(stage("capsfilter", "decode-memory-caps"));
+    topology.prefix.push_back(stage("clocksync", "decode-clock"));
+    topology.prefix.push_back(stage("tee", "decoded-tee"));
     topology.contracts.push_back(contract_from_caps(
         SsvPipelineBoundary::DecodeTee,
         plan.expected_caps.decode_output));
