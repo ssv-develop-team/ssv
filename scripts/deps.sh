@@ -123,12 +123,19 @@ ssv_deps_resolve_config() {
             default_onnx_version="${SSV_DEPS_DEFAULT_ONNXRUNTIME_VERSION}-gpu"
             default_tensorrt_mode=enabled
             ;;
-        intel|amd) default_onnx_source=system ;;
+        amd) default_onnx_source=system ;;
     esac
 
     SSV_ONNXRUNTIME_SOURCE="${SSV_ONNXRUNTIME_SOURCE:-$default_onnx_source}"
     SSV_ONNXRUNTIME_VERSION="$default_onnx_version"
-    SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-.deps/onnxruntime}"
+    case "$SSV_DEPS_PROFILE" in
+        intel)
+            SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-.deps/onnxruntime-openvino}"
+            ;;
+        *)
+            SSV_ONNXRUNTIME_ROOT="${SSV_ONNXRUNTIME_ROOT:-.deps/onnxruntime}"
+            ;;
+    esac
 
     SSV_OPENCV_SOURCE="${SSV_OPENCV_SOURCE:-managed}"
     SSV_OPENCV_MODE="${SSV_OPENCV_MODE:-enabled}"
@@ -158,6 +165,12 @@ ssv_deps_resolve_config() {
             nvidia)
                 [[ "$SSV_ONNXRUNTIME_VERSION" == *-gpu ]] || {
                     ssv_deps_die "NVIDIA profile requires a managed ONNX Runtime GPU package"
+                    return 1
+                }
+                ;;
+            intel)
+                [[ "$SSV_ONNXRUNTIME_VERSION" != *-gpu ]] || {
+                    ssv_deps_die "Intel profile requires a managed ONNX Runtime CPU source build"
                     return 1
                 }
                 ;;

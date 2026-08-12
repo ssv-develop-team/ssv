@@ -156,7 +156,7 @@ assert_eq 'managed|1.25.1|managed|enabled|managed|auto' "$defaults" 'default dep
 nvidia_defaults="$(run_clean_shell 'source scripts/deps.sh; SSV_DEPS_PROFILE=nvidia; ssv_deps_resolve_config; printf "%s|%s|%s" "$SSV_ONNXRUNTIME_SOURCE" "$SSV_ONNXRUNTIME_VERSION" "$SSV_TENSORRT_MODE"')"
 assert_eq 'managed|1.25.1-gpu|enabled' "$nvidia_defaults" 'NVIDIA profile selects the managed GPU artifact and strict TensorRT dependency'
 intel_defaults="$(run_clean_shell 'source scripts/deps.sh; SSV_DEPS_PROFILE=intel; ssv_deps_resolve_config; printf "%s|%s" "$SSV_ONNXRUNTIME_SOURCE" "$SSV_ONNXRUNTIME_VERSION"')"
-assert_eq 'system|1.25.1' "$intel_defaults" 'Intel profile selects a controlled system artifact by default'
+assert_eq 'managed|1.25.1' "$intel_defaults" 'Intel profile selects a managed source-build artifact by default'
 
 assert_eq '1.25.1' "$(run_clean_shell 'source scripts/deps.sh; ssv_onnxruntime_normalize_version 1.25.1')" 'ONNX Runtime CPU version syntax'
 assert_eq '1.25.1-gpu' "$(run_clean_shell 'source scripts/deps.sh; ssv_onnxruntime_normalize_version 1.25.1-gpu')" 'ONNX Runtime GPU version syntax'
@@ -189,9 +189,10 @@ assert_failure 'managed root rejects colon' run_clean_shell 'source scripts/deps
 assert_success 'managed root accepts ordinary spaces' run_clean_shell 'source scripts/deps.sh; ssv_deps_validate_root ROOT ".deps/a b"'
 
 assert_failure 'system ONNX Runtime rejects managed version' run_clean_shell 'SSV_ONNXRUNTIME_SOURCE=system SSV_ONNXRUNTIME_VERSION=1.25.1; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
-assert_failure 'Intel profile rejects a managed ONNX Runtime package' run_clean_shell 'SSV_DEPS_PROFILE=intel SSV_ONNXRUNTIME_SOURCE=managed; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_success 'Intel profile accepts the managed ONNX Runtime source-build workspace' run_clean_shell 'SSV_DEPS_PROFILE=intel SSV_ONNXRUNTIME_SOURCE=managed; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config; [ "$SSV_ONNXRUNTIME_ROOT" = "$SSV_ROOT/.deps/onnxruntime-openvino" ]'
 assert_failure 'CPU profile rejects a managed GPU package' run_clean_shell 'SSV_DEPS_PROFILE=cpu SSV_ONNXRUNTIME_VERSION=1.25.1-gpu; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'NVIDIA profile rejects a managed CPU package' run_clean_shell 'SSV_DEPS_PROFILE=nvidia SSV_ONNXRUNTIME_VERSION=1.25.1; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
+assert_failure 'Intel profile rejects a managed GPU package' run_clean_shell 'SSV_DEPS_PROFILE=intel SSV_ONNXRUNTIME_VERSION=1.25.1-gpu; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure 'NVIDIA profile rejects disabled TensorRT' run_clean_shell 'SSV_DEPS_PROFILE=nvidia SSV_TENSORRT_MODE=disabled; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config'
 assert_failure_contains 'explicit local GPU profile fails clearly when its artifact is missing' 'local ONNX Runtime artifact not found:' run_clean_shell 'SSV_DEPS_PROFILE=intel SSV_ONNXRUNTIME_SOURCE=local SSV_ONNXRUNTIME_ROOT="$TEST_DIR/missing-ort"; source scripts/deps.sh; ssv_deps_capture_explicit_config; ssv_deps_resolve_config; SSV_DEPS_BASE_PKG_CONFIG_PATH=""; SSV_DEPS_PKG_CONFIG_PATH=""; PKG_CONFIG_PATH=""; ssv_deps_prepare_onnxruntime'
 
@@ -319,6 +320,7 @@ printf '%s\n' \
     > "$fake_intel_pc/onnxruntime.pc"
 system_intel_result="$(run_clean_shell "source scripts/deps.sh
 SSV_DEPS_PROFILE=intel
+SSV_ONNXRUNTIME_SOURCE=system
 export PKG_CONFIG_PATH='$fake_intel_pc'
 ssv_deps_resolve_config
 SSV_DEPS_BASE_PKG_CONFIG_PATH=\"\$PKG_CONFIG_PATH\"
@@ -462,6 +464,12 @@ managed_nvidia_result="$(run_clean_shell "source scripts/deps.sh; ssv_onnxruntim
 case "$managed_nvidia_result" in
     *'providers=CPUExecutionProvider,CUDAExecutionProvider,TensorrtExecutionProvider'*) pass 'managed NVIDIA artifact requires CUDA and TensorRT Providers' ;;
     *) printf '%s\n' "$managed_nvidia_result" >&2; fail 'managed NVIDIA artifact requires CUDA and TensorRT Providers' ;;
+esac
+
+managed_intel_result="$(run_clean_shell "source scripts/deps.sh; ssv_onnxruntime_managed_validate '$fake_intel_ort' 1.25.1 intel")"
+case "$managed_intel_result" in
+    *'providers=CPUExecutionProvider,OpenVINOExecutionProvider'*) pass 'managed Intel artifact uses the profile probe' ;;
+    *) printf '%s\n' "$managed_intel_result" >&2; fail 'managed Intel artifact uses the profile probe' ;;
 esac
 
 fake_amd_ort="$TEST_DIR/fake-amd-ort"
@@ -642,7 +650,7 @@ fake_build_bin="$TEST_DIR/fake-build-bin"
 mkdir -p "$fake_build_bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_build_bin/git"
 chmod +x "$fake_build_bin/git"
-assert_failure 'managed roots with spaces fail before download' run_clean_shell "PATH='$fake_build_bin':\$PATH SSV_ONNXRUNTIME_ROOT='$TEST_DIR/onnx runtime'; source scripts/deps.sh; ssv_deps_prepare"
+assert_failure 'managed roots with spaces fail before download' run_clean_shell "PATH='$fake_build_bin':\$PATH SSV_ONNXRUNTIME_ROOT='$TEST_DIR/onnx runtime' SSV_ONNXRUNTIME_SOURCE=system; source scripts/deps.sh; ssv_deps_prepare"
 
 build_fake_tensorrt() {
     local sdk="$1" trt_major="$2" trt_minor="$3" trt_patch="$4" cuda_version="$5"

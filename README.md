@@ -85,7 +85,7 @@ exec "$SHELL"
 uv --version
 ```
 
-Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。无 GPU 的宿主上，默认 `./ssv build` 解析为 CPU profile，并准备 managed ONNX Runtime `1.25.1` 和 managed OpenCV `4.10.0` 源码构建；其他 profile 会在 Meson 前严格验证对应 ORT artifact 和 Provider 运行库。三类依赖都遵循同一条路径：`SOURCE -> provider/system -> pkg-config -> Meson`。
+Debian 12 默认源通常没有 ONNX Runtime C++ 开发包。无 GPU 的宿主上，默认 `./ssv build` 解析为 CPU profile，并准备 managed ONNX Runtime `1.25.1` 和 managed OpenCV `4.10.0` 源码构建；其他 profile 会在 Meson 前严格验证对应 ORT artifact 和 Provider 运行库。Intel profile 的 managed 来源使用 ORT 源码构建并捆绑 OpenVINO runtime。三类依赖都遵循同一条路径：`SOURCE -> provider/system -> pkg-config -> Meson`。
 
 NVIDIA managed profile 使用官方 ONNX Runtime `1.25.1` CUDA 13 artifact。默认 provider
 下载 TensorRT `10.16.1` 与 cuDNN `9.25` 包；所有 managed 来源都精确要求 TensorRT
@@ -127,18 +127,23 @@ sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-l
 | --- | --- | --- |
 | 没有可用 GPU，或只想用 CPU | `./ssv build --profile cpu` | 使用 managed ONNX Runtime CPU 和 managed OpenCV |
 | NVIDIA GPU，宿主可见 CUDA 13 | `./ssv build --profile nvidia` | NVIDIA 驱动、CUDA 13 toolkit/runtime；默认还会准备 TensorRT 10.16.1 与 cuDNN 9 |
-| Intel GPU | `./ssv build --profile intel` | 系统 `onnxruntime.pc`，且包含 OpenVINO Provider |
+| Intel GPU | `./ssv build --profile intel` | managed 源码构建 ONNX Runtime `1.25.1` + OpenVINO `2025.4.1`；首次构建需要 CMake、C++ 编译器、Python 3 与 ninja/make |
 | AMD GPU | `./ssv build --profile amd` | 系统 `onnxruntime.pc`，且包含 MIGraphX Provider |
 | 不确定，或混合 GPU | `./ssv build --profile auto` | `/sys/class/drm` 能看到设备；选择顺序为 `nvidia → intel → amd → cpu` |
 
 `--profile` 只选择 ONNX Runtime 的推理 Provider，不决定视频解码。`auto` 只负责检测并选择
 profile，不会在依赖缺失时自动退回 CPU；例如检测到 NVIDIA 但 CUDA/TensorRT 不完整时，命令
-会在 Meson 前失败。新克隆且没有 `.env` 时，CPU/NVIDIA 默认使用 managed provider，Intel/AMD
-默认使用 system provider。
+会在 Meson 前失败。新克隆且没有 `.env` 时，CPU/NVIDIA 默认使用 managed 预编译，
+Intel 默认使用 managed 源码构建，AMD 默认使用 system provider。
 
-Intel/AMD profile 不是“下载即用”的 managed 路径。若本机没有带 OpenVINO 或 MIGraphX 的
-`onnxruntime.pc`，请先准备对应 system/local artifact，或选择 `cpu` profile。容器中使用
-`auto` 时还必须透传 GPU 和 `/sys`；否则它会按 CPU 处理。
+AMD profile 不是“下载即用”的 managed 路径。若本机没有带 MIGraphX 的 `onnxruntime.pc`，
+请先准备对应 system/local artifact，或选择 `cpu` profile。Intel profile 默认由 managed
+provider 下载 ORT `1.25.1` 源码与 OpenVINO `2025.4.1` runtime 并本机编译，工作区位于
+`.deps/onnxruntime-openvino`；构建还会下载 protobuf、onnx、re2 等 ORT 外部依赖，
+首次构建耗时较长，可用 `SSV_ONNXRUNTIME_BUILD_JOBS` 控制并行度。实际 GPU 推理仍需
+宿主提供 Intel GPU 驱动/OpenCL runtime（Arch 上为 `intel-compute-runtime`；VAAPI 解码
+另需 `intel-media-driver` 与 `libva`）。容器中使用 `auto` 时还必须透传 GPU 和 `/sys`；
+否则它会按 CPU 处理。
 
 NVIDIA 机器可先检查 `nvidia-smi`、CUDA 头文件和 `libcudart.so.13` 是否可见。managed NVIDIA
 依赖下载和解包还需要 `curl`、`ca-certificates` 与 `dpkg-deb`；非 Debian 主机可改用已安装的
@@ -291,14 +296,17 @@ ONNX Runtime 是必需依赖。每次构建只解析并记录一个 runtime prof
 # 也可复用通过 nvinfer.pc 暴露的 system TensorRT/CUDA
 SSV_TENSORRT_SOURCE=system ./ssv build --profile nvidia
 
-# Intel/AMD 默认验证系统 onnxruntime.pc，也可引用只读 local artifact
+# Intel 默认 managed 源码构建；AMD 默认验证系统 onnxruntime.pc，也可引用只读 local artifact
 ./ssv build --profile intel
 SSV_ONNXRUNTIME_SOURCE=local \
 SSV_ONNXRUNTIME_ROOT=/opt/onnxruntime-migraphx \
 ./ssv build --profile amd
 ```
 
-CPU/NVIDIA 默认使用 managed artifact；Intel/AMD 默认使用 system artifact。system/local 的 ORT 版本必须与项目固定版本精确一致，并提供当前 profile 所需的 Provider 动态库。local artifact 约定包含 `VERSION_NUMBER`、`include/` 和 `lib/`，构建只在 build 目录生成 pkg-config adapter，不修改 artifact。
+CPU/NVIDIA 默认使用 managed 预编译 artifact；Intel 默认使用 managed 源码构建；
+AMD 默认使用 system artifact。system/local 的 ORT 版本必须与项目固定版本精确一致，
+并提供当前 profile 所需的 Provider 动态库。local artifact 约定包含 `VERSION_NUMBER`、
+`include/` 和 `lib/`，构建只在 build 目录生成 pkg-config adapter，不修改 artifact。
 
 OpenCV 默认 enabled；不需要 GMC 时完全跳过准备和发现：
 
@@ -331,8 +339,9 @@ SSV_TENSORRT_MODE=disabled ./ssv build
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
-| `SSV_ONNXRUNTIME_SOURCE` | ONNX Runtime 来源：`managed`、`local`、`system` | CPU/NVIDIA: `managed`；Intel/AMD: `system` |
-| `SSV_ONNXRUNTIME_ROOT` | managed 安装目录或只读 local artifact | `.deps/onnxruntime` |
+| `SSV_ONNXRUNTIME_SOURCE` | ONNX Runtime 来源：`managed`、`local`、`system` | CPU/NVIDIA: `managed` 预编译；Intel: `managed` 源码构建；AMD: `system` |
+| `SSV_ONNXRUNTIME_ROOT` | managed 工作区/安装目录或只读 local artifact | CPU/NVIDIA: `.deps/onnxruntime`；Intel: `.deps/onnxruntime-openvino` |
+| `SSV_ONNXRUNTIME_BUILD_JOBS` | Intel managed 源码构建并行线程数 | 逻辑 CPU 数 |
 | `SSV_OPENCV_SOURCE` | OpenCV 来源：`managed`、`local`、`system` | `managed` |
 | `SSV_OPENCV_MODE` | OpenCV/GMC：`enabled`、`disabled` | `enabled` |
 | `SSV_OPENCV_ROOT` | managed/local 共用的 OpenCV 工作根目录 | `.deps/opencv` |
