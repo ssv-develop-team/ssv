@@ -1,0 +1,13 @@
+# DeerFlow 运行时产物
+.deer-flow/
+checkpoints.db
+
+# DeerFlow 本地配置（由 config.example.yaml 复制）
+config.yaml
+
+# Agent 输出与数据
+outputs/
+data/
+
+# 本地测试样本（视频较大，不提交）
+samples/

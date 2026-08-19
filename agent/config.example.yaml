@@ -1,0 +1,39 @@
+# DeerFlow configuration for the SSV review worker.
+# Copy this file to config.yaml and keep credentials in .env.
+# The four project tools are read-only. DeerFlow adds view_image itself when
+# the selected model has supports_vision enabled.
+
+config_version: 32
+log_level: info
+
+models:
+  - name: ssv-review
+    display_name: SSV review
+    use: langchain_openai:ChatOpenAI
+    model: $SSV_AGENT_MODEL
+    api_key: $SSV_AGENT_API_KEY
+    base_url: $SSV_AGENT_BASE_URL
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+tool_groups:
+  - name: ssv_review
+
+tools:
+  - name: evidence_reader
+    group: ssv_review
+    use: ssv_agent.tools.evidence_reader:evidence_reader_tool
+  - name: get_event
+    group: ssv_review
+    use: ssv_agent.tools.get_event:get_event_tool
+  - name: search_events
+    group: ssv_review
+    use: ssv_agent.tools.search_events:search_events_tool
+  - name: rule_retriever
+    group: ssv_review
+    use: ssv_agent.tools.rule_retriever:rule_retriever_tool
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false

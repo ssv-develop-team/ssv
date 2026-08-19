@@ -277,6 +277,128 @@ void validate_unit_interval(float value, std::string_view path)
     }
 }
 
+void validate_optional_string_field(
+    const YAML::Node &node,
+    std::string_view key,
+    std::string_view path,
+    bool require_non_empty = false)
+{
+    const auto child = node[std::string(key)];
+    if (!child || child.IsNull())
+        return;
+
+    const auto value = node_as<std::string>(child, path);
+    if (require_non_empty && value.empty()) {
+        throw_invalid_value(
+            path, std::string(path) + " must not be empty");
+    }
+}
+
+void validate_worker_common(
+    const YAML::Node &node,
+    std::string_view path)
+{
+    const auto poll_path = std::string(path) + ".poll_interval_ms";
+    const auto poll_interval_ms = get_or<int>(
+        node, "poll_interval_ms", 1000, poll_path);
+    if (poll_interval_ms <= 0) {
+        throw_invalid_value(
+            poll_path, poll_path + " must be positive");
+    }
+
+    const auto lease_path = std::string(path) + ".lease_ms";
+    const auto lease_ms = get_or<int>(node, "lease_ms", 30000, lease_path);
+    if (lease_ms <= 0) {
+        throw_invalid_value(lease_path, lease_path + " must be positive");
+    }
+
+    const auto retries_path = std::string(path) + ".max_retries";
+    const auto max_retries = get_or<int>(node, "max_retries", 3, retries_path);
+    if (max_retries < 1) {
+        throw_invalid_value(
+            retries_path, retries_path + " must be positive");
+    }
+
+    const auto delay_path = std::string(path) + ".retry_delay_ms";
+    const auto retry_delay_ms = get_or<int>(
+        node, "retry_delay_ms", 1000, delay_path);
+    if (retry_delay_ms < 0) {
+        throw_invalid_value(
+            delay_path, delay_path + " must not be negative");
+    }
+    static_cast<void>(get_or<bool>(
+        node, "enabled", false, std::string(path) + ".enabled"));
+}
+
+void validate_review_extension(const YAML::Node &node)
+{
+    constexpr std::string_view path = "agent.review";
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "enabled",
+        "poll_interval_ms",
+        "lease_ms",
+        "max_retries",
+        "retry_delay_ms",
+        "policy_id",
+        "model_id",
+    });
+    validate_worker_common(node, path);
+    static_cast<void>(get_or<std::string>(
+        node, "policy_id", "ssv-review.v1", "agent.review.policy_id"));
+    validate_optional_string_field(node, "model_id", "agent.review.model_id");
+}
+
+void validate_indexing_extension(const YAML::Node &node)
+{
+    constexpr std::string_view path = "agent.indexing";
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "enabled",
+        "poll_interval_ms",
+        "lease_ms",
+        "max_retries",
+        "retry_delay_ms",
+        "embedding_backend",
+        "embedding_model",
+    });
+    validate_worker_common(node, path);
+
+    const auto backend = get_or<std::string>(
+        node, "embedding_backend", "mock", "agent.indexing.embedding_backend");
+    if (backend != "mock"
+        && backend != "openai_compatible"
+        && backend != "bge_m3") {
+        throw_invalid_value(
+            "agent.indexing.embedding_backend",
+            "agent.indexing.embedding_backend is not supported");
+    }
+    validate_optional_string_field(
+        node, "embedding_model", "agent.indexing.embedding_model");
+}
+
+void validate_agent_extensions(const YAML::Node &agent)
+{
+    if (const auto evidence_roots = agent["evidence_roots"]) {
+        constexpr std::string_view path = "agent.evidence_roots";
+        require_sequence(evidence_roots, path);
+        for (std::size_t index = 0; index < evidence_roots.size(); ++index) {
+            const auto item_path =
+                std::string(path) + "[" + std::to_string(index) + "]";
+            const auto root = node_as<std::string>(
+                evidence_roots[index], item_path);
+            if (!std::filesystem::path(root).is_absolute()) {
+                throw_invalid_value(
+                    item_path, item_path + " must be an absolute path");
+            }
+        }
+    }
+    if (const auto review = agent["review"])
+        validate_review_extension(review);
+    if (const auto indexing = agent["indexing"])
+        validate_indexing_extension(indexing);
+}
+
 std::string format_log_value(std::string_view value)
 {
     const auto safe = !value.empty() && std::all_of(
@@ -898,6 +1020,7 @@ SsvTrackingConfig parse_tracking(const YAML::Node &node)
         "track_buffer",
         "match_threshold",
         "mock_track",
+        "publish_cooldown_ms",
         "gmc",
     });
 
@@ -930,6 +1053,15 @@ SsvTrackingConfig parse_tracking(const YAML::Node &node)
         "mock_track",
         tracking.mock_track,
         "tracking.mock_track");
+    tracking.publish_cooldown_ms = get_or<int>(node,
+        "publish_cooldown_ms",
+        tracking.publish_cooldown_ms,
+        "tracking.publish_cooldown_ms");
+    if (tracking.publish_cooldown_ms < 0) {
+        throw_invalid_value(
+            "tracking.publish_cooldown_ms",
+            "tracking.publish_cooldown_ms must not be negative");
+    }
     if (const auto gmc = node["gmc"]) {
         require_map(gmc, "tracking.gmc");
         reject_unknown_keys(gmc, "tracking.gmc", {"method", "downscale"});
@@ -1033,6 +1165,10 @@ SsvConfig parse_and_validate(const YAML::Node &root)
             "db",
             "stream_key",
             "consumer_group",
+            // These fields are owned by the Python Agent but share this YAML.
+            "reclaim_idle_ms",
+            "reclaim_batch_size",
+            "consumer_name",
         });
         config.redis.host = get_or<std::string>(
             redis, "host", config.redis.host, "redis.host");
@@ -1058,6 +1194,28 @@ SsvConfig parse_and_validate(const YAML::Node &root)
             "consumer_group",
             config.redis.consumer_group,
             "redis.consumer_group");
+        const auto reclaim_idle_ms = get_or<int>(
+            redis,
+            "reclaim_idle_ms",
+            60000,
+            "redis.reclaim_idle_ms");
+        if (reclaim_idle_ms <= 0) {
+            throw_invalid_value(
+                "redis.reclaim_idle_ms",
+                "redis.reclaim_idle_ms must be positive");
+        }
+        const auto reclaim_batch_size = get_or<int>(
+            redis,
+            "reclaim_batch_size",
+            10,
+            "redis.reclaim_batch_size");
+        if (reclaim_batch_size < 1 || reclaim_batch_size > 100) {
+            throw_invalid_value(
+                "redis.reclaim_batch_size",
+                "redis.reclaim_batch_size must be between 1 and 100");
+        }
+        validate_optional_string_field(
+            redis, "consumer_name", "redis.consumer_name", true);
     }
     if (const auto sources = root["sources"]) {
         require_sequence(sources, "sources");
@@ -1081,7 +1239,18 @@ SsvConfig parse_and_validate(const YAML::Node &root)
     if (const auto agent = root["agent"]) {
         require_map(agent, "agent");
         reject_unknown_keys(
-            agent, "agent", {"state_machine_timeout", "max_retries"});
+            agent, "agent", {
+                "state_machine_timeout",
+                "max_retries",
+                "model_name",
+                "output_dir",
+                "dedup_enabled",
+                "dedup_cooldown_seconds",
+                // The Python Agent owns these shared-config extensions.
+                "evidence_roots",
+                "review",
+                "indexing",
+            });
         config.agent.state_machine_timeout = get_or<int>(
             agent,
             "state_machine_timeout",
@@ -1099,6 +1268,32 @@ SsvConfig parse_and_validate(const YAML::Node &root)
             throw_invalid_value(
                 "agent.max_retries", "agent.max_retries must not be negative");
         }
+        config.agent.model_name = get_or<std::string>(
+            agent,
+            "model_name",
+            config.agent.model_name,
+            "agent.model_name");
+        config.agent.output_dir = get_or<std::string>(
+            agent,
+            "output_dir",
+            config.agent.output_dir,
+            "agent.output_dir");
+        config.agent.dedup_enabled = get_or<bool>(
+            agent,
+            "dedup_enabled",
+            config.agent.dedup_enabled,
+            "agent.dedup_enabled");
+        config.agent.dedup_cooldown_seconds = get_or<float>(
+            agent,
+            "dedup_cooldown_seconds",
+            config.agent.dedup_cooldown_seconds,
+            "agent.dedup_cooldown_seconds");
+        if (config.agent.dedup_cooldown_seconds <= 0) {
+            throw_invalid_value(
+                "agent.dedup_cooldown_seconds",
+                "agent.dedup_cooldown_seconds must be positive");
+        }
+        validate_agent_extensions(agent);
     }
     return config;
 }

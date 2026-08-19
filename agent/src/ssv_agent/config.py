@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 _CONFIG_KEYS = frozenset(
@@ -38,11 +38,49 @@ class RedisConfig(_StrictConfigModel):
     db: int = Field(default=0, ge=0)
     stream_key: str = "ssv:events"
     consumer_group: str = "ssv-agent"
+    reclaim_idle_ms: int = Field(default=60_000, gt=0)
+    reclaim_batch_size: int = Field(default=10, ge=1, le=100)
+    consumer_name: str | None = Field(default=None, min_length=1)
+
+
+class WorkerConfig(_StrictConfigModel):
+    """持久 worker 的领取与重试策略。"""
+
+    enabled: bool = False
+    poll_interval_ms: int = Field(default=1000, gt=0)
+    lease_ms: int = Field(default=30_000, gt=0)
+    max_retries: int = Field(default=3, ge=1)
+    retry_delay_ms: int = Field(default=1000, ge=0)
+
+
+class ReviewWorkerConfig(WorkerConfig):
+    policy_id: str = "ssv-review.v1"
+    model_id: str | None = None
+
+
+class IndexWorkerConfig(WorkerConfig):
+    embedding_backend: Literal["mock", "openai_compatible", "bge_m3"] = "mock"
+    embedding_model: str | None = None
 
 
 class AgentConfig(_StrictConfigModel):
     state_machine_timeout: int = Field(default=300, gt=0)
     max_retries: int = Field(default=3, ge=0)
+    model_name: str | None = None
+    output_dir: str = "outputs"
+    evidence_roots: list[str] = Field(default_factory=list)
+    dedup_enabled: bool = True
+    dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
+    review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
+    indexing: IndexWorkerConfig = Field(default_factory=IndexWorkerConfig)
+
+    @field_validator("evidence_roots")
+    @classmethod
+    def validate_evidence_roots(cls, roots: list[str]) -> list[str]:
+        for root in roots:
+            if not Path(root).is_absolute():
+                raise ValueError("evidence_roots entries must be absolute paths")
+        return roots
 
 
 class SsvConfig(_StrictConfigModel):
@@ -78,6 +116,25 @@ def _apply_env_overrides(cfg: SsvConfig) -> None:
     if v := os.environ.get("REDIS_PORT"):
         redis["port"] = int(v)
     cfg.redis = RedisConfig.model_validate(redis)
+
+
+def _config_search_paths() -> list[Path]:
+    """返回配置搜索顺序（与 load_config 一致，缺失的显式路径跳过）。"""
+    paths: list[Path] = []
+    if env_path := os.environ.get("SSV_CONFIG_PATH"):
+        paths.append(Path(env_path))
+    paths.extend([Path("ssv.yaml"), Path("config/ssv.yaml"), Path("/etc/ssv/ssv.yaml")])
+    return paths
+
+
+def load_sources() -> list[dict[str, Any]]:
+    """读取配置文件中的 sources 列表，供 source_list 工具使用。"""
+    for path in _config_search_paths():
+        if path.exists():
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            return list(data.get("sources", []))
+    return []
 
 
 def load_config(path: str | Path | None = None) -> SsvConfig:

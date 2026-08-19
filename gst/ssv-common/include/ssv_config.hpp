@@ -191,6 +191,7 @@ struct SsvTrackingConfig {
     int track_buffer = 30;
     float match_threshold = 0.3F;
     bool mock_track = false;
+    int publish_cooldown_ms = 30000;
     SsvGmcConfig gmc;
 };
 
@@ -210,6 +211,10 @@ struct SsvRedisConfig {
 struct SsvAgentConfig {
     int state_machine_timeout = 300;
     int max_retries = 3;
+    std::string model_name;
+    std::string output_dir = "outputs";
+    bool dedup_enabled = true;
+    float dedup_cooldown_seconds = 30.0F;
 };
 
 struct SsvConfig {

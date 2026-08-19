@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 std::string ssv_pub_build_event_payload(
     const SsvTrackedFrame &frame,
@@ -21,6 +23,11 @@ bool ssv_pub_snapshot_is_current(
 bool ssv_pub_snapshot_is_current(
     std::string_view source_id,
     const SsvTrackedFrame &frame);
+bool ssv_pub_should_publish(
+    const std::vector<SsvTrackedObject> &objects,
+    int cooldown_ms,
+    std::int64_t now_ms,
+    std::unordered_map<int, std::int64_t> &last_published_ms);
 
 G_BEGIN_DECLS
 

@@ -717,8 +717,10 @@ SsvPipelineInstance SsvPipelineBuilder::build(
                 elements, topology.display->stages.back().name);
             if (g_object_class_find_property(
                     G_OBJECT_GET_CLASS(sink), "sync") != nullptr) {
-                g_object_set(
-                    sink, "sync", config.display.enabled, nullptr);
+                // gtksink 在 XWayland/软渲染下 sync=TRUE 时按时钟等待，实测
+                // 只消费约 16fps 并反压 tee 拖慢分析分支；关闭 sync 让显示
+                // 分支尽快消费，帧率由 display-rate 统一限制。
+                g_object_set(sink, "sync", FALSE, nullptr);
             }
             if (g_object_class_find_property(
                     G_OBJECT_GET_CLASS(sink), "async") != nullptr) {
@@ -794,6 +796,7 @@ SsvPipelineInstance SsvPipelineBuilder::build(
                 "redis-host", config.redis.host.c_str(),
                 "redis-port", config.redis.port,
                 "stream-key", config.redis.stream_key.c_str(),
+                "publish-cooldown-ms", config.tracking.publish_cooldown_ms,
                 nullptr);
         }
         auto *sink = required_element(

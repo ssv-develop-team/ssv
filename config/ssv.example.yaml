@@ -22,6 +22,11 @@ redis:
   db: 0
   stream_key: "ssv:events"
   consumer_group: "ssv-agent"
+  # pending entry 至少 idle 60 秒后才由 XAUTOCLAIM 重新处理。
+  reclaim_idle_ms: 60000
+  reclaim_batch_size: 10
+  # 留空时 Agent 为每个进程实例生成唯一 consumer 名称。
+  consumer_name: null
 
 # 本阶段必须且只能配置一个 RTSP H.264 8-bit source。
 sources:
@@ -87,6 +92,8 @@ tracking:
   track_buffer: 30
   match_threshold: 0.3
   mock_track: false
+  # ssv-pub 同一 track 的发布冷却（毫秒），0 表示关闭去重。
+  publish_cooldown_ms: 30000
   gmc:
     # sparse-opt-flow 或 none；只有 sparse-opt-flow 使用 OpenCV。
     method: "sparse-opt-flow"
@@ -95,3 +102,29 @@ tracking:
 agent:
   state_machine_timeout: 300
   max_retries: 3
+  dedup_enabled: true
+  dedup_cooldown_seconds: 30.0
+  # Redis 中的 frame_path/clip_path 不可信；只有这些绝对根目录内的证据才能登记或被工具复制。
+  # 空列表保持 fail closed，事件仍会入账但不会获得证据引用。
+  evidence_roots: []
+  # - "/var/lib/ssv/evidence"
+  # Redis 只在 SQLite 账本事务提交后 ACK；默认不启动外部模型。
+  review:
+    enabled: false
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000
+    policy_id: "ssv-review.v1"
+    model_id: null
+  # 索引失败不会回滚案件或复核；默认 mock 后端可在离线测试中使用。
+  indexing:
+    enabled: false
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000
+    embedding_backend: "mock"
+    embedding_model: null
+    # 离线 BGE-M3 示例：embedding_backend: "bge_m3"
+    # embedding_model: "/opt/models/bge-m3"

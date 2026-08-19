@@ -23,6 +23,13 @@ ssv_pub_payload_test = executable('ssv-pub-payload-test',
   link_with : [ssv_pub_lib],
 )
 
+ssv_pub_dedup_test = executable('ssv-pub-dedup-test',
+  'test_ssv_pub_dedup.cpp',
+  include_directories : [include_directories('../ssv-pub')],
+  dependencies : [gst_deps, ssv_common_dep],
+  link_with : [ssv_pub_lib],
+)
+
 ssv_overlay_motion_predictor_test = executable('ssv-overlay-motion-predictor-test',
   'test_overlay_motion_predictor.cpp',
   include_directories : [include_directories('../ssv-overlay')],
@@ -44,6 +51,7 @@ ssv_overlay_runtime_test = executable('ssv-overlay-runtime-test',
 )
 
 test('ssv-pub-payload', ssv_pub_payload_test)
+test('ssv-pub-dedup', ssv_pub_dedup_test)
 test('ssv-overlay-motion-predictor', ssv_overlay_motion_predictor_test)
 test('ssv-overlay-presentation', ssv_overlay_presentation_test)
 test('ssv-overlay-runtime', ssv_overlay_runtime_test)

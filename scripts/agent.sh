@@ -13,6 +13,10 @@ fi
 
 config_args=()
 if [ -n "$SSV_CONFIG" ]; then
+    case "$SSV_CONFIG" in
+        /*) ;;
+        *) SSV_CONFIG="$SSV_ROOT/$SSV_CONFIG" ;;
+    esac
     ssv_info "配置: $SSV_CONFIG"
     config_args=(--config "$SSV_CONFIG")
 else

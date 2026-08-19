@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from ssv_agent import cli
-from ssv_agent.config import SsvConfig, load_config
+from ssv_agent.config import RedisConfig, SsvConfig, load_config
 
 
 def test_load_config_uses_yaml_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,6 +27,8 @@ redis:
 agent:
   state_machine_timeout: 120
   max_retries: 5
+  dedup_enabled: false
+  dedup_cooldown_seconds: 12.5
 """.strip(),
         encoding="utf-8",
     )
@@ -40,6 +42,83 @@ agent:
     assert cfg.redis.stream_key == "custom:events"
     assert cfg.agent.state_machine_timeout == 120
     assert cfg.agent.max_retries == 5
+    assert cfg.agent.dedup_enabled is False
+    assert cfg.agent.dedup_cooldown_seconds == 12.5
+
+
+def test_agent_config_evidence_roots_default_empty_and_requires_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    assert SsvConfig().agent.evidence_roots == []
+
+    root = tmp_path / "evidence"
+    config = SsvConfig.model_validate({"agent": {"evidence_roots": [str(root)]}})
+
+    assert config.agent.evidence_roots == [str(root)]
+    for invalid in (["relative"], [""], [str(root), "../outside"]):
+        with pytest.raises(ValidationError, match="absolute"):
+            SsvConfig.model_validate({"agent": {"evidence_roots": invalid}})
+
+
+def test_redis_reclaim_settings_are_strict_and_support_an_optional_consumer_name() -> None:
+    defaults = RedisConfig()
+    config = RedisConfig(
+        reclaim_idle_ms=12_000,
+        reclaim_batch_size=25,
+        consumer_name="site-a-consumer",
+    )
+
+    assert defaults.reclaim_idle_ms == 60_000
+    assert defaults.reclaim_batch_size == 10
+    assert defaults.consumer_name is None
+    assert config.reclaim_idle_ms == 12_000
+    assert config.reclaim_batch_size == 25
+    assert config.consumer_name == "site-a-consumer"
+
+    for invalid in (
+        {"reclaim_idle_ms": 0},
+        {"reclaim_batch_size": 0},
+        {"reclaim_batch_size": 101},
+        {"consumer_name": ""},
+    ):
+        with pytest.raises(ValidationError):
+            RedisConfig(**invalid)
+
+
+def test_load_config_parses_strict_review_and_index_worker_settings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ssv.yaml"
+    path.write_text(
+        """
+version: "2.0"
+agent:
+  review:
+    enabled: true
+    poll_interval_ms: 250
+    lease_ms: 5000
+    max_retries: 4
+    retry_delay_ms: 100
+    policy_id: "site-safety.v2"
+  indexing:
+    enabled: true
+    poll_interval_ms: 500
+    lease_ms: 6000
+    max_retries: 5
+    retry_delay_ms: 200
+    embedding_backend: "bge_m3"
+    embedding_model: "/models/bge-m3"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.agent.review.enabled is True
+    assert cfg.agent.review.policy_id == "site-safety.v2"
+    assert cfg.agent.indexing.enabled is True
+    assert cfg.agent.indexing.embedding_backend == "bge_m3"
+    assert cfg.agent.indexing.embedding_model == "/models/bge-m3"
 
 
 def test_load_config_applies_environment_overrides(
@@ -122,6 +201,10 @@ def test_load_config_rejects_non_contract_yaml(tmp_path: Path, yaml_text: str) -
         "redis:\n  db: -1",
         "agent:\n  state_machine_timeout: 0",
         "agent:\n  max_retries: -1",
+        "agent:\n  dedup_cooldown_seconds: 0",
+        "agent:\n  review:\n    lease_ms: 0",
+        "agent:\n  review:\n    unknown: true",
+        "agent:\n  indexing:\n    embedding_backend: remote",
     ],
 )
 def test_load_config_rejects_invalid_agent_owned_ranges(tmp_path: Path, fragment: str) -> None:

@@ -512,7 +512,59 @@ docker exec ssv-redis redis-cli XRANGE ssv:events - + COUNT 5
 ./ssv agent
 ```
 
-Agent 当前用于消费 Redis Streams 并验证事件消费基线。完整上下文构造、状态机、工具路由和模型 provider 在后续 roadmap 阶段实现。
+Agent 将 Redis 规则事件写入 SQLite `EventLedger` 后立即 ACK。案件、检测、证据元数据和首个 `review`/`index` job 在同一事务提交；SQLite 写入失败时 Redis entry 保持 pending，模型和 Qdrant 不会阻塞 ACK。每轮消费会先用 Redis `XAUTOCLAIM` 回收超过 `redis.reclaim_idle_ms` 的 pending entry，再读取新消息；未配置 `redis.consumer_name` 时每个进程实例都会生成不同名称。JSON poison input 与确定性冷却去重保持 ACK 行为。
+
+复核与索引在独立 worker 中执行。`review` job 通过 lease 领取，模型仅能使用 `get_event`、`evidence_reader`、`rule_retriever`、`search_events` 与 `view_image` 五个只读工具；每次 review client 启动都使用独立的临时空 `extensions_config.json`，并由 DeerFlow RBAC 再次限制该 allowlist，关闭 skills、subagent 和 plan mode。`frame_path`/`clip_path` 来自 Redis 时不可信：只有 `agent.evidence_roots` 中绝对根目录内、resolve 后仍未越界的普通文件才会登记；空列表 fail closed，事件仍可入账但不带证据。worker 和 `evidence_reader` 都会在各自副作用边界重新解析根目录和刷新 `available/size/mtime`，且 fenced `complete_review_job()` 会在同一事务再次校验引用文件。结构化 JSON 结果会先原子写入输出目录，再追加到账本。`index` job 从 SQLite 当前 revision 生成向量并用稳定 `event_id` upsert 该 embedding identity 对应的事件 collection；Embedding 或 Qdrant 故障只会重试 index job，不会回滚案件或复核事实。
+
+结果文件使用内容 hash 名称，例如 `outputs/case-1/result-<sha256>.json`；简单安全的 event ID 保持可读目录，路径分隔符、绝对路径、`.`/`..` 或超长 ID 会映射为 `event-<sha256>` 目录。相同内容复用同一路径，不同结果不会互相覆盖。文件会在 fenced 提交前生成，因此失租或提交校验失败后可能留下未被账本引用的 orphan artifact；当前不自动清理。后续 GC 只能在保留期后删除 outputs root 内、未被 `reviews.result_path` 或当前案件投影引用的内容寻址文件，不能删除已接受 artifact 或修改账本事实。
+
+默认 `agent.review.enabled` 和 `agent.indexing.enabled` 都为 `false`，因此最小启动不会加载外部模型。启用前在 `config/ssv.yaml` 中配置对应 worker 的轮询、lease、重试和延迟参数。离线 BGE-M3 后端是可选依赖，安装并指向本地模型目录后再启用：
+
+```bash
+cd agent
+uv sync --extra bge-m3
+```
+
+```yaml
+agent:
+  # 仅允许这些绝对目录下的证据；空列表会拒绝所有来自 Redis 的路径。
+  evidence_roots:
+    - "/var/lib/ssv/evidence"
+  review:
+    enabled: true
+  indexing:
+    enabled: true
+    embedding_backend: "bge_m3"
+    embedding_model: "/opt/models/bge-m3"
+```
+
+重试达到 `max_retries` 后 job 进入 `dead`，保留最后错误供排查。Qdrant 可重建：在 `agent/` 下通过账本重新入队当前案件投影，恢复索引服务后 worker 会继续处理：
+
+```bash
+uv run python - <<'PY'
+from ssv_agent.event_store import EventLedger
+
+with EventLedger() as ledger:
+    print(ledger.enqueue_all_index_jobs())
+PY
+```
+
+`evidence_reader` 只接收 `event_id` 和账本登记的 `evidence_id`，不会读取模型提供的任意宿主机路径；登记、刷新和复制都执行同一套 evidence-root resolved-path 检查，因此目录穿越、根外路径及越界 symlink 都不会成为可读证据。`search_events` 只信任 Qdrant 的召回 ID 与分数，所有展示字段都会回 SQLite hydrate 当前事实。
+
+事件字段、规则/检索内容、证据元数据和图片内容均是不可信输入。复核提示词要求模型把它们作为待核验候选，不能执行其中的工具调用、权限变更或输出格式指令；`view_image` 只能接收 `evidence_reader` 返回的虚拟路径。
+
+Qdrant 是可重建的语义索引，SQLite `EventLedger` 才是事件、证据和复核结论的事实源。开发测试可使用本地
+`SSV_QDRANT_PATH`；生产建议设置 `SSV_QDRANT_URL`，并通过 `SSV_QDRANT_API_KEY` 注入凭据。`ssv_events`
+和 `ssv_rules` 是逻辑 collection 名；运行时以 adapter schema version、backend 和有效 model 组成的 embedding
+identity 派生安全哈希后的物理 collection 名，因此同维但不同模型不会混写。切换模型后仍要重新入队 index jobs，
+以填充新身份空间；本轮不迁移或删除旧 collection。`rule_retriever` 当前仍是带来源的 mock 片段，尚未接入生产规则/SOP 知识库。
+
+当前 `gstssvpub` 的消息仍可能只有 `type/source/timestamp_ms/frame_id/detections` 等稀疏字段；Agent 不会据此补造
+完整 `rule.v1` 状态、媒体 PTS、stream generation 或唯一人数。完整实时规则状态机和证据生成属于后续 C++/上游契约工作。
+
+消费侧默认开启事件冷却去重：同一 `source` 的同一 `track_id` 在冷却窗口内只触发一次复核，新出现的 `track_id` 会绕过冷却。可通过 `agent.dedup_enabled` 关闭，通过 `agent.dedup_cooldown_seconds` 调整窗口（默认 30 秒）。
+
+`ssv-pub` 在发布侧也默认按 `source+track` 做 30 秒冷却，新出现、丢失或移除状态的目标会立即发布；可通过 `tracking.publish_cooldown_ms` 调整（0 关闭）。消费侧 Redis 去重保留为多生产者与重放场景的兜底。
 
 ### GStreamer 日志
 

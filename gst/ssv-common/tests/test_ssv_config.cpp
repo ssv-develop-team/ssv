@@ -174,12 +174,17 @@ tracking:
   track_buffer: 45
   match_threshold: 0.35
   mock_track: false
+  publish_cooldown_ms: 12000
   gmc:
     method: "sparse-opt-flow"
     downscale: 3
 agent:
   state_machine_timeout: 240
   max_retries: 5
+  model_name: "gpt-test"
+  output_dir: "outputs-test"
+  dedup_enabled: false
+  dedup_cooldown_seconds: 12.5
 )yaml");
 
     const auto config = ssv::ssv_config_load(path.string());
@@ -209,7 +214,12 @@ agent:
     assert(runtime.cache.directory.empty());
     assert(config.tracking.gmc.method ==
         ssv::SsvGmcMethod::SparseOpticalFlow);
+    assert(config.tracking.publish_cooldown_ms == 12000);
     assert(config.agent.max_retries == 5);
+    assert(config.agent.model_name == "gpt-test");
+    assert(config.agent.output_dir == "outputs-test");
+    assert(!config.agent.dedup_enabled);
+    assert(config.agent.dedup_cooldown_seconds == 12.5F);
 }
 
 void test_loads_example_config(std::string_view path)
@@ -219,6 +229,9 @@ void test_loads_example_config(std::string_view path)
     assert(config.version == "2.0");
     assert(config.sources.size() == 1);
     assert(!config.sources.front().id.empty());
+    assert(config.tracking.publish_cooldown_ms == 30000);
+    assert(config.agent.dedup_enabled);
+    assert(config.agent.dedup_cooldown_seconds == 30.0F);
 }
 
 void test_resolves_config_path_from_environment()
@@ -705,6 +718,8 @@ void test_rejects_unknown_keys_in_every_section()
         {"tracking:\n  extra: true", "tracking.extra"},
         {"tracking:\n  gmc:\n    extra: true", "tracking.gmc.extra"},
         {"agent:\n  extra: true", "agent.extra"},
+        {"agent:\n  review:\n    extra: true", "agent.review.extra"},
+        {"agent:\n  indexing:\n    extra: true", "agent.indexing.extra"},
     };
 
     for (const auto &test_case : cases) {
@@ -982,10 +997,22 @@ void test_rejects_out_of_range_values()
         {"redis:\n  port: 0", "redis.port"},
         {"redis:\n  port: 65536", "redis.port"},
         {"redis:\n  db: -1", "redis.db"},
+        {"redis:\n  reclaim_idle_ms: 0", "redis.reclaim_idle_ms"},
+        {"redis:\n  reclaim_batch_size: 101", "redis.reclaim_batch_size"},
         {"tracking:\n  track_threshold: -0.1",
             "tracking.track_threshold"},
         {"tracking:\n  match_threshold: 1.1",
             "tracking.match_threshold"},
+        {"tracking:\n  publish_cooldown_ms: -1",
+            "tracking.publish_cooldown_ms"},
+        {"agent:\n  dedup_cooldown_seconds: 0",
+            "agent.dedup_cooldown_seconds"},
+        {"agent:\n  evidence_roots:\n    - relative",
+            "agent.evidence_roots[0]"},
+        {"agent:\n  review:\n    lease_ms: 0",
+            "agent.review.lease_ms"},
+        {"agent:\n  indexing:\n    embedding_backend: remote",
+            "agent.indexing.embedding_backend"},
         {"tracking:\n  track_buffer: 0", "tracking.track_buffer"},
         {"tracking:\n  track_buffer: 301", "tracking.track_buffer"},
         {"tracking:\n  gmc:\n    downscale: 0", "tracking.gmc.downscale"},

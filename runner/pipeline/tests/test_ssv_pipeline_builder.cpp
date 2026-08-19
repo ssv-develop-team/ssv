@@ -397,6 +397,7 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     assert(label_map != nullptr && label_map[0] != '\0');
     config.inference.model.label_map = label_map;
     config.tracking.enabled = true;
+    config.tracking.publish_cooldown_ms = 12345;
 
     auto registry = make_registry();
     for (const char *factory : {
@@ -433,6 +434,10 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     assert(infer_context == source_context.get());
     assert(track_context == source_context.get());
     assert(publish_context == source_context.get());
+
+    gint publish_cooldown_ms = 0;
+    g_object_get(publish, "publish-cooldown-ms", &publish_cooldown_ms, nullptr);
+    assert(publish_cooldown_ms == 12345);
 
     gst_object_unref(infer);
     gst_object_unref(track);

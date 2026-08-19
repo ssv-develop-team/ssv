@@ -6,6 +6,7 @@
 #include <hiredis/hiredis.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 GST_DEBUG_CATEGORY_STATIC(ssv_pub_debug);
@@ -25,10 +27,12 @@ struct _SsvPub {
     gchar *redis_host;
     gint redis_port;
     gchar *stream_key;
+    gint publish_cooldown_ms;
 
     redisContext *redis_ctx;
     std::shared_ptr<SsvSourceMeta> meta_owner;
     SsvSourceMeta *meta;
+    std::unordered_map<int, std::int64_t> track_last_published_ms;
 };
 
 enum {
@@ -38,6 +42,7 @@ enum {
     PROP_REDIS_HOST,
     PROP_REDIS_PORT,
     PROP_STREAM_KEY,
+    PROP_PUBLISH_COOLDOWN_MS,
 };
 
 G_DEFINE_TYPE(SsvPub, ssv_pub, GST_TYPE_BASE_TRANSFORM)
@@ -118,6 +123,65 @@ ssv_pub_snapshot_is_current(
     const auto meta = ssv_meta(source_id);
     return meta != nullptr
         && ssv_pub_snapshot_is_current(source_id, *meta, frame);
+}
+
+static std::int64_t
+ssv_steady_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool
+ssv_pub_should_publish(
+    const std::vector<SsvTrackedObject> &objects,
+    int cooldown_ms,
+    std::int64_t now_ms,
+    std::unordered_map<int, std::int64_t> &last_published_ms)
+{
+    if (cooldown_ms <= 0 || objects.empty())
+        return true;
+
+    bool state_edge = false;
+    for (const auto &object : objects) {
+        if (object.track_id >= 0
+            && (object.track_state == SSV_TRACK_NEW
+                || object.track_state == SSV_TRACK_LOST
+                || object.track_state == SSV_TRACK_DEAD)) {
+            state_edge = true;
+            break;
+        }
+    }
+
+    bool cooldown_expired = false;
+    if (!state_edge) {
+        for (const auto &object : objects) {
+            const auto found = last_published_ms.find(object.track_id);
+            if (found == last_published_ms.end()
+                || now_ms - found->second >= cooldown_ms) {
+                cooldown_expired = true;
+                break;
+            }
+        }
+    }
+
+    if (!state_edge && !cooldown_expired)
+        return false;
+
+    for (const auto &object : objects)
+        last_published_ms[object.track_id] = now_ms;
+
+    // 只保留冷却窗口内的目标，避免长时间运行后 map 无限增长。
+    if (last_published_ms.size() > 256) {
+        for (auto it = last_published_ms.begin();
+             it != last_published_ms.end();) {
+            if (now_ms - it->second >= cooldown_ms)
+                it = last_published_ms.erase(it);
+            else
+                ++it;
+        }
+    }
+    return true;
 }
 
 static gboolean
@@ -242,6 +306,13 @@ ssv_pub_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
             self->source_id, *self->meta, *snapshot)) {
         return GST_FLOW_OK;
     }
+    if (!ssv_pub_should_publish(
+            snapshot->objects,
+            self->publish_cooldown_ms,
+            ssv_steady_now_ms(),
+            self->track_last_published_ms)) {
+        return GST_FLOW_OK;
+    }
     ssv_pub_redis_publish(self, *snapshot);
 
     return GST_FLOW_OK;
@@ -273,6 +344,9 @@ ssv_pub_set_property(GObject *object, guint prop_id,
         g_free(self->stream_key);
         self->stream_key = g_value_dup_string(value);
         break;
+    case PROP_PUBLISH_COOLDOWN_MS:
+        self->publish_cooldown_ms = g_value_get_int(value);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
     }
@@ -298,6 +372,9 @@ ssv_pub_get_property(GObject *object, guint prop_id,
     case PROP_STREAM_KEY:
         g_value_set_string(value, self->stream_key);
         break;
+    case PROP_PUBLISH_COOLDOWN_MS:
+        g_value_set_int(value, self->publish_cooldown_ms);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
     }
@@ -315,6 +392,7 @@ ssv_pub_finalize(GObject *object) {
         redisFree(self->redis_ctx);
     self->meta_owner.reset();
     self->meta_owner.~shared_ptr<SsvSourceMeta>();
+    self->track_last_published_ms.~unordered_map<int, std::int64_t>();
     G_OBJECT_CLASS(ssv_pub_parent_class)->finalize(object);
 }
 
@@ -357,6 +435,14 @@ ssv_pub_class_init(SsvPubClass *klass) {
             "Redis Stream key for detection events",
             "ssv:events", (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+    g_object_class_install_property(gobject_class, PROP_PUBLISH_COOLDOWN_MS,
+        g_param_spec_int("publish-cooldown-ms", "Publish Cooldown (ms)",
+            "Minimum interval between published events for the same track; "
+            "0 disables cooldown",
+            0, G_MAXINT, 30000,
+            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+                          G_PARAM_STATIC_STRINGS)));
+
     gst_element_class_set_static_metadata(element_class,
         "SSV Redis Publisher",
         "Generic/Video",
@@ -380,8 +466,11 @@ ssv_pub_init(SsvPub *self) {
     self->redis_host = g_strdup("localhost");
     self->redis_port = 6379;
     self->stream_key = g_strdup("ssv:events");
+    self->publish_cooldown_ms = 30000;
     self->redis_ctx = nullptr;
     self->meta = nullptr;
+    new (&self->track_last_published_ms)
+        std::unordered_map<int, std::int64_t>();
 }
 
 // ── Plugin registration ────────────────────────────────────────────────
