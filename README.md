@@ -2,7 +2,7 @@
 
 安全帽佩戴视频监测分析系统。当前项目以 GStreamer C++ 插件承载实时视频分析链路，Redis Streams 作为实时链路和 Agent 复核链路之间的异步边界，Python 服务负责事件消费和后续智能复核编排。
 
-`./ssv` 是统一开发入口。shell 负责构建、测试、依赖快照、模型准备和本地服务；长期实时链路由 C++ `ssv-runner` 负责配置校验、pipeline 构建、GTK、错误处理、结构化日志和资源释放。
+`./ssv` 是 Python 统一开发入口。Python 负责命令解析、依赖准备、Meson 编排、运行环境、测试编排、模型准备、本地服务及 Redis 运维；Meson、编译器和 `pkg-config` 等系统工具由 Python 以参数数组调用。长期实时链路由 C++ `ssv-runner` 负责配置校验、pipeline 构建、GTK、错误处理、结构化日志和资源释放。
 
 ## 架构概览
 
@@ -10,7 +10,7 @@
 RTSP / 后续文件输入
     |
     v
-./ssv -> scripts/run.sh -> build/runner/ssv-runner
+./ssv (Python CLI) -> build/runner/ssv-runner
     |
     v
 C++ pipeline 与运行时
@@ -38,8 +38,8 @@ C++ pipeline 与运行时
 - 模型尺寸 `uint8 RGBA NHWC` wrapper 输入；完整原始帧不在加速路径映射到 CPU。
 - Redis Streams 发布插件和 Python Agent 消费基线。
 - Docker Redis 开发环境。
-- `./ssv` 统一入口脚本。
-- C++ runner/插件测试、Agent 单元测试、CLI 与依赖脚本测试。
+- `./ssv` Python 统一入口和 `scripts/ssv_cli` 命令包。
+- C++ runner/插件测试、Agent 单元测试、CLI、依赖和模型服务测试。
 
 尚未完成：各 GPU profile 真机人工验收、完整事件判定、证据输出、真实安全帽专用模型、完整 Agent 状态机、工具调用、知识库和端到端报告闭环。
 
@@ -55,8 +55,8 @@ C++ pipeline 与运行时
 | ONNX Runtime | >= 1.20 | YOLO ONNX 推理 |
 | OpenCV | >= 4.5（managed 默认源码构建 4.10.0） | sparse optical flow GMC；不参与解码、显示或推理预处理 |
 | BLAS + LAPACK | 系统开发包 | managed OpenCV 的宿主数学运行库 |
-| Python | >= 3.12 | Agent 服务 |
-| uv | >= 0.11 | Python 包管理 |
+| Python | >= 3.11 | CLI、依赖、模型服务和 Agent |
+| uv | >= 0.11 | Agent 环境和测试 |
 | Docker + Compose | Docker >= 24 | 本地 Redis |
 
 Debian/Ubuntu:
@@ -73,9 +73,23 @@ sudo apt-get install -y \
   python3 python3-venv docker.io docker-compose-plugin
 ```
 
-`./ssv prepare-model`、`./ssv test` 和默认模型导出还需要 `uv`。请按本机发行版安装
-`uv`，然后确认 `uv --version` 可执行；`./ssv build` 不会替你安装 Python 工具、GPU 驱动或
-Docker 服务。
+基础 CLI 只需要项目 Python 依赖；模型命令需要安装对应 optional extra。`./ssv test` 会运行
+wrapper/manifest 契约测试，因此至少需要 `model` extra，并且还会运行 Agent 测试，所以需要 `uv`。
+首次准备完整开发环境可执行：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ".[dev,model-export]"
+```
+
+仅运行 `./ssv test` 而不使用模型导出命令时，可安装较小的 `model` extra：
+
+```bash
+python -m pip install -e ".[model]"
+```
+
+项目 CLI 不会在运行期间安装 Python 包，也不会替你安装 GPU 驱动或 Docker 服务。
 
 没有发行版包时，可使用官方安装脚本：
 
@@ -194,12 +208,12 @@ cp config/ssv.example.yaml config/ssv.yaml
 
 ### 3. 准备模型
 
-默认示例使用 YOLOv8n。`download-model` 会尝试用 `uv`/`pip` 和 `ultralytics` 导出原始
+默认示例使用 YOLOv8n。`model export` 使用已安装的 `ultralytics` 导出原始
 `models/yolov8n.onnx`，它不是任意模型下载器；已有自己的 ONNX 文件时可以跳过该命令。
 
 ```bash
-./ssv download-model
-./ssv prepare-model \
+./ssv model export
+./ssv model prepare \
   --input models/yolov8n.onnx \
   --output models/yolov8n-preproc.onnx \
   --family yolo \
@@ -211,8 +225,8 @@ cp config/ssv.example.yaml config/ssv.yaml
 `[1,N,6]` 的 `x1,y1,x2,y2,score,class_id`，使用 `--output-format yolo_nx6`。输出格式应按
 实际图结构选择，不能只看模型文件名。
 
-如果手上的模型已经带有 `rgba_u8_nhwc_v1` wrapper metadata，可跳过 `download-model` 和
-`prepare-model`，直接把 `inference.model.path` 指向该 wrapper；仍需确保 `family`、
+如果手上的模型已经带有 `rgba_u8_nhwc_v1` wrapper metadata，可跳过 `model export` 和
+`model prepare`，直接把 `inference.model.path` 指向该 wrapper；仍需确保 `family`、
 `output_format` 和 label map 与模型实际输出一致。
 
 ### 4. 编译并检查插件
@@ -229,11 +243,11 @@ cp config/ssv.example.yaml config/ssv.yaml
 ### 5. 启动 Redis，并先做一次验证
 
 ```bash
-./ssv redis
+./ssv redis start
 ./ssv test
 ```
 
-`./ssv redis` 只启动 Docker Redis，不启动 RTSP 服务。`./ssv test` 会运行契约、C++、CLI 和
+`./ssv redis start` 只启动 Docker Redis，不启动 RTSP 服务。`./ssv test` 会运行契约、C++、CLI 和
 Agent 测试；存在 `config/ssv.yaml` 时还会尝试 30 秒无头 runner smoke，RTSP 不可达时该项
 会以警告结束。要直接运行而不打开窗口，可使用 `./ssv run --headless`。
 
@@ -266,7 +280,13 @@ YAML 中相应的显示开关。`--display` 需要可用的 `DISPLAY` 或 Waylan
 | --- | --- |
 | `./ssv build [--profile auto|cpu|nvidia|intel|amd]` | 准备依赖并按单一 runtime profile 编译 C++ runner、插件和测试 |
 | `./ssv clean` | 删除 Meson 构建目录 `build` |
-| `./ssv redis` | 启动 Docker Redis 开发环境 |
+| `./ssv redis start` | 启动 Docker Redis 开发环境 |
+| `./ssv redis status` | 查看配置 stream 的长度和 consumer group pending 数 |
+| `./ssv redis status --stream-key NAME` | 临时查看指定 stream；也可用 `--host`、`--port`、`--db` 和 `--group` 覆盖连接或消费组 |
+| `./ssv redis clean` | ACK 配置 consumer group 的 pending entries，保留 stream 历史 |
+| `./ssv redis clean --dry-run` | 只统计 pending，不修改 Redis |
+| `./ssv redis clean --stream --yes` | 清理 pending 并删除配置 stream 历史 entries |
+| `./ssv redis stop` | 停止 Docker Redis 开发环境 |
 | `./ssv test` | 运行代码测试和链路冒烟测试后退出 |
 | `./ssv run` | 运行无头实时链路 |
 | `./ssv run --config PATH` | 使用指定的 YAML 配置 |
@@ -276,9 +296,13 @@ YAML 中相应的显示开关。`--display` 需要可用的 `DISPLAY` 或 Waylan
 | `./ssv run --display --display-backend gtkglsink` | 严格使用 GTK GL 显示；也可显式选择 `gtksink` 兼容路径 |
 | `./ssv agent` | 启动 Python Agent 服务 |
 | `./ssv inspect` | 查看插件注册和属性信息 |
-| `./ssv stop` | 停止后台服务 |
-| `./ssv download-model` | 用 `ultralytics` 导出默认 YOLOv8n ONNX 模型 |
-| `./ssv prepare-model ...` | 生成经过校验的 RGBA uint8 wrapper ONNX 模型 |
+| `./ssv model export` | 用 `ultralytics` 导出默认 YOLOv8n ONNX 模型 |
+| `./ssv model prepare ...` | 生成经过校验的 RGBA uint8 wrapper ONNX 模型 |
+| `./ssv model verify ...` | 验证安全帽 YOLO 模型 |
+| `./ssv model manifest ...` | 生成 TensorRT engine manifest |
+
+Redis 管理命令默认读取 YAML 的 `redis` 配置。`--stream-key` 是目标 stream 覆盖；`redis clean`
+中的 `--stream` 只表示同时删除该 stream 的历史数据，必须与 `--yes` 一起使用。
 
 ## 配置
 
@@ -381,7 +405,7 @@ ONNX Runtime 版本由 `--profile` 固定派生，不再接受 `SSV_ONNXRUNTIME_
 正式推理路径不直接接受原始 float NCHW ONNX。先用离线工具生成一个输入为 `uint8 [1,H,W,4]`、layout 为 NHWC 的 wrapper：
 
 ```bash
-./ssv prepare-model \
+./ssv model prepare \
   --input models/yolov8n.onnx \
   --output models/yolov8n-preproc.onnx \
   --family yolo \
@@ -411,7 +435,7 @@ TENSORRT_VERSION=10.16.1.11
 CUDA_RUNTIME_VERSION=13020
 COMPUTE_CAPABILITY=8.9
 
-uv run --isolated --script scripts/model/write_tensorrt_manifest.py \
+./ssv model manifest \
   --wrapper models/yolov8n-preproc.onnx \
   --engine models/yolov8n-preproc.engine \
   --output models/yolov8n-preproc.engine.json \
@@ -464,7 +488,7 @@ inference:
 ./ssv test
 ```
 
-该命令会先跑依赖、wrapper 准备和 TensorRT manifest 契约测试，再跑构建、Meson 测试、CLI 测试和 Python Agent 测试。存在本地运行配置时，最后通过 `scripts/run.sh` 启动一次 30 秒无头 runner smoke；超时向 runner 发送 `SIGINT`，不解析或改写 YAML。没有本地配置时明确跳过这项环境相关检查。
+该命令会先跑依赖、wrapper 准备和 TensorRT manifest 契约测试，再跑构建、Meson 测试、Python CLI 测试和 Python Agent 测试。存在本地运行配置时，最后通过 `./ssv run` 启动一次 30 秒无头 runner smoke；超时向 runner 发送 `SIGINT`，不解析或改写 YAML。没有本地配置时明确跳过这项环境相关检查。
 
 ### 显示调试
 
@@ -499,7 +523,7 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -an \
 ### Redis 调试
 
 ```bash
-./ssv redis
+./ssv redis start
 docker exec ssv-redis redis-cli XLEN ssv:events
 docker exec ssv-redis redis-cli XRANGE ssv:events - + COUNT 5
 ```
@@ -586,13 +610,13 @@ meson test -C build
 cd agent && uv run --extra dev pytest
 
 # wrapper ONNX 准备工具
-uv run --isolated --script tests/ssv_prepare_model_test.py
+python scripts/ssv_cli/tests/ssv_prepare_model_test.py
 
 # TensorRT engine manifest 工具
-uv run --isolated --script tests/ssv_tensorrt_manifest_test.py
+python scripts/ssv_cli/tests/ssv_tensorrt_manifest_test.py
 
-# CLI 脚本测试
-bash tests/ssv_cli_test.sh
+# Python CLI、依赖和模型服务测试
+python3 -m unittest discover -s scripts/ssv_cli/tests -p 'test_*.py'
 ```
 
 涉及 RTSP、显示窗口、Redis 和模型文件的测试依赖本地环境。提交代码前至少运行与改动相关的测试；修改公共元数据、插件属性、配置加载或 Agent 消费逻辑时，应同时运行 C++ 和 Python 测试。
@@ -601,7 +625,7 @@ bash tests/ssv_cli_test.sh
 
 ```text
 site-safety-vision/
-├── ssv                         # 项目统一入口脚本
+├── ssv                         # Python 项目统一入口
 ├── meson.build                 # 根构建文件
 ├── meson.options               # Meson 选项
 ├── runner/                     # C++ 实时运行入口与四个职责模块
@@ -636,8 +660,12 @@ site-safety-vision/
 ├── agent/                      # Python Agent 服务
 ├── config/                     # YAML 配置
 ├── docker/                     # Docker Compose 开发依赖
-├── scripts/                    # build/run/test/redis/agent 等脚本
-├── tests/                      # CLI 脚本测试
+├── scripts/                    # Python CLI、依赖 provider 和模型工具
+│   ├── ssv_cli/                # 命令、服务适配器和 CLI 测试
+│   │   ├── services/dependencies.py # 依赖配置、探针、缓存和快照
+│   │   ├── services/native_build.py # Meson 构建编排
+│   │   └── services/models.py       # 模型工具适配
+│   └── model/                  # 模型准备与 manifest 工具
 └── docs/                       # 中文设计文档、roadmap、后续 spec/plan
 ```
 

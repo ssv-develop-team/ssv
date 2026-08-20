@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11,<3.12"
-# dependencies = [
-#   "onnx==1.18.0",
-# ]
-# ///
 
 from __future__ import annotations
 
@@ -16,11 +10,10 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
-import onnx
-from google.protobuf.message import DecodeError
-from onnx import TensorProto
+onnx: Any
+TensorProto: Any
 
 MANIFEST_SCHEMA = "ssv.tensorrt-engine-manifest"
 MANIFEST_SCHEMA_VERSION = 1
@@ -28,6 +21,16 @@ WRAPPER_CONTRACT = "rgba_u8_nhwc_v1"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 TENSORRT_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\Z")
 COMPUTE_CAPABILITY_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)\Z")
+
+
+def _load_onnx() -> None:
+    global TensorProto, onnx
+
+    import onnx as onnx_module
+    from onnx import TensorProto as tensor_proto
+
+    onnx = onnx_module
+    TensorProto = tensor_proto
 
 
 class ManifestError(RuntimeError):
@@ -56,6 +59,7 @@ def positive_integer(value: str) -> int:
 
 def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = ManifestArgumentParser(
+        prog="./ssv model manifest",
         description="Write an SSV TensorRT engine manifest.",
         allow_abbrev=False,
     )
@@ -89,6 +93,9 @@ def required_metadata(metadata: dict[str, str], key: str) -> str:
 
 
 def load_wrapper_contract(path: Path) -> dict[str, object]:
+    _load_onnx()
+    from google.protobuf.message import DecodeError
+
     try:
         model = onnx.load_model(path, load_external_data=False)
     except (OSError, DecodeError) as error:
@@ -235,7 +242,7 @@ def main(arguments: list[str] | None = None) -> int:
         print(
             f"event=fatal_error exit_code={error.exit_code}"
             f" stage={format_log_value(error.stage)}"
-            " source_id=prepare-tensorrt-manifest"
+            " source_id=model-manifest"
             f" error={format_log_value(str(error))}",
             file=sys.stderr,
         )

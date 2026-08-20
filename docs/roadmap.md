@@ -9,7 +9,7 @@
 1. 按里程碑推进，每个里程碑进入实现前必须有中文 spec 和 plan。
 2. 每个里程碑拆成 4 个左右任务包，成员按任务包领取，尽量避免多人同时修改同一文件。
 3. 跨领域标签的接口变更必须先更新中文 spec，再进入实现。
-4. 脚本继续承担构建、清理、依赖检查、本地 Redis、调试入口和测试编排；长期运行时错误处理后续由 C++ pipeline runner 承担。
+4. Python `./ssv` 入口统一承担构建、清理、依赖检查、本地 Redis、调试入口和测试编排；长期运行时由 C++ pipeline runner 承担。
 5. Python Agent 不进入每帧同步检测链路，只消费 Redis 中的事件和证据。
 
 ## 文档规则
@@ -27,11 +27,11 @@ spec 和 plan 使用中文；代码标识、命令、路径、配置键保持英
 
 | 标签 | 领域边界 | 主要目录 | 关键接口 |
 | --- | --- | --- | --- |
-| T1 | 实时视频链路与运行时：输入、解码、显示、pipeline runner、运行状态 | `scripts/`、`config/`、后续 runner | YAML 配置、GStreamer pipeline、退出码、日志字段 |
+| T1 | 实时视频链路与运行时：输入、解码、显示、pipeline runner、运行状态 | `scripts/`、`config/`、`runner/` | YAML 配置、GStreamer pipeline、退出码、日志字段 |
 | T2 | 感知算法与元数据：YOLO 推理、后处理、检测元数据、跟踪、overlay | `gst/ssv-infer`、`gst/ssv-track`、`gst/ssv-overlay`、`gst/ssv-common`、`gst/tests` | `ssv_meta`、插件属性、测试素材 |
 | T3 | 事件与异步边界：事件判定、证据输出、Redis 消息、事件状态 | `gst/ssv-pub`、后续事件/证据模块、`config/` | 事件 schema、证据路径、Redis Streams |
 | T4 | Agent 与知识复核：事件消费、上下文构造、状态机、工具路由、模型 provider | `agent/`、后续知识库/工具模块 | Agent 输入输出、工具协议、provider 抽象 |
-| T5 | 工程集成与质量：测试矩阵、文档模板、CI、本地验证、demo 和交付检查 | `tests/`、`docs/`、构建脚本、CI 配置 | 测试命令、集成验收、文档和发布检查清单 |
+| T5 | 工程集成与质量：测试矩阵、文档模板、CI、本地验证、demo 和交付检查 | `scripts/ssv_cli/`、`docs/`、CI 配置 | 测试命令、集成验收、文档和发布检查清单 |
 
 领域标签只说明任务影响范围，不绑定具体成员。一个成员可以领取跨多个领域的任务包；同一领域也可以被多人并行处理，只要文件边界、接口契约和合流顺序清楚。
 
@@ -49,24 +49,21 @@ spec 和 plan 使用中文；代码标识、命令、路径、配置键保持英
 
 已经具备：
 
-- `./ssv build` / `./ssv clean` / `./ssv test` / `./ssv run` / `./ssv run --display` / `./ssv agent` / `./ssv redis` / `./ssv inspect` / `./ssv stop`。
+- `./ssv build` / `./ssv clean` / `./ssv test` / `./ssv run` / `./ssv run --display` / `./ssv agent` / `./ssv redis start` / `./ssv redis stop` / `./ssv inspect` / `./ssv model ...`。
 - Meson 构建输出目录固定为 `build`。
 - GStreamer C++ 插件构建基线：`ssv-template`、`ssv-infer`、`ssv-track`、`ssv-pub`、`ssv-overlay`、`ssv-common`。
 - Python Agent 服务、配置加载、Redis Streams 消费基线。
 - Docker Redis 开发环境。
-- C++ 插件单元测试、Agent 单元测试和 CLI 脚本测试基线。
-- GitHub Actions CI 基线：PR 到 `main` 和 push 到 `main` 时运行 shell 语法检查与 `./ssv test`；CI 不依赖 RTSP、模型 smoke 或显示环境。
+- C++ 插件单元测试、Agent 单元测试以及 CLI、依赖和模型服务测试基线。
+- GitHub Actions CI 基线：PR 到 `main` 和 push 到 `main` 时运行 Python CLI 检查与 `./ssv test`；CI 不依赖 RTSP、模型 smoke 或显示环境。
 
 已识别缺口：
 
-- `scripts/pipeline.sh` 仍使用 `gst-launch-1.0` 拼接运行链路。
-- YAML 配置已存在，但部分运行参数仍由 `.env` 和脚本环境变量覆盖。
 - 当前模型 `models/yolov8n.onnx` 是 COCO 模型，只能验证 `person` 检测链路，不能直接判断安全帽。
 - 事件判定、证据输出、完整 Agent 状态机尚未完成。
-- 生产级 C++ pipeline runner 尚未完成。
 
-2026-07-31 增量状态：长期实时链路已迁移到 C++ runner，生产入口不再使用
-`scripts/pipeline.sh`；严格配置、VA/DMABuf/GL memory contract、ONNX Runtime Provider、
+2026-07-31 增量状态：长期实时链路已迁移到 C++ runner，生产入口通过 `./ssv run` 调用
+runner；严格配置、VA/DMABuf/GL memory contract、ONNX Runtime Provider、
 模型尺寸 host boundary、GTK 独立框层、结构化日志和退出码已完成自动回归。
 原生 Linux 各 GPU profile 的真机强验收仍待分机记录；WSL2/WSLg 只完成了 GTK sink
 与 GL context 的兼容性诊断，不作为 VA 强验收。
@@ -123,7 +120,7 @@ M8 端到端 demo 和交付收口
 
 - `ssvinfer` 已具备 ONNX Runtime 加载、BGR 输入、letterbox、CHW、置信度过滤、类别过滤、NMS、`mock-detect` 和异步推理能力。
 - `SsvDetection`、`SsvFrameDetections` 和检测结果写入 `SsvDetectionStore` 的基础结构已存在。
-- `scripts/pipeline.sh` 和 `./ssv test` 已具备真实模型 smoke 的环境依赖分支；本阶段不重复实现这些基础能力，只补齐说明、契约和验收。
+- `./ssv run` 和 `./ssv test` 已具备真实模型 smoke 的环境依赖分支，运行参数统一来自 YAML 配置；本阶段不重复实现这些基础能力，只补齐说明、契约和验收。
 
 建议文档：
 
@@ -137,7 +134,7 @@ M8 端到端 demo 和交付收口
 | A | T2 | YOLO 推理链路梳理：基于现有 `ssvinfer` 分析 ONNX Runtime 加载、BGR 输入、letterbox、CHW、置信度过滤、类别过滤和 NMS | YOLO 推理链路说明，明确当前支持的输出格式和限制 | `./ssv build`、`meson test -C build` |
 | B | T2 | 检测元数据契约：基于现有结构固化 `SsvDetection`、`SsvFrameDetections` 字段语义和坐标规则，补齐边界测试 | `ssv_meta` 检测字段契约，坐标统一为归一化坐标 | `gst/tests` 覆盖元数据基本行为和异常输入边界 |
 | C | T2 | 安全帽训练最小闭环：定义类别和 label map，用小规模数据集跑通 YOLO baseline 训练、ONNX 导出和单图推理 | 类别表、class_id 顺序、数据目录约定、训练命令、导出命令、ONNX 产物说明 | 不以准确率验收，至少完成数据到 ONNX 的闭环；如时间允许接入 `ssvinfer` smoke |
-| D | T1/T3/T5 | 工程验证与下游输入：整理现有 mock/真实模型 smoke，梳理 `scripts/pipeline.sh` 参数，定义事件输入草案，形成 M1 验收清单 | mock/真实模型验证命令、运行参数清单、事件输入字段草案、测试矩阵增量 | mock smoke 和真实模型 smoke 的环境边界清楚；文档评审通过 |
+| D | T1/T3/T5 | 工程验证与下游输入：整理 `./ssv run` 与 YAML 配置中的 mock/真实模型 smoke 参数，定义事件输入草案，形成 M1 验收清单 | mock/真实模型验证命令、YAML 运行参数清单、事件输入字段草案、测试矩阵增量 | mock smoke 和真实模型 smoke 的环境边界清楚；文档评审通过 |
 
 冻结接口：
 
@@ -398,7 +395,7 @@ M8 端到端 demo 和交付收口
 
 ## M8: 端到端 demo 和交付收口
 
-**目标**：把 M1-M7 的能力合流成可演示、可排障、可交接的单机端到端原型。现有 `gst-launch` + shell fallback 可以作为演示基线，本阶段只在确有必要时引入 C++ pipeline runner 第一版。
+**目标**：把 M1-M7 的能力合流成可演示、可排障、可交接的单机端到端原型。以 `./ssv run` 调用 C++ pipeline runner 作为演示和长期运行基线，收口 headless、display、Redis、Agent 和证据链路。
 
 建议文档：
 
@@ -409,7 +406,7 @@ M8 端到端 demo 和交付收口
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
-| A | T1/T5 | 演示运行时：收口现有 `gst-launch` fallback 演示路径，并评估是否需要 C++ pipeline runner 第一版 | demo 运行命令、运行时边界说明 | runner 或 fallback 路径至少一个可稳定演示 |
+| A | T1/T5 | 演示运行时：收口 `./ssv run` 的 headless/display 路径和 YAML 配置，确认 C++ pipeline runner 的退出码与日志边界 | demo 运行命令、运行时边界说明 | `./ssv run` 至少有一条路径可稳定演示 |
 | B | T2/T3 | 演示事件：可重复生成未佩戴、低置信度和检测冲突事件 | demo 配置、事件样例、证据样例 | Redis 中可看到结构化事件和证据路径 |
 | C | T4 | 演示 Agent：跑通消费、证据读取、OpenAI/mock 复核、规则解释、结果回写 | demo Agent 流程、复核结果样例 | 单命令或清晰步骤可复现 |
 | D | T5 | 交付文档：更新 README、运行手册、故障排查、测试矩阵和发布检查清单 | 交付清单和验收脚本 | 新成员可按文档复现 demo |
@@ -458,7 +455,7 @@ M8 端到端 demo 和交付收口
 | C++ 插件、元数据、Meson | `./ssv build` | 构建共享库、插件和测试 |
 | C++ 单元测试 | `meson test -C build` | 覆盖插件注册、元数据和 C++ 测试 |
 | Python Agent | `cd agent && uv run --extra dev pytest` | 覆盖 Agent 配置、消费和服务测试 |
-| CLI/脚本 | `bash tests/ssv_cli_test.sh` | 覆盖 `./ssv` CLI 和脚本入口 |
+| CLI/依赖/模型服务 | `python3 -m unittest discover -s scripts/ssv_cli/tests -p 'test_*.py'` | 覆盖 `./ssv` CLI、依赖策略、模型服务和 Redis 管理入口 |
 | 综合测试入口 | `./ssv test` | 代码测试和链路 smoke 编排，部分项依赖 RTSP、模型和 Redis |
 | 本地显示链路 | `./ssv run --display` | 依赖视频源、模型、Redis 和显示环境 |
 

@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11,<3.12"
-# dependencies = [
-#   "numpy==2.2.6",
-#   "onnx==1.18.0",
-#   "onnxruntime==1.22.1",
-# ]
-# ///
 
 from __future__ import annotations
 
@@ -19,17 +11,40 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
-import numpy as np
-import onnx
-import onnxruntime as ort
-from onnx import TensorProto, helper, numpy_helper, shape_inference
+np: Any
+onnx: Any
+ort: Any
+TensorProto: Any
+helper: Any
+numpy_helper: Any
+shape_inference: Any
 
 WRAPPER_CONTRACT = "rgba_u8_nhwc_v1"
 TOOL_NAME = "ssv.prepare_wrapper"
 TOOL_VERSION = "1.0.0"
 SUPPORTED_OUTPUT_FORMATS = ("yolov8", "yolo_nx6")
+
+
+def _load_dependencies() -> None:
+    global TensorProto, helper, np, numpy_helper, onnx, ort, shape_inference
+
+    import numpy as numpy_module
+    import onnx as onnx_module
+    import onnxruntime as ort_module
+    from onnx import TensorProto as tensor_proto
+    from onnx import helper as helper_module
+    from onnx import numpy_helper as numpy_helper_module
+    from onnx import shape_inference as shape_inference_module
+
+    np = numpy_module
+    onnx = onnx_module
+    ort = ort_module
+    TensorProto = tensor_proto
+    helper = helper_module
+    numpy_helper = numpy_helper_module
+    shape_inference = shape_inference_module
 
 
 class PrepareModelError(RuntimeError):
@@ -77,7 +92,7 @@ class SetTrueOnce(argparse.Action):
 
 def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = PrepareModelArgumentParser(
-        prog="./ssv prepare-model",
+        prog="./ssv model prepare",
         description="Prepare an SSV RGBA uint8 wrapper ONNX model.",
         allow_abbrev=False,
     )
@@ -126,12 +141,13 @@ def format_fatal_error(error: PrepareModelError) -> str:
     return (
         f"event=fatal_error exit_code={error.exit_code}"
         f" stage={format_log_value(error.stage)}"
-        " source_id=prepare-model"
+        " source_id=model-prepare"
         f" error={format_log_value(str(error))}"
     )
 
 
 def require_source_contract(model: onnx.ModelProto) -> tuple[str, int, int]:
+    _load_dependencies()
     if len(model.graph.input) != 1:
         raise PrepareModelError(
             f"input model must have exactly one graph input, got {len(model.graph.input)}"
@@ -215,6 +231,7 @@ def set_wrapper_metadata(
 def build_wrapper_model(
     source_bytes: bytes, *, family: str, output_format: str
 ) -> tuple[onnx.ModelProto, int, int, str]:
+    _load_dependencies()
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
     try:
         model = onnx.load_model_from_string(source_bytes)
@@ -305,6 +322,7 @@ def static_tensor_dimensions(value: onnx.ValueInfoProto) -> list[int]:
 
 
 def node_attribute(node: onnx.NodeProto, name: str) -> object:
+    _load_dependencies()
     for attribute in node.attribute:
         if attribute.name == name:
             return helper.get_attribute_value(attribute)
@@ -312,6 +330,7 @@ def node_attribute(node: onnx.NodeProto, name: str) -> object:
 
 
 def validate_wrapper_contract(model: onnx.ModelProto) -> tuple[int, int]:
+    _load_dependencies()
     metadata = {item.key: item.value for item in model.metadata_props}
     if len(metadata) != len(model.metadata_props):
         raise PrepareModelError("wrapper metadata contains duplicate keys")
@@ -430,6 +449,7 @@ def run_cpu_smoke(
 
 
 def validate_and_serialize(model: onnx.ModelProto, *, height: int, width: int) -> bytes:
+    _load_dependencies()
     try:
         onnx.checker.check_model(model, full_check=True)
         inferred = shape_inference.infer_shapes(
@@ -454,6 +474,7 @@ def validate_and_serialize(model: onnx.ModelProto, *, height: int, width: int) -
 
 
 def validate_wrapper_model(model_bytes: bytes) -> None:
+    _load_dependencies()
     try:
         model = onnx.load_model_from_string(model_bytes)
         onnx.checker.check_model(model, full_check=True)
@@ -616,6 +637,7 @@ def publish_wrapper(output: Path, candidate_bytes: bytes, *, force: bool) -> str
 
 
 def prepare_wrapper(options: argparse.Namespace) -> tuple[str, str]:
+    _load_dependencies()
     try:
         source_bytes = options.input.read_bytes()
     except OSError as error:

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssv-cli"
+version = "0.1.0"
+description = "Site Safety Vision development CLI"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "redis>=5.0",
+]
+
+[project.optional-dependencies]
+model = [
+    "numpy>=2.0",
+    "onnx>=1.18",
+    "onnxruntime>=1.22",
+]
+model-export = [
+    "numpy>=2.0",
+    "onnx>=1.18",
+    "onnxruntime>=1.22",
+    "ultralytics>=8.3",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools]
+packages = [
+    "scripts",
+    "scripts.model",
+    "scripts.ssv_cli",
+    "scripts.ssv_cli.commands",
+    "scripts.ssv_cli.services",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/ssv_cli/tests"]

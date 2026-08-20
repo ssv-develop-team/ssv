@@ -66,15 +66,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/downloads
-          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/deps/versions.sh', 'scripts/deps/*-managed.sh') }}
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ssv_cli/services/dependencies.py') }}
 
       - name: Install Python tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install uv PyYAML
+          python -m pip install -e ".[dev,model-export]"
+          python -m pip install uv
 
-      - name: Check shell syntax
-        run: bash -n ssv scripts/*.sh scripts/deps/*.sh tests/*.sh
+      - name: Check Python CLI
+        run: |
+          python -m compileall -q ssv scripts
+          ./ssv --help >/dev/null
 
       - name: Run test suite
         run: ./ssv test

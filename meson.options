@@ -6,7 +6,7 @@ option('opencv_mode', type : 'combo', choices : ['enabled', 'disabled'], value :
   description : 'Build OpenCV-based GMC when the local OpenCV SDK is enabled')
 
 option('deps_runtime_path', type : 'string', value : '',
-  description : 'Colon-separated runtime library path resolved by scripts/deps.sh')
+  description : 'Colon-separated runtime library path resolved by the Python dependency service')
 
 option('onnxruntime_profile', type : 'combo',
   choices : ['cpu', 'nvidia', 'intel', 'amd'], value : 'cpu',

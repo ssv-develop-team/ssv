@@ -3,8 +3,6 @@ import argparse
 import json
 from pathlib import Path
 
-from ultralytics import YOLO
-
 
 def normalize_names(names):
     if isinstance(names, dict):
@@ -13,6 +11,8 @@ def normalize_names(names):
 
 
 def verify_model(path, source, export):
+    from ultralytics import YOLO
+
     item = {
         "path": str(path),
         "load_ok": False,
