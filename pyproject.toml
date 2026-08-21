@@ -35,6 +35,7 @@ packages = [
     "scripts.model",
     "scripts.ssv_cli",
     "scripts.ssv_cli.commands",
+    "scripts.ssv_cli.dependencies",
     "scripts.ssv_cli.services",
 ]
 

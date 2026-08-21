@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace ssv {
 
@@ -54,6 +55,11 @@ struct SsvDisplayRect {
 
 [[nodiscard]] std::string ssv_display_overlay_label(
     const SsvOverlayBox &box);
+
+[[nodiscard]] SsvGlBackend ssv_display_resolve_auto_gl_backend(
+    std::string_view session_type,
+    bool has_x11_display,
+    bool has_wayland_display);
 
 class SsvDisplayWindowError final : public std::runtime_error {
 public:

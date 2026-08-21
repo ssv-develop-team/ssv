@@ -76,6 +76,19 @@ def make_unsupported_runtime_model(path: Path) -> None:
     onnx.save_model(model, path)
 
 
+def rewrite_as_legacy_wrapper(path: Path) -> None:
+    model = onnx.load_model(path)
+    cast, gather, divide, transpose, *original_nodes = model.graph.node
+    wrapper_input = model.graph.input[0].name
+    gather.input[0] = wrapper_input
+    cast.input[0] = gather.output[0]
+    divide.input[0] = cast.output[0]
+    del model.graph.node[:]
+    model.graph.node.extend([gather, cast, divide, transpose, *original_nodes])
+    del model.graph.value_info[:]
+    onnx.save_model(model, path)
+
+
 class PrepareModelTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -161,7 +174,12 @@ class PrepareModelTest(unittest.TestCase):
         self.assertEqual(dimensions, [1, 2, 3, 4])
 
         operation_types = [node.op_type for node in wrapper.graph.node]
-        self.assertEqual(operation_types[:4], ["Gather", "Cast", "Div", "Transpose"])
+        self.assertEqual(operation_types[:4], ["Cast", "Gather", "Div", "Transpose"])
+        cast, gather, divide, transpose = wrapper.graph.node[:4]
+        self.assertEqual(cast.input[0], wrapper_input.name)
+        self.assertEqual(gather.input[0], cast.output[0])
+        self.assertEqual(divide.input[0], gather.output[0])
+        self.assertEqual(transpose.input[0], divide.output[0])
         self.assertNotIn("Resize", operation_types)
         self.assertNotIn("Pad", operation_types)
 
@@ -179,7 +197,7 @@ class PrepareModelTest(unittest.TestCase):
                 "ssv.wrapper.output_format": "yolov8",
                 "ssv.wrapper.source_sha256": hashlib.sha256(source_before).hexdigest(),
                 "ssv.wrapper.tool": "ssv.prepare_wrapper",
-                "ssv.wrapper.tool_version": "1.0.0",
+                "ssv.wrapper.tool_version": "1.1.0",
                 "ssv.wrapper.width": "3",
             },
         )
@@ -273,11 +291,15 @@ class PrepareModelTest(unittest.TestCase):
         self.assertEqual(output.read_bytes(), original_output)
         self.assertEqual(output.stat().st_mtime_ns, original_mtime)
 
+        rewrite_as_legacy_wrapper(output)
+        legacy_output = output.read_bytes()
+        self.assertNotEqual(legacy_output, original_output)
+
         refused = self.run_prepare(second_source, output)
         self.assertEqual(refused.returncode, 4, refused.stderr)
         self.assertIn("event=fatal_error", refused.stderr)
         self.assertIn("exit_code=4", refused.stderr)
-        self.assertEqual(output.read_bytes(), original_output)
+        self.assertEqual(output.read_bytes(), legacy_output)
 
         replaced = self.run_prepare(second_source, output, "--force")
         self.assertEqual(replaced.returncode, 0, replaced.stderr)

@@ -7,8 +7,8 @@ import shlex
 from pathlib import Path
 
 from ..context import ProjectContext
+from ..dependencies import SNAPSHOT_KEYS
 from ..output import CliError
-from .dependencies import SNAPSHOT_KEYS
 
 _SNAPSHOT_LINE = re.compile(r"^([A-Z0-9_]+)=(.*)$")
 _UNSAFE = (";", "`", "&", "|", "<", ">", "$(")

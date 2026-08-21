@@ -271,6 +271,17 @@ YAML 中相应的显示开关。`--display` 需要可用的 `DISPLAY` 或 Waylan
 ./ssv run --display --display-backend gtksink
 ```
 
+`display.gl_backend: auto` 在明确的 Wayland 会话（`XDG_SESSION_TYPE=wayland`）中使用
+Wayland；在同时存在两个显示环境但未声明 Wayland 会话的 WSLg/远程桌面环境中优先使用
+X11。也可以临时显式选择后端：
+
+```bash
+GDK_BACKEND=x11 ./ssv run --display --overlay
+```
+
+或将 YAML 中的 `display.gl_backend` 设置为 `x11` 或 `wayland`。窗口关闭和窗口管理器呈现
+仍由 GTK 主循环负责。
+
 按 `Ctrl+C` 退出长期运行的 runner。无桌面或 SSH 会话使用 `--headless`；不要把 GTK 弹窗
 问题误判为 ONNX Runtime 或 Redis 问题。
 

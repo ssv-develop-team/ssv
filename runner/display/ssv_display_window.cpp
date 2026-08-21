@@ -102,6 +102,20 @@ std::string ssv_display_overlay_label(const SsvOverlayBox &box)
     return label.data();
 }
 
+SsvGlBackend ssv_display_resolve_auto_gl_backend(
+    std::string_view session_type,
+    bool has_x11_display,
+    bool has_wayland_display)
+{
+    if (session_type == "wayland" && has_wayland_display)
+        return SsvGlBackend::Wayland;
+    if (has_x11_display)
+        return SsvGlBackend::X11;
+    if (has_wayland_display)
+        return SsvGlBackend::Wayland;
+    return SsvGlBackend::Auto;
+}
+
 namespace {
 
 struct DisplayUpdate {
@@ -204,6 +218,7 @@ public:
         }
         on_close_ = std::move(on_close);
         gtk_widget_show_all(window_);
+        gtk_window_present(GTK_WINDOW(window_));
     }
 
     void post(DisplayUpdate update)
@@ -622,7 +637,22 @@ private:
 
 void SsvDisplayWindow::initialize(SsvGlBackend gl_backend)
 {
-    switch (gl_backend) {
+    SsvGlBackend selected_backend = gl_backend;
+    const auto environment_is_set = [](const char *name) {
+        const auto *value = g_getenv(name);
+        return value != nullptr && *value != '\0';
+    };
+    if (gl_backend == SsvGlBackend::Auto
+        && !environment_is_set("GDK_BACKEND")) {
+        const auto *session_type = g_getenv("XDG_SESSION_TYPE");
+        selected_backend = ssv_display_resolve_auto_gl_backend(
+            session_type != nullptr ? std::string_view(session_type)
+                                    : std::string_view {},
+            environment_is_set("DISPLAY"),
+            environment_is_set("WAYLAND_DISPLAY"));
+    }
+
+    switch (selected_backend) {
     case SsvGlBackend::Auto:
         break;
     case SsvGlBackend::X11:

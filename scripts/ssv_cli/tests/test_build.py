@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.ssv_cli.context import ProjectContext
+from scripts.ssv_cli.dependencies import DependencySnapshot, write_snapshot
 from scripts.ssv_cli.output import CliError
-from scripts.ssv_cli.services.dependencies import DependencySnapshot
 from scripts.ssv_cli.services.native_build import NativeBuildService
 
 
@@ -43,8 +43,6 @@ class FakeDependencyManager:
         return None
 
     def prepare(self, _profile: str, *, pending_path: Path) -> DependencySnapshot:
-        from scripts.ssv_cli.services.dependencies import write_snapshot
-
         write_snapshot(pending_path, self.dependency_snapshot)
         return self.dependency_snapshot
 

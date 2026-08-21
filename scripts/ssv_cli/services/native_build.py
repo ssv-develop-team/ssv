@@ -10,9 +10,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..context import ProjectContext
+from ..dependencies import DependencySnapshot, load_dependency_manager
 from ..output import CliError, info, warn
 from ..process import require_command, run_command
-from .dependencies import DependencySnapshot, load_dependency_manager
 
 BUILD_PLUGINS = (
     ("gst/ssv-template", "libgstssvtemplate.so"),

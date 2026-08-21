@@ -23,7 +23,7 @@ shape_inference: Any
 
 WRAPPER_CONTRACT = "rgba_u8_nhwc_v1"
 TOOL_NAME = "ssv.prepare_wrapper"
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 SUPPORTED_OUTPUT_FORMATS = ("yolov8", "yolo_nx6")
 
 
@@ -242,8 +242,8 @@ def build_wrapper_model(
     source_input_name, height, width = require_source_contract(model)
     rgba_input = unique_graph_name(model, "ssv.wrapper.rgba")
     channel_indices = unique_graph_name(model, "ssv.wrapper.rgb_indices")
-    gathered = unique_graph_name(model, "ssv.wrapper.rgb_u8")
-    casted = unique_graph_name(model, "ssv.wrapper.rgb_f32")
+    gathered = unique_graph_name(model, "ssv.wrapper.rgb_f32")
+    casted = unique_graph_name(model, "ssv.wrapper.rgba_f32")
     divisor = unique_graph_name(model, "ssv.wrapper.divisor")
     normalized = unique_graph_name(model, "ssv.wrapper.normalized")
 
@@ -252,22 +252,22 @@ def build_wrapper_model(
     model.graph.node.extend(
         [
             helper.make_node(
-                "Gather",
-                [rgba_input, channel_indices],
-                [gathered],
-                axis=3,
-                name="ssv.wrapper.gather_rgb",
-            ),
-            helper.make_node(
                 "Cast",
-                [gathered],
+                [rgba_input],
                 [casted],
                 to=TensorProto.FLOAT,
                 name="ssv.wrapper.cast_float",
             ),
             helper.make_node(
+                "Gather",
+                [casted, channel_indices],
+                [gathered],
+                axis=3,
+                name="ssv.wrapper.gather_rgb",
+            ),
+            helper.make_node(
                 "Div",
-                [casted, divisor],
+                [gathered, divisor],
                 [normalized],
                 name="ssv.wrapper.normalize",
             ),
@@ -329,7 +329,9 @@ def node_attribute(node: onnx.NodeProto, name: str) -> object:
     raise PrepareModelError(f"wrapper {node.op_type} node is missing attribute {name}")
 
 
-def validate_wrapper_contract(model: onnx.ModelProto) -> tuple[int, int]:
+def validate_wrapper_contract(
+    model: onnx.ModelProto, *, allow_legacy_graph: bool = False
+) -> tuple[int, int]:
     _load_dependencies()
     metadata = {item.key: item.value for item in model.metadata_props}
     if len(metadata) != len(model.metadata_props):
@@ -384,25 +386,37 @@ def validate_wrapper_contract(model: onnx.ModelProto) -> tuple[int, int]:
     if static_tensor_dimensions(wrapper_input) != [1, height, width, 4]:
         raise PrepareModelError("wrapper input must match uint8 [1,H,W,4] metadata")
 
-    if [node.op_type for node in model.graph.node[:4]] != [
-        "Gather",
-        "Cast",
-        "Div",
-        "Transpose",
-    ]:
-        raise PrepareModelError(
-            "wrapper graph must begin with Gather, Cast, Div, and Transpose"
-        )
-    gather, cast, divide, transpose = model.graph.node[:4]
-    if (
-        gather.input[0] != wrapper_input.name
-        or gather.output[0] != cast.input[0]
-        or cast.output[0] != divide.input[0]
-        or divide.output[0] != transpose.input[0]
+    nodes = model.graph.node[:4]
+    operations = [node.op_type for node in nodes]
+    is_legacy_graph = operations == ["Gather", "Cast", "Div", "Transpose"]
+    if operations != ["Cast", "Gather", "Div", "Transpose"] and not (
+        allow_legacy_graph and is_legacy_graph
     ):
         raise PrepareModelError(
-            "wrapper preprocessing nodes are not connected in order"
+            "wrapper graph must begin with Cast, Gather, Div, and Transpose"
         )
+    if is_legacy_graph:
+        gather, cast, divide, transpose = nodes
+        if (
+            gather.input[0] != wrapper_input.name
+            or gather.output[0] != cast.input[0]
+            or cast.output[0] != divide.input[0]
+            or divide.output[0] != transpose.input[0]
+        ):
+            raise PrepareModelError(
+                "wrapper preprocessing nodes are not connected in legacy order"
+            )
+    else:
+        cast, gather, divide, transpose = nodes
+        if (
+            cast.input[0] != wrapper_input.name
+            or cast.output[0] != gather.input[0]
+            or gather.output[0] != divide.input[0]
+            or divide.output[0] != transpose.input[0]
+        ):
+            raise PrepareModelError(
+                "wrapper preprocessing nodes are not connected in order"
+            )
     if node_attribute(gather, "axis") != 3:
         raise PrepareModelError("wrapper Gather axis must be 3")
     if node_attribute(cast, "to") != TensorProto.FLOAT:
@@ -482,7 +496,9 @@ def validate_wrapper_model(model_bytes: bytes) -> None:
             model, check_type=True, strict_mode=True, data_prop=False
         )
         onnx.checker.check_model(inferred, full_check=True)
-        height, width = validate_wrapper_contract(inferred)
+        height, width = validate_wrapper_contract(
+            inferred, allow_legacy_graph=True
+        )
         inferred_bytes = inferred.SerializeToString(deterministic=True)
         run_cpu_smoke(
             inferred_bytes,

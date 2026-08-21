@@ -1,6 +1,7 @@
 #include "display/ssv_display_window.hpp"
 #include "pipeline/ssv_pipeline_instance.hpp"
 
+#include <gtk/gtk.h>
 #include <gst/gst.h>
 
 #include <cassert>
@@ -57,6 +58,20 @@ void test_display_spec_owns_source_and_overlay_values()
     assert(spec.source_context->source_id() == "owned-source");
     assert(spec.gl_backend == ssv::SsvGlBackend::Wayland);
     assert(spec.backend == ssv::SsvResolvedDisplayBackend::GtkGlSink);
+}
+
+void test_auto_backend_selection()
+{
+    using ssv::SsvGlBackend;
+    const auto resolve = ssv::ssv_display_resolve_auto_gl_backend;
+
+    assert(resolve("", true, true) == SsvGlBackend::X11);
+    assert(resolve("x11", true, true) == SsvGlBackend::X11);
+    assert(resolve("wayland", true, true) == SsvGlBackend::Wayland);
+    assert(resolve("wayland", true, false) == SsvGlBackend::X11);
+    assert(resolve("", true, false) == SsvGlBackend::X11);
+    assert(resolve("", false, true) == SsvGlBackend::Wayland);
+    assert(resolve("", false, false) == SsvGlBackend::Auto);
 }
 
 void test_window_rejects_missing_attachment()
@@ -164,6 +179,45 @@ void test_window_borrow_survives_attachment_move_and_releases_probe()
     }
     assert(sink_finalized);
     assert(timing_pad_finalized);
+}
+
+void test_window_show_presents_top_level_window()
+{
+    GstElement *sink = gst_element_factory_make(
+        "gtksink", "show-window-widget-output");
+    if (sink == nullptr) {
+        std::fprintf(
+            stderr,
+            "display integration skipped: gtksink unavailable\n");
+        return;
+    }
+    GstPad *timing_pad = gst_pad_new("show-window-timing", GST_PAD_SRC);
+    assert(timing_pad != nullptr);
+    ssv::SsvDisplayAttachment attachment(sink, timing_pad);
+    gst_object_unref(timing_pad);
+    gst_object_unref(sink);
+
+    const std::string title = "Site Safety Vision - show-window-test";
+    auto spec = make_display_spec("show-window-test");
+    auto window = ssv::SsvDisplayWindow::create(spec, &attachment);
+    window->show([] {});
+    while (g_main_context_iteration(nullptr, FALSE)) {
+    }
+
+    bool found_visible_window = false;
+    GList *toplevels = gtk_window_list_toplevels();
+    for (GList *node = toplevels; node != nullptr; node = node->next) {
+        auto *toplevel = GTK_WINDOW(node->data);
+        const char *window_title = gtk_window_get_title(toplevel);
+        if (window_title != nullptr && title == window_title) {
+            found_visible_window = gtk_widget_get_visible(
+                GTK_WIDGET(toplevel))
+                && gtk_widget_get_mapped(GTK_WIDGET(toplevel));
+        }
+    }
+    g_list_free(toplevels);
+    assert(found_visible_window);
+    window->close();
 }
 
 void test_layout_maps_normalized_boxes_inside_letterboxed_video()
@@ -319,6 +373,7 @@ int main()
 {
     gst_init(nullptr, nullptr);
     test_display_spec_owns_source_and_overlay_values();
+    test_auto_backend_selection();
     test_window_rejects_missing_attachment();
     test_window_rejects_mismatched_source_context();
     test_window_falls_back_to_source_id_without_context();
@@ -328,7 +383,9 @@ int main()
     test_layout_rejects_non_positive_viewport_or_video_size();
     test_layout_clamps_partially_visible_boxes_and_rejects_invalid_boxes();
     test_overlay_label_always_includes_track_id();
-    if (initialize_display_integration())
+    if (initialize_display_integration()) {
         test_window_borrow_survives_attachment_move_and_releases_probe();
+        test_window_show_presents_top_level_window();
+    }
     return 0;
 }

@@ -5,11 +5,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from scripts.ssv_cli.context import ProjectContext
-from scripts.ssv_cli.output import CliError
-from scripts.ssv_cli.services.dependencies import (
-    _ORT_PROBE_SOURCE,
+from scripts.ssv_cli.dependencies import (
     DependencyConfig,
     DependencyManager,
     DependencySnapshot,
@@ -19,7 +18,17 @@ from scripts.ssv_cli.services.dependencies import (
     validate_provider_set,
     write_snapshot,
 )
+from scripts.ssv_cli.dependencies.onnxruntime import _ORT_PROBE_SOURCE, OnnxRuntimeProvider
+from scripts.ssv_cli.dependencies.tensorrt import TensorRtProvider
+from scripts.ssv_cli.dependencies.tooling import DependencyTooling
+from scripts.ssv_cli.output import CliError
 from scripts.ssv_cli.services.runtime_env import load_dependency_snapshot
+
+
+class _DownloadHarness(DependencyTooling):
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.environment: dict[str, str] = {}
 
 
 class DependencyPolicyTest(unittest.TestCase):
@@ -107,6 +116,60 @@ class DependencyPolicyTest(unittest.TestCase):
 
         self.assertEqual(environment["PKG_CONFIG_PATH"], str(active))
         self.assertEqual(manager.pkg_config_dirs, [str(active)])
+
+    def test_download_copies_archive_into_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            root = Path(temporary_name)
+            source = root / "source.bin"
+            destination = root / "cache" / "artifact.bin"
+            source.write_bytes(b"artifact")
+
+            result = _DownloadHarness(root)._download(source.as_uri(), destination)
+
+            self.assertEqual(result, destination)
+            self.assertEqual(destination.read_bytes(), b"artifact")
+
+    def test_tensorrt_version_accepts_aliased_enterprise_macros(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            header = Path(temporary_name) / "NvInferVersion.h"
+            header.write_text(
+                "#define TRT_MAJOR_ENTERPRISE 10\n"
+                "#define TRT_MINOR_ENTERPRISE 16\n"
+                "#define TRT_PATCH_ENTERPRISE 1\n"
+                "#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE //!< TensorRT major version.\n"
+                "#define NV_TENSORRT_MINOR TRT_MINOR_ENTERPRISE //!< TensorRT minor version.\n"
+                "#define NV_TENSORRT_PATCH TRT_PATCH_ENTERPRISE //!< TensorRT patch version.\n",
+                encoding="utf-8",
+            )
+
+            version = TensorRtProvider()._tensorrt_version(header)
+
+            self.assertEqual(version, "10.16.1")
+
+    def test_onnx_provider_libraries_resolve_nvidia_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            lib_dir = Path(temporary_name)
+            for name in (
+                "libonnxruntime_providers_shared.so",
+                "libonnxruntime_providers_tensorrt.so",
+                "libonnxruntime_providers_cuda.so",
+            ):
+                (lib_dir / name).write_bytes(b"placeholder")
+
+            provider = OnnxRuntimeProvider()
+            provider._validate_elf = Mock()
+            provider._readelf = Mock(return_value="GLOBAL DEFAULT GetProvider\n")
+
+            libraries = provider._ort_provider_libraries("nvidia", lib_dir)
+
+            self.assertEqual(
+                libraries.split(":"),
+                [str((lib_dir / name).resolve()) for name in (
+                    "libonnxruntime_providers_shared.so",
+                    "libonnxruntime_providers_tensorrt.so",
+                    "libonnxruntime_providers_cuda.so",
+                )],
+            )
 
 
 class DependencySnapshotTest(unittest.TestCase):
