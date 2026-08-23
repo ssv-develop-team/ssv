@@ -17,7 +17,7 @@ from ..services.runtime_env import load_runtime_environment
 def _require_model_test_dependencies() -> None:
     """校验模型契约测试文件使用的 optional Python 包。"""
 
-    packages = ("numpy", "onnx", "onnxruntime")
+    packages = ("onnx",)
     for package in packages:
         try:
             importlib.import_module(package)
@@ -58,7 +58,6 @@ def run(context: ProjectContext, _args: Namespace) -> int:
         return result.returncode
 
     for name, test_file in (
-        ("模型准备契约测试", root / "scripts" / "ssv_cli" / "tests" / "ssv_prepare_model_test.py"),
         ("TensorRT manifest 契约测试", root / "scripts" / "ssv_cli" / "tests" / "ssv_tensorrt_manifest_test.py"),
     ):
         info(f"运行: {name}")

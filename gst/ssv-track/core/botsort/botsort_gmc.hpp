@@ -32,7 +32,8 @@ struct GmcWarp {
 
 [[nodiscard]] GmcWarp gmc_warp_to_source_coordinates(
     const GmcWarp &model_warp,
-    float source_to_model_scale,
+    float source_to_model_scale_x,
+    float source_to_model_scale_y,
     int pad_left,
     int pad_top);
 

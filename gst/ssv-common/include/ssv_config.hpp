@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -158,12 +159,42 @@ struct SsvTensorRtEngineConfig {
 using SsvRuntimeConfig =
     std::variant<SsvOnnxRuntimeConfig, SsvTensorRtEngineConfig>;
 
+enum class SsvInputColorOrder {
+    Rgb,
+    Bgr,
+};
+
+enum class SsvResizeMode {
+    Letterbox,
+    Stretch,
+};
+
+enum class SsvPreprocessExecution {
+    Auto,
+    Cpu,
+    Cuda,
+};
+
+struct SsvNormalizationConfig {
+    float scale = 1.0F;
+    std::array<float, 3> mean {0.0F, 0.0F, 0.0F};
+    std::array<float, 3> std {1.0F, 1.0F, 1.0F};
+};
+
+struct SsvPreprocessConfig {
+    SsvInputColorOrder color_order = SsvInputColorOrder::Rgb;
+    SsvResizeMode resize_mode = SsvResizeMode::Letterbox;
+    SsvNormalizationConfig normalization;
+    SsvPreprocessExecution execution = SsvPreprocessExecution::Auto;
+};
+
 struct SsvModelConfig {
     std::string path;
     std::optional<std::string> manifest;
     std::string family = "yolo";
     std::string output_format = "yolov8";
     std::string label_map = "config/model-labels/coco80.txt";
+    std::optional<SsvPreprocessConfig> preprocess;
 };
 
 struct SsvInferenceConfig {

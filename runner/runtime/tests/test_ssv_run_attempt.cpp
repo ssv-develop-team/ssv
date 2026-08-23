@@ -712,6 +712,7 @@ void test_inference_stats_timer_is_removed_before_service_release()
     config.inference.model.path = "/bin/true";
     config.inference.model.output_format = "yolo_nx6";
     config.inference.model.label_map = label_map;
+    config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
     std::vector<std::string> events;
     ssv::SsvRunAttemptOwnedResources resources;
     ssv::infer::SsvInferenceTestServiceOptions service_options;
@@ -773,6 +774,7 @@ void test_runtime_resolved_uses_snapshot_after_service_stop()
     config.inference.model.path = "/bin/true";
     config.inference.model.output_format = "yolo_nx6";
     config.inference.model.label_map = label_map;
+    config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
     std::vector<std::string> events;
     ssv::SsvRunAttemptOwnedResources resources;
     ssv::infer::SsvInferenceTestServiceOptions service_options;
@@ -824,7 +826,7 @@ void test_runtime_resolved_uses_snapshot_after_service_stop()
     assert(output.find("precision=fp16") != std::string::npos);
     assert(output.find("model_hash=" + std::string(64, 'f'))
         != std::string::npos);
-    assert(output.find("input_contract=rgba_u8_nhwc_v1")
+    assert(output.find("input_contract=\"float32[1,3,2,3]:NCHW\"")
         != std::string::npos);
     assert(output.find("cache_status=hit") != std::string::npos);
     assert(events == std::vector<std::string>({
@@ -872,6 +874,7 @@ void test_owned_resources_stop_before_window_destruction()
     config.inference.model.path = "/bin/true";
     config.inference.model.output_format = "yolo_nx6";
     config.inference.model.label_map = label_map;
+    config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
     std::vector<std::string> events;
     ssv::SsvRunAttemptOwnedResources resources;
     ssv::infer::SsvInferenceTestServiceOptions service_options;
@@ -1042,6 +1045,7 @@ void test_run_attempt_requires_matching_inference_runtime_snapshot()
     enabled_config.inference.model.path = "/bin/true";
     enabled_config.inference.model.output_format = "yolo_nx6";
     enabled_config.inference.model.label_map = label_map;
+    enabled_config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
     std::vector<std::string> events;
     ssv::SsvRunAttemptOwnedResources resources;
     ssv::infer::SsvInferenceTestServiceOptions service_options;

@@ -40,7 +40,7 @@ void test_gmc_none_tracks_without_an_rgba_view()
     const auto detection = make_detection(0.1F, 0.2F, 0.3F, 0.5F);
 
     const PreprocessTransform transform {
-        640, 480, 640, 640, 1.0F, 0, 80, 0, 80,
+        640, 480, 640, 640, 1.0F, 1.0F, 0, 80, 0, 80,
     };
     auto tracked = processor.process(
         one_detection(detection), transform);
@@ -58,7 +58,7 @@ void test_resolution_change_resets_tracker_state()
     config.gmc_method = botsort::GmcMethod::kNone;
     botsort::SsvTrackAdapter processor(config);
     const PreprocessTransform first_geometry {
-        640, 480, 640, 640, 1.0F, 0, 80, 0, 80,
+        640, 480, 640, 640, 1.0F, 1.0F, 0, 80, 0, 80,
     };
 
     auto first = processor.process(
@@ -71,7 +71,7 @@ void test_resolution_change_resets_tracker_state()
     assert(second.size() == 1 && second.front().track_id == 2);
 
     const PreprocessTransform changed_geometry {
-        1280, 720, 640, 640, 0.5F, 0, 140, 0, 140,
+        1280, 720, 640, 640, 0.5F, 0.5F, 0, 140, 0, 140,
     };
     auto after_change = processor.process(
         one_detection(make_detection(0.4F, 0.1F, 0.5F, 0.3F)),
@@ -88,7 +88,7 @@ void test_explicit_reset_restarts_track_identity()
     config.gmc_method = botsort::GmcMethod::kNone;
     botsort::SsvTrackAdapter adapter(config);
     const PreprocessTransform transform {
-        640, 480, 640, 640, 1.0F, 0, 80, 0, 80,
+        640, 480, 640, 640, 1.0F, 1.0F, 0, 80, 0, 80,
     };
 
     const auto before = adapter.process(
@@ -113,7 +113,8 @@ void test_invalid_source_geometry_is_rejected()
     try {
         static_cast<void>(adapter.process(
             one_detection(make_detection(0.1F, 0.2F, 0.3F, 0.5F)),
-            PreprocessTransform {0, 480, 640, 640, 1.0F, 0, 80, 0, 80}));
+            PreprocessTransform {
+                0, 480, 640, 640, 1.0F, 1.0F, 0, 80, 0, 80}));
     } catch (const std::invalid_argument &error) {
         threw = true;
         assert(std::string(error.what())
@@ -133,14 +134,14 @@ void test_model_warp_is_conjugated_into_source_coordinates()
     model_warp.m12 = 6.0;
 
     const auto source_warp = botsort::gmc_warp_to_source_coordinates(
-        model_warp, 2.0F, 10, 20);
+        model_warp, 2.0F, 4.0F, 10, 20);
 
     assert(std::fabs(source_warp.m00 - 1.0) < 0.0001);
-    assert(std::fabs(source_warp.m01 - 0.1) < 0.0001);
+    assert(std::fabs(source_warp.m01 - 0.2) < 0.0001);
     assert(std::fabs(source_warp.m02 - 3.0) < 0.0001);
-    assert(std::fabs(source_warp.m10 + 0.2) < 0.0001);
+    assert(std::fabs(source_warp.m10 + 0.1) < 0.0001);
     assert(std::fabs(source_warp.m11 - 1.0) < 0.0001);
-    assert(std::fabs(source_warp.m12 - 2.0) < 0.0001);
+    assert(std::fabs(source_warp.m12 - 1.0) < 0.0001);
 }
 
 void test_gmc_method_availability_matches_build()
@@ -184,10 +185,12 @@ void test_sparse_gmc_estimates_rgba_translation()
     }
 
     botsort::GmcFrameView first_view {
-        first, width, height, static_cast<std::size_t>(width * 4), 1.0F, 0, 0,
+        first, width, height, static_cast<std::size_t>(width * 4),
+        1.0F, 1.0F, 0, 0,
     };
     botsort::GmcFrameView second_view {
-        second, width, height, static_cast<std::size_t>(width * 4), 1.0F, 0, 0,
+        second, width, height, static_cast<std::size_t>(width * 4),
+        1.0F, 1.0F, 0, 0,
     };
     botsort::BoTSortGmc gmc(botsort::GmcMethod::kSparseOptFlow, 1);
     static_cast<void>(gmc.estimate(&first_view));
@@ -201,7 +204,7 @@ void test_sparse_gmc_without_opencv_fails_strictly()
 {
     std::vector<std::uint8_t> rgba(4 * 4 * 4, 0);
     const botsort::GmcFrameView frame {
-        rgba, 4, 4, 16, 1.0F, 0, 0,
+        rgba, 4, 4, 16, 1.0F, 1.0F, 0, 0,
     };
     botsort::BoTSortGmc gmc(botsort::GmcMethod::kSparseOptFlow, 1);
 

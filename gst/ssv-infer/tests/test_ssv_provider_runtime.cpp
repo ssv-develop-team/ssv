@@ -157,23 +157,15 @@ Bytes node(
     return result;
 }
 
-Bytes metadata_entry(std::string_view key, std::string_view value)
-{
-    Bytes result;
-    append_string(result, 1, key);
-    append_string(result, 2, value);
-    return result;
-}
-
-Bytes make_wrapper_model()
+Bytes make_raw_model()
 {
     const auto cast_to_float = integer_attribute("to", 1);
     const std::vector<Bytes> cast_attributes {cast_to_float};
-    const std::vector<std::string_view> cast_inputs {"images_rgba"};
+    const std::vector<std::string_view> cast_inputs {"images"};
     const auto cast = node(cast_inputs,
         "float_rgba", "cast_input", "Cast", cast_attributes);
 
-    const auto axes = integers_attribute("axes", {3});
+    const auto axes = integers_attribute("axes", {1});
     const auto keepdims = integer_attribute("keepdims", 0);
     const std::vector<Bytes> mean_attributes {axes, keepdims};
     const std::vector<std::string_view> mean_inputs {"float_rgba"};
@@ -184,7 +176,7 @@ Bytes make_wrapper_model()
     append_bytes(graph, 1, cast);
     append_bytes(graph, 1, mean);
     append_string(graph, 2, "ssv-provider-cpu-smoke");
-    const auto input = value_info("images_rgba", 2, {1, 1, 6, 4});
+    const auto input = value_info("images", 1, {1, 3, 1, 6});
     const auto output = value_info("output0", 1, {1, 1, 6});
     append_bytes(graph, 11, input);
     append_bytes(graph, 12, output);
@@ -198,25 +190,6 @@ Bytes make_wrapper_model()
     append_bytes(model, 7, graph);
     append_bytes(model, 8, opset);
 
-    const std::vector<std::pair<std::string_view, std::string_view>> metadata {
-        {"ssv.wrapper.channel_rule", "drop_alpha_keep_rgb"},
-        {"ssv.wrapper.contract", "rgba_u8_nhwc_v1"},
-        {"ssv.wrapper.dtype", "uint8"},
-        {"ssv.wrapper.height", "1"},
-        {"ssv.wrapper.layout", "NHWC"},
-        {"ssv.wrapper.model_family", "yolo"},
-        {"ssv.wrapper.normalization", "divide_by_255"},
-        {"ssv.wrapper.output_format", "yolo_nx6"},
-        {"ssv.wrapper.source_sha256",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"ssv.wrapper.tool", "ssv.prepare_wrapper"},
-        {"ssv.wrapper.tool_version", "1.0.0"},
-        {"ssv.wrapper.width", "6"},
-    };
-    for (const auto &[key, value] : metadata) {
-        const auto entry = metadata_entry(key, value);
-        append_bytes(model, 14, entry);
-    }
     return model;
 }
 
@@ -556,8 +529,8 @@ void test_cpu_execution_provider_smoke()
     assert(label_map != nullptr && label_map[0] != '\0');
 
     TemporaryDirectory directory;
-    const auto model_path = directory.path() / "wrapper.onnx";
-    const auto model = make_wrapper_model();
+    const auto model_path = directory.path() / "raw.onnx";
+    const auto model = make_raw_model();
     std::ofstream output(model_path, std::ios::binary);
     output.write(reinterpret_cast<const char *>(model.data()),
         static_cast<std::streamsize>(model.size()));
@@ -567,6 +540,15 @@ void test_cpu_execution_provider_smoke()
     config.model.path = model_path.string();
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {
+        .color_order = ssv::SsvInputColorOrder::Rgb,
+        .resize_mode = ssv::SsvResizeMode::Letterbox,
+        .normalization = {
+            .scale = 1.0F / 255.0F,
+            .mean = {0.0F, 0.0F, 0.0F},
+            .std = {1.0F, 1.0F, 1.0F},
+        },
+    };
     auto &runtime = std::get<ssv::SsvOnnxRuntimeConfig>(config.runtime);
     runtime.providers.mode = ssv::SsvProviderMode::Explicit;
     runtime.providers.order = {ssv::SsvProvider::Cpu};
@@ -580,7 +562,7 @@ void test_cpu_execution_provider_smoke()
     assert(snapshot.precision == "fp32");
     assert(snapshot.cache_status == "not-supported");
     assert(snapshot.model_hash.size() == 64);
-    assert(snapshot.input_contract == "rgba_u8_nhwc_v1");
+    assert(snapshot.input_contract == "float32[1,3,1,6]:NCHW");
 
     GstVideoInfo info;
     gst_video_info_init(&info);
@@ -595,7 +577,7 @@ void test_cpu_execution_provider_smoke()
             service.get(),
             buffer,
             info,
-            {6, 1, 6, 1, 1.0F, 0, 0, 0, 0},
+            {6, 1, 6, 1, 1.0F, 1.0F, 0, 0, 0, 0},
             {});
     gst_buffer_unref(buffer);
     auto result = ssv::infer::ssv_inference_service_submit(

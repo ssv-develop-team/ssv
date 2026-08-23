@@ -19,9 +19,7 @@ int main()
     ssv::infer::SsvModelContract contract{
         .width = 640,
         .height = 384,
-        .input_bytes = 640U * 384U * 3U,
-        .contract = "rgba_u8_nhwc_v1",
-        .source_sha256 = "public-interface",
+        .resize_mode = ssv::SsvResizeMode::Letterbox,
     };
     auto moved_contract = std::move(contract);
 
@@ -30,7 +28,7 @@ int main()
     assert(moved_stats.completed == 3);
     assert(moved_stats.total.p95_us == 42);
     assert(moved_contract.width == 640);
-    assert(moved_contract.input_bytes == 640U * 384U * 3U);
-    assert(moved_contract.contract == "rgba_u8_nhwc_v1");
+    assert(moved_contract.height == 384);
+    assert(moved_contract.resize_mode == ssv::SsvResizeMode::Letterbox);
     return 0;
 }

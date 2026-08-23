@@ -138,23 +138,35 @@ std::string encode_event(const SsvEvent &event)
             + " actual_memory=" + encode_value(contract->actual_memory)
             + " reason=" + encode_value(contract->reason);
     } else if (inference != nullptr) {
-        const auto milliseconds = [](std::chrono::microseconds value) {
+        const auto duration_milliseconds = [](std::chrono::microseconds value) {
             return static_cast<double>(value.count()) / 1'000.0;
+        };
+        const auto latency_milliseconds = [](const SsvLatencyPercentiles &value) {
+            if (!value.p50 || !value.p95)
+                return std::string("unmeasured");
+            std::ostringstream formatted;
+            formatted.imbue(std::locale::classic());
+            formatted << std::fixed << std::setprecision(3)
+                      << static_cast<double>(value.p50->count()) / 1'000.0
+                      << '/' << static_cast<double>(value.p95->count()) / 1'000.0;
+            return formatted.str();
         };
         std::ostringstream latency;
         latency.imbue(std::locale::classic());
-        latency << std::fixed << std::setprecision(3)
-                << "p50/p95"
-                << " queue=" << milliseconds(inference->queue.p50)
-                << '/' << milliseconds(inference->queue.p95)
-                << " device=" << milliseconds(inference->device.p50)
-                << '/' << milliseconds(inference->device.p95)
-                << " output_copy=" << milliseconds(inference->output_copy.p50)
-                << '/' << milliseconds(inference->output_copy.p95)
-                << " postprocess=" << milliseconds(inference->postprocess.p50)
-                << '/' << milliseconds(inference->postprocess.p95)
-                << " total=" << milliseconds(inference->total.p50)
-                << '/' << milliseconds(inference->total.p95);
+        latency << "p50/p95"
+                << " queue=" << latency_milliseconds(inference->queue)
+                << " decode=" << latency_milliseconds(inference->decode)
+                << " color_resize=" << latency_milliseconds(inference->color_resize)
+                << " normalize_layout="
+                << latency_milliseconds(inference->normalize_layout)
+                << " backend_h2d=" << latency_milliseconds(inference->backend_h2d)
+                << " backend_execution="
+                << latency_milliseconds(inference->backend_execution)
+                << " backend_d2h=" << latency_milliseconds(inference->backend_d2h)
+                << " backend_unattributed="
+                << latency_milliseconds(inference->backend_unattributed)
+                << " postprocess=" << latency_milliseconds(inference->postprocess)
+                << " total=" << latency_milliseconds(inference->total);
         std::ostringstream fields;
         fields.imbue(std::locale::classic());
         fields << " frames=" << inference->completed
@@ -163,7 +175,8 @@ std::string encode_event(const SsvEvent &event)
                << " fps=" << std::fixed << std::setprecision(3)
                << inference->completed_fps
                << " max_gap_ms="
-               << milliseconds(inference->longest_result_gap)
+               << std::fixed << std::setprecision(3)
+               << duration_milliseconds(inference->longest_result_gap)
                << " latency_ms=" << encode_value(latency.str());
         record += fields.str();
     } else if (fatal != nullptr) {
@@ -311,8 +324,12 @@ void append_pretty_latency_row(
     record += "    ";
     append_padded(record, name, pretty_field_width);
     record += "  ";
-    const auto p50 = format_pretty_milliseconds(percentiles.p50);
-    const auto p95 = format_pretty_milliseconds(percentiles.p95);
+    if (!percentiles.p50 || !percentiles.p95) {
+        record += "unmeasured\n";
+        return;
+    }
+    const auto p50 = format_pretty_milliseconds(*percentiles.p50);
+    const auto p95 = format_pretty_milliseconds(*percentiles.p95);
     append_padded(record, p50, 9);
     record.append(p95);
     record += '\n';
@@ -386,9 +403,19 @@ std::string encode_pretty_event(const SsvEvent &event)
         append_pretty_group(record, "latency_ms");
         append_pretty_latency_header(record);
         append_pretty_latency_row(record, "queue", inference->queue);
-        append_pretty_latency_row(record, "device", inference->device);
+        append_pretty_latency_row(record, "decode", inference->decode);
         append_pretty_latency_row(
-            record, "output_copy", inference->output_copy);
+            record, "color_resize", inference->color_resize);
+        append_pretty_latency_row(
+            record, "normalize_layout", inference->normalize_layout);
+        append_pretty_latency_row(
+            record, "backend_h2d", inference->backend_h2d);
+        append_pretty_latency_row(
+            record, "backend_execution", inference->backend_execution);
+        append_pretty_latency_row(
+            record, "backend_d2h", inference->backend_d2h);
+        append_pretty_latency_row(
+            record, "backend_unattributed", inference->backend_unattributed);
         append_pretty_latency_row(record, "postprocess", inference->postprocess);
         append_pretty_latency_row(record, "total", inference->total);
         return record;

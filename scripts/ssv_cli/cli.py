@@ -114,15 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(handler=run.run)
 
-    model_parser = commands.add_parser("model", help="导出、准备和验证模型")
+    model_parser = commands.add_parser("model", help="导出、验证模型并生成 TensorRT manifest")
     model_actions = model_parser.add_subparsers(dest="model_action", metavar="ACTION")
     model_actions.required = True
     export_parser = model_actions.add_parser("export", help="导出 YOLOv8n ONNX 模型")
     export_parser.set_defaults(handler=model.export)
-
-    # Model tools own validation and help output for their arguments.
-    prepare_parser = model_actions.add_parser("prepare", help="生成 wrapper ONNX 模型", add_help=False)
-    prepare_parser.set_defaults(handler=model.prepare)
 
     verify_parser = model_actions.add_parser("verify", help="验证安全帽 YOLO 模型", add_help=False)
     verify_parser.set_defaults(handler=model.verify)
@@ -153,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, unknown = parser.parse_known_args(arguments)
     if unknown and args.command == "run":
         args.runner_args = unknown
-    elif unknown and args.command == "model" and args.model_action in {"prepare", "verify", "manifest"}:
+    elif unknown and args.command == "model" and args.model_action in {"verify", "manifest"}:
         args.model_args = unknown
     elif unknown:
         parser.error("unrecognized arguments: " + " ".join(unknown))

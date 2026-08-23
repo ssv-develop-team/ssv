@@ -27,11 +27,6 @@ struct TensorSpec {
     TensorLayout layout = TensorLayout::Unknown;
 };
 
-struct SsvUint8TensorView {
-    const TensorSpec *spec = nullptr;
-    std::span<const std::uint8_t> host_data;
-};
-
 struct SsvFloatTensorView {
     const TensorSpec *spec = nullptr;
     std::span<const float> host_data;
@@ -56,7 +51,7 @@ struct OnnxRuntimeBackendInfo {
 
 struct TensorRtEngineBackendInfo {
     std::string engine_hash;
-    std::string wrapper_hash;
+    std::string source_model_hash;
     std::string tensorrt_version;
     int cuda_runtime_version = 0;
     int compute_capability_major = -1;

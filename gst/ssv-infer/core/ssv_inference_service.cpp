@@ -59,7 +59,7 @@ std::string provider_chain_text(
 
 SsvInferenceRuntimeSnapshot make_runtime_snapshot(
     const BackendInfo &backend,
-    const SsvModelContract &contract)
+    std::string input_contract)
 {
     SsvInferenceRuntimeSnapshot snapshot {
         .provider_chain = "unknown",
@@ -67,7 +67,7 @@ SsvInferenceRuntimeSnapshot make_runtime_snapshot(
         .precision = std::string(precision_name(
             backend.resolved_precision)),
         .model_hash = "unknown",
-        .input_contract = contract.contract,
+        .input_contract = std::move(input_contract),
         .cache_status = "disabled",
         .fallbacks = {},
     };
@@ -114,8 +114,8 @@ SsvInferenceRuntimeSnapshot make_runtime_snapshot(
     } else {
         snapshot.provider_device += "unknown";
     }
-    if (!tensorrt->wrapper_hash.empty())
-        snapshot.model_hash = tensorrt->wrapper_hash;
+    if (!tensorrt->source_model_hash.empty())
+        snapshot.model_hash = tensorrt->source_model_hash;
     return snapshot;
 }
 
@@ -143,7 +143,7 @@ public:
         const auto &contract = engine_.model_contract();
         model_contract_ = contract;
         runtime_snapshot_ = make_runtime_snapshot(
-            engine_.backend_info(), contract);
+            engine_.backend_info(), engine_.input_contract_description());
         analysis_frames_ = std::make_unique<SsvAnalysisFramePool>(
             contract.width,
             contract.height,
@@ -228,11 +228,12 @@ public:
         std::lock_guard<std::mutex> lock(source_geometry_mutex_);
         source_transforms_.insert_or_assign(
             std::string(source_id),
-            ssv_make_letterbox_transform(
+            ssv_make_resize_transform(
                 source_width,
                 source_height,
                 model_contract_->width,
-                model_contract_->height));
+                model_contract_->height,
+                model_contract_->resize_mode));
     }
 
     PreprocessTransform preprocess_transform(

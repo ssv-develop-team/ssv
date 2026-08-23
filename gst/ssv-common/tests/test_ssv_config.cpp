@@ -151,10 +151,17 @@ inference:
   enabled: true
   analysis_fps: 0
   model:
-    path: "models/model-wrapper.onnx"
+    path: "models/model.onnx"
     family: "yolo"
     output_format: "yolov8"
     label_map: "config/model-labels/coco80.txt"
+    preprocess:
+      color_order: "rgb"
+      resize: "letterbox"
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
   runtime:
     type: "onnxruntime"
     providers:
@@ -212,6 +219,21 @@ agent:
     assert(runtime.providers.order.front() == ssv::SsvProvider::OpenVino);
     assert(runtime.cpu_threads == 4);
     assert(runtime.cache.directory.empty());
+    assert(config.inference.model.preprocess.has_value());
+    assert(config.inference.model.preprocess->color_order ==
+        ssv::SsvInputColorOrder::Rgb);
+    assert(config.inference.model.preprocess->resize_mode ==
+        ssv::SsvResizeMode::Letterbox);
+    assert(config.inference.model.preprocess->execution ==
+        ssv::SsvPreprocessExecution::Auto);
+    assert(config.inference.model.preprocess->normalization.scale
+        == 0.00392156862745098F);
+    assert(config.inference.model.preprocess->normalization.mean[0] == 0.0F);
+    assert(config.inference.model.preprocess->normalization.mean[1] == 0.0F);
+    assert(config.inference.model.preprocess->normalization.mean[2] == 0.0F);
+    assert(config.inference.model.preprocess->normalization.std[0] == 1.0F);
+    assert(config.inference.model.preprocess->normalization.std[1] == 1.0F);
+    assert(config.inference.model.preprocess->normalization.std[2] == 1.0F);
     assert(config.tracking.gmc.method ==
         ssv::SsvGmcMethod::SparseOpticalFlow);
     assert(config.tracking.publish_cooldown_ms == 12000);
@@ -232,6 +254,180 @@ void test_loads_example_config(std::string_view path)
     assert(config.tracking.publish_cooldown_ms == 30000);
     assert(config.agent.dedup_enabled);
     assert(config.agent.dedup_cooldown_seconds == 30.0F);
+}
+
+void test_parses_explicit_preprocess_semantics()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("preprocess.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  model:
+    preprocess:
+      color_order: "bgr"
+      resize: "stretch"
+      execution: "cpu"
+      normalization:
+        scale: 0.01
+        mean: [0.1, 0.2, 0.3]
+        std: [0.9, 1.0, 1.1]
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+    assert(config.inference.model.preprocess.has_value());
+    const auto &preprocess = *config.inference.model.preprocess;
+    assert(preprocess.color_order == ssv::SsvInputColorOrder::Bgr);
+    assert(preprocess.resize_mode == ssv::SsvResizeMode::Stretch);
+    assert(preprocess.execution == ssv::SsvPreprocessExecution::Cpu);
+    assert(preprocess.normalization.scale == 0.01F);
+    assert(preprocess.normalization.mean[0] == 0.1F);
+    assert(preprocess.normalization.mean[1] == 0.2F);
+    assert(preprocess.normalization.mean[2] == 0.3F);
+    assert(preprocess.normalization.std[0] == 0.9F);
+    assert(preprocess.normalization.std[1] == 1.0F);
+    assert(preprocess.normalization.std[2] == 1.1F);
+}
+
+void test_requires_preprocess_when_inference_is_enabled()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  model:
+    path: "models/raw.onnx"
+)yaml",
+        ssv::SsvConfigErrorKind::MissingRequired,
+        "inference.model.preprocess");
+}
+
+void test_parses_cuda_preprocess_execution()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("preprocess-cuda.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  model:
+    preprocess:
+      color_order: "rgb"
+      resize: "letterbox"
+      execution: "cuda"
+      normalization:
+        scale: 1.0
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+    assert(config.inference.model.preprocess->execution ==
+        ssv::SsvPreprocessExecution::Cuda);
+}
+
+void test_rejects_invalid_preprocess_fields()
+{
+    struct Case {
+        std::string_view field;
+        std::string_view path;
+    };
+    const Case cases[] = {
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"letterbox\"\n"
+         "      execution: \"metal\"\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.execution"},
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"letterbox\"\n"
+         "      execution: 1\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.execution"},
+        {"      color_order: \"yuv\"\n"
+         "      resize: \"letterbox\"\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.color_order"},
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"crop\"\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.resize"},
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"letterbox\"\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.normalization.mean"},
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"letterbox\"\n"
+         "      normalization:\n"
+         "        scale: .nan\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 1.0, 1.0]\n",
+            "inference.model.preprocess.normalization.scale"},
+        {"      color_order: \"rgb\"\n"
+         "      resize: \"letterbox\"\n"
+         "      normalization:\n"
+         "        scale: 0.00392156862745098\n"
+         "        mean: [0.0, 0.0, 0.0]\n"
+         "        std: [1.0, 0.0, 1.0]\n",
+            "inference.model.preprocess.normalization.std[1]"},
+    };
+
+    for (const auto &test_case : cases) {
+        const auto yaml = std::string(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  model:
+    preprocess:
+)yaml") + std::string(test_case.field);
+        expect_config_error(
+            yaml,
+            test_case.path == "inference.model.preprocess.execution"
+                && test_case.field.find("execution: 1") != std::string_view::npos
+                ? ssv::SsvConfigErrorKind::InvalidType
+                : ssv::SsvConfigErrorKind::InvalidValue,
+            test_case.path);
+    }
+
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  model:
+    preprocess:
+      color_order: "rgb"
+      resize: "letterbox"
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
+        extra: 1
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "inference.model.preprocess.normalization.extra");
 }
 
 void test_resolves_config_path_from_environment()
@@ -614,6 +810,14 @@ sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
 inference:
+  model:
+    preprocess:
+      color_order: "rgb"
+      resize: "letterbox"
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
   runtime:
     type: "onnxruntime"
     cpu_threads: "auto"
@@ -1202,6 +1406,10 @@ int main(int argc, char **argv)
 
     test_loads_complete_config();
     test_loads_example_config(argv[1]);
+    test_parses_explicit_preprocess_semantics();
+    test_requires_preprocess_when_inference_is_enabled();
+    test_parses_cuda_preprocess_execution();
+    test_rejects_invalid_preprocess_fields();
     test_resolves_config_path_from_environment();
     test_explicit_config_path_precedes_environment_path();
     test_applies_deployment_environment_overrides();

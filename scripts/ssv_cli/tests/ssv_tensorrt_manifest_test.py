@@ -15,15 +15,21 @@ from onnx import TensorProto, helper
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def make_wrapper(path: Path) -> None:
+def make_model(
+    path: Path,
+    *,
+    input_type: int = TensorProto.FLOAT,
+    input_shape: list[int] | None = None,
+) -> None:
+    shape = input_shape or [1, 3, 2, 3]
     input_value = helper.make_tensor_value_info(
-        "images_rgba", TensorProto.UINT8, [1, 2, 3, 4]
+        "images", input_type, shape
     )
     output_value = helper.make_tensor_value_info(
-        "output0", TensorProto.FLOAT, [1, 2, 3, 4]
+        "output0", TensorProto.FLOAT, [1, 2, 3, 6]
     )
     graph = helper.make_graph(
-        [helper.make_node("Cast", ["images_rgba"], ["output0"], to=TensorProto.FLOAT)],
+        [helper.make_node("Constant", [], ["output0"])],
         "manifest-test-wrapper",
         [input_value],
         [output_value],
@@ -34,24 +40,6 @@ def make_wrapper(path: Path) -> None:
         opset_imports=[helper.make_opsetid("", 18)],
     )
     model.ir_version = 10
-    metadata = {
-        "ssv.wrapper.channel_rule": "drop_alpha_keep_rgb",
-        "ssv.wrapper.contract": "rgba_u8_nhwc_v1",
-        "ssv.wrapper.dtype": "uint8",
-        "ssv.wrapper.height": "2",
-        "ssv.wrapper.layout": "NHWC",
-        "ssv.wrapper.model_family": "yolo",
-        "ssv.wrapper.normalization": "divide_by_255",
-        "ssv.wrapper.output_format": "yolov8",
-        "ssv.wrapper.source_sha256": "a" * 64,
-        "ssv.wrapper.tool": "ssv.prepare_wrapper",
-        "ssv.wrapper.tool_version": "1.0.0",
-        "ssv.wrapper.width": "3",
-    }
-    for key, value in sorted(metadata.items()):
-        property_value = model.metadata_props.add()
-        property_value.key = key
-        property_value.value = value
     onnx.save_model(model, path)
 
 
@@ -63,7 +51,7 @@ class TensorRtManifestToolTest(unittest.TestCase):
 
     def run_tool(
         self,
-        wrapper: Path,
+        model: Path,
         engine: Path,
         output: Path,
         *extra: str,
@@ -73,8 +61,8 @@ class TensorRtManifestToolTest(unittest.TestCase):
                 str(ROOT / "ssv"),
                 "model",
                 "manifest",
-                "--wrapper",
-                str(wrapper),
+                "--model",
+                str(model),
                 "--engine",
                 str(engine),
                 "--output",
@@ -95,14 +83,14 @@ class TensorRtManifestToolTest(unittest.TestCase):
             check=False,
         )
 
-    def test_writes_manifest_from_wrapper_and_engine_content(self) -> None:
-        wrapper = self.work / "model.onnx"
+    def test_writes_manifest_from_raw_model_and_engine_content(self) -> None:
+        model = self.work / "model.onnx"
         engine = self.work / "model.engine"
         output = self.work / "model.engine.json"
-        make_wrapper(wrapper)
+        make_model(model)
         engine.write_bytes(b"serialized-engine")
 
-        result = self.run_tool(wrapper, engine, output)
+        result = self.run_tool(model, engine, output)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("event=tensorrt_manifest_written", result.stdout)
@@ -110,7 +98,7 @@ class TensorRtManifestToolTest(unittest.TestCase):
             json.loads(output.read_text(encoding="utf-8")),
             {
                 "schema": "ssv.tensorrt-engine-manifest",
-                "schema_version": 1,
+                "schema_version": 2,
                 "engine": {
                     "sha256": hashlib.sha256(engine.read_bytes()).hexdigest(),
                     "precision": "fp16",
@@ -118,77 +106,67 @@ class TensorRtManifestToolTest(unittest.TestCase):
                     "cuda_runtime_version": 13020,
                     "compute_capability": {"major": 8, "minor": 9},
                 },
-                "wrapper": {
-                    "sha256": hashlib.sha256(wrapper.read_bytes()).hexdigest(),
-                    "contract": "rgba_u8_nhwc_v1",
-                    "source_sha256": "a" * 64,
-                    "tool_version": "1.0.0",
-                    "model_family": "yolo",
-                    "output_format": "yolov8",
+                "source_model": {
+                    "sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
                     "input": {
-                        "name": "images_rgba",
-                        "dtype": "uint8",
-                        "layout": "NHWC",
-                        "shape": [1, 2, 3, 4],
+                        "name": "images",
+                        "dtype": "float32",
+                        "layout": "NCHW",
+                        "shape": [1, 3, 2, 3],
                     },
                 },
             },
         )
 
-        repeated = self.run_tool(wrapper, engine, output)
+        repeated = self.run_tool(model, engine, output)
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
 
-    def test_rejects_invalid_wrapper_before_creating_manifest(self) -> None:
-        wrapper = self.work / "invalid.onnx"
+    def test_rejects_non_float_nchw_source_before_creating_manifest(self) -> None:
+        model = self.work / "invalid.onnx"
         engine = self.work / "model.engine"
         output = self.work / "model.engine.json"
-        make_wrapper(wrapper)
-        model = onnx.load_model(wrapper)
-        for item in model.metadata_props:
-            if item.key == "ssv.wrapper.contract":
-                item.value = "legacy_rgba"
-        onnx.save_model(model, wrapper)
+        make_model(model, input_type=TensorProto.UINT8, input_shape=[1, 2, 3, 4])
         engine.write_bytes(b"serialized-engine")
 
-        result = self.run_tool(wrapper, engine, output)
+        result = self.run_tool(model, engine, output)
 
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertFalse(output.exists())
         self.assertEqual(result.stderr.count("event=fatal_error"), 1)
         self.assertIn("stage=engine_manifest", result.stderr)
-        self.assertIn("ssv.wrapper.contract", result.stderr)
+        self.assertIn("source model input must use float32", result.stderr)
 
-    def test_rejects_malformed_wrapper_without_a_traceback(self) -> None:
-        wrapper = self.work / "malformed.onnx"
+    def test_rejects_malformed_source_without_a_traceback(self) -> None:
+        model = self.work / "malformed.onnx"
         engine = self.work / "model.engine"
         output = self.work / "model.engine.json"
-        wrapper.write_bytes(b"not-an-onnx-model")
+        model.write_bytes(b"not-an-onnx-model")
         engine.write_bytes(b"serialized-engine")
 
-        result = self.run_tool(wrapper, engine, output)
+        result = self.run_tool(model, engine, output)
 
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertFalse(output.exists())
         self.assertEqual(result.stderr.count("event=fatal_error"), 1)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertIn("cannot load wrapper ONNX", result.stderr)
+        self.assertIn("cannot load source ONNX", result.stderr)
 
     def test_requires_force_to_replace_a_different_manifest(self) -> None:
-        wrapper = self.work / "model.onnx"
+        model = self.work / "model.onnx"
         engine = self.work / "model.engine"
         output = self.work / "model.engine.json"
-        make_wrapper(wrapper)
+        make_model(model)
         engine.write_bytes(b"first-engine")
-        first = self.run_tool(wrapper, engine, output)
+        first = self.run_tool(model, engine, output)
         self.assertEqual(first.returncode, 0, first.stderr)
         first_contents = output.read_bytes()
 
         engine.write_bytes(b"second-engine")
-        rejected = self.run_tool(wrapper, engine, output)
+        rejected = self.run_tool(model, engine, output)
         self.assertEqual(rejected.returncode, 4, rejected.stderr)
         self.assertEqual(output.read_bytes(), first_contents)
 
-        replaced = self.run_tool(wrapper, engine, output, "--force")
+        replaced = self.run_tool(model, engine, output, "--force")
         self.assertEqual(replaced.returncode, 0, replaced.stderr)
         self.assertNotEqual(output.read_bytes(), first_contents)
         manifest = json.loads(output.read_text(encoding="utf-8"))

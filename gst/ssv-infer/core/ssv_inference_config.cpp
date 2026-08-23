@@ -49,6 +49,7 @@ InferenceConfig make_inference_config(
     config.label_map = source.model.label_map;
     config.confidence_threshold = source.confidence_threshold;
     config.target_class = source.target_class;
+    config.preprocess = source.model.preprocess;
 
     if (const auto *onnx =
             std::get_if<ssv::SsvOnnxRuntimeConfig>(&source.runtime)) {
@@ -80,6 +81,10 @@ void validate_inference_config(const InferenceConfig &config)
     if (blank(config.label_map)) {
         throw std::invalid_argument(
             "inference.model.label_map must not be empty");
+    }
+    if (!config.preprocess) {
+        throw std::invalid_argument(
+            "inference.model.preprocess is required when inference is enabled");
     }
     if (config.device_id < 0)
         throw std::invalid_argument("runtime device_id must be non-negative");

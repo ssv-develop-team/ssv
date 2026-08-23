@@ -28,6 +28,16 @@ else
   message('TensorRT backend disabled; using explicit unavailable backend')
 endif
 
+cuda_enabled = false
+if tensorrt_enabled
+  cuda_enabled = add_languages('cuda', native : false, required : false)
+  if cuda_enabled
+    message('CUDA preprocessing kernel enabled')
+  else
+    message('CUDA compiler not found; using preprocessing fallback stub')
+  endif
+endif
+
 onnx_dep = dependency('onnxruntime', required : true)
 onnxruntime_profile = get_option('onnxruntime_profile')
 onnxruntime_dependency_signature = get_option('onnxruntime_dependency_signature')

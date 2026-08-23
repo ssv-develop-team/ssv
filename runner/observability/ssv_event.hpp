@@ -62,8 +62,9 @@ struct SsvBufferContractFailedEvent {
 };
 
 struct SsvLatencyPercentiles {
-    std::chrono::microseconds p50 {0};
-    std::chrono::microseconds p95 {0};
+    // Empty values are serialized as "unmeasured", never as zero.
+    std::optional<std::chrono::microseconds> p50;
+    std::optional<std::chrono::microseconds> p95;
 };
 
 struct SsvInferenceStatsEvent {
@@ -73,8 +74,13 @@ struct SsvInferenceStatsEvent {
     double completed_fps = 0.0;
     std::chrono::microseconds longest_result_gap {0};
     SsvLatencyPercentiles queue;
-    SsvLatencyPercentiles device;
-    SsvLatencyPercentiles output_copy;
+    SsvLatencyPercentiles decode;
+    SsvLatencyPercentiles color_resize;
+    SsvLatencyPercentiles normalize_layout;
+    SsvLatencyPercentiles backend_h2d;
+    SsvLatencyPercentiles backend_execution;
+    SsvLatencyPercentiles backend_d2h;
+    SsvLatencyPercentiles backend_unattributed;
     SsvLatencyPercentiles postprocess;
     SsvLatencyPercentiles total;
 };

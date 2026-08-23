@@ -64,11 +64,21 @@ inference:
   # drop-only 分析上限；0 表示不限流，但仍不允许积压。
   analysis_fps: 15
   model:
-    # 必须是离线生成并带 SSV 输入 metadata 的 wrapper ONNX。
-    path: "models/yolov8n-preproc.onnx"
+    # 社区提供的原始 ONNX；运行时直接读取，不生成中间模型。
+    path: "models/yolov8n.onnx"
     family: "yolo"
     output_format: "yolov8"
     label_map: "config/model-labels/coco80.txt"
+    preprocess:
+      # 模型语义不能从文件名或 ONNX metadata 猜测，必须显式声明。
+      color_order: "rgb"
+      resize: "letterbox"
+      # auto：有可用硬件 adapter 时使用，否则回退 CPU；也可显式 cpu/cuda。
+      execution: "auto"
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
   runtime:
     type: "onnxruntime"
     providers:

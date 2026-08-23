@@ -51,11 +51,18 @@ struct SsvInferenceStartupTimings {
 };
 
 struct SsvInferenceStageTimings {
-    std::uint64_t queue_us = 0;
-    std::uint64_t device_us = 0;
-    std::uint64_t output_copy_us = 0;
-    std::uint64_t postprocess_us = 0;
-    std::uint64_t total_us = 0;
+    // Empty means that this stage has no trustworthy measurement for the
+    // sample; it must not be interpreted as zero work.
+    std::optional<std::uint64_t> queue_us;
+    std::optional<std::uint64_t> decode_us;
+    std::optional<std::uint64_t> color_resize_us;
+    std::optional<std::uint64_t> normalize_layout_us;
+    std::optional<std::uint64_t> backend_h2d_us;
+    std::optional<std::uint64_t> backend_execution_us;
+    std::optional<std::uint64_t> backend_d2h_us;
+    std::optional<std::uint64_t> backend_unattributed_us;
+    std::optional<std::uint64_t> postprocess_us;
+    std::optional<std::uint64_t> total_us;
 };
 
 struct SsvInferenceTimingSample {

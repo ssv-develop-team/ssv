@@ -17,6 +17,7 @@ GST_START_TEST(test_ssvinfer_uses_injected_service_for_rgba_input) {
     config.model.path = "/bin/true";
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {};
     config.target_class = "person";
     auto service = ssv::infer::ssv_inference_test_service_create(config);
     ssv::infer::ssv_inference_service_update_source_geometry(
@@ -68,7 +69,7 @@ GST_START_TEST(test_ssvinfer_uses_injected_service_for_rgba_input) {
     fail_unless(
         consumed.frame->analysis_frame->transform().source_height == 4);
     fail_unless(
-        consumed.frame->analysis_frame->transform().scale == 0.5F);
+        consumed.frame->analysis_frame->transform().scale_x == 0.5F);
     consumed.frame.reset();
     const auto analysis_stats =
         ssv::infer::ssv_inference_service_stats(service.get())
@@ -95,6 +96,7 @@ GST_START_TEST(test_ssvinfer_releases_analysis_frame_on_stop_without_tracker) {
     config.model.path = "/bin/true";
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {};
     config.target_class = "person";
     auto service = ssv::infer::ssv_inference_test_service_create(config);
     ssv::infer::ssv_inference_service_update_source_geometry(

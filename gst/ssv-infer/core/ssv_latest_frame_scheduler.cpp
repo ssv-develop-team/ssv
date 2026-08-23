@@ -253,7 +253,8 @@ private:
                 auto run = execute_(task->request, task->stop_source.get_token());
                 task->detections = std::move(run.detections);
                 run.timings.queue_us = task->timings.queue_us;
-                run.timings.total_us += run.timings.queue_us;
+                if (run.timings.total_us && run.timings.queue_us)
+                    *run.timings.total_us += *run.timings.queue_us;
                 task->timings = run.timings;
             } catch (const std::exception &error) {
                 task->error = error.what();

@@ -78,19 +78,12 @@ TensorSpec tensor_spec_from_ort(
 {
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     const auto element_type = tensor_info.GetElementType();
-    if (element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8
-        && element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-        throw std::runtime_error(
-            "model tensors must use uint8 or float32");
-    }
-    if (!input && element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        throw std::runtime_error("model output tensors must use float32");
+    if (element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+        throw std::runtime_error("model tensors must use float32");
 
     TensorSpec spec;
     spec.name = name;
-    spec.dtype = element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8
-        ? DataType::Uint8
-        : DataType::Float32;
+    spec.dtype = DataType::Float32;
     spec.shape = tensor_info.GetShape();
     if (spec.shape.size() == 4 && spec.shape[3] == 4)
         spec.layout = TensorLayout::Nhwc;
@@ -314,7 +307,7 @@ std::shared_ptr<SsvOrtSessionState> create_session_state(
 
 void profile_session_once(
     SsvOrtSessionState &state,
-    const TensorSpec &input,
+    const SsvFloatTensorView &input,
     Ort::MemoryInfo &memory_info,
     const std::vector<const char *> &input_names,
     const std::vector<const char *> &output_names,
@@ -324,15 +317,18 @@ void profile_session_once(
     if (state.profiling_complete)
         return;
 
+    if (input.spec == nullptr)
+        throw std::runtime_error("warmup input tensor spec is null");
     const auto input_elements = static_cast<std::size_t>(
-        tensor_size(input.shape));
-    std::vector<std::uint8_t> zero_input(input_elements);
-    Ort::Value input_value = Ort::Value::CreateTensor<std::uint8_t>(
+        tensor_size(input.spec->shape));
+    if (input.host_data.size() != input_elements)
+        throw std::runtime_error("warmup input tensor data does not match shape");
+    Ort::Value input_value = Ort::Value::CreateTensor<float>(
         memory_info,
-        zero_input.data(),
-        zero_input.size(),
-        const_cast<int64_t *>(input.shape.data()),
-        input.shape.size());
+        const_cast<float *>(input.host_data.data()),
+        input.host_data.size(),
+        const_cast<int64_t *>(input.spec->shape.data()),
+        input.spec->shape.size());
     Ort::RunOptions run_options;
     state.session->Run(
         run_options,
@@ -570,7 +566,7 @@ ModelMetadata OnnxRuntimeBackend::load(
     return metadata_;
 }
 
-void OnnxRuntimeBackend::warmup()
+void OnnxRuntimeBackend::warmup(const SsvFloatTensorView &input)
 {
     if (!session_state_ || metadata_.inputs.size() != 1)
         throw std::runtime_error("ONNX Runtime backend is not loaded");
@@ -578,7 +574,7 @@ void OnnxRuntimeBackend::warmup()
     const auto profiling_start = Clock::now();
     profile_session_once(
         *session_state_,
-        metadata_.inputs.front(),
+        input,
         memory_info_,
         input_name_ptrs_,
         output_name_ptrs_,
@@ -593,8 +589,8 @@ void OnnxRuntimeBackend::warmup()
     metadata_.backend = info_;
 }
 
-std::span<const SsvFloatTensorView> OnnxRuntimeBackend::infer(
-    const SsvUint8TensorView &input,
+SsvBackendRunResult OnnxRuntimeBackend::infer(
+    const SsvFloatTensorView &input,
     std::stop_token stop_token)
 {
     if (!session_state_ || !session_state_->session)
@@ -605,13 +601,20 @@ std::span<const SsvFloatTensorView> OnnxRuntimeBackend::infer(
     if (expected_size != static_cast<int64_t>(input.host_data.size()))
         throw std::runtime_error("input tensor data size does not match shape");
 
-    Ort::Value input_value = Ort::Value::CreateTensor<std::uint8_t>(
+    if (input.spec->dtype != DataType::Float32
+        || input.spec->layout != TensorLayout::Nchw
+        || input.spec->shape != metadata_.inputs.front().shape) {
+        throw std::runtime_error("ONNX Runtime backend expects one float32 NCHW input");
+    }
+
+    Ort::Value input_value = Ort::Value::CreateTensor<float>(
         memory_info_,
-        const_cast<std::uint8_t *>(input.host_data.data()),
+        const_cast<float *>(input.host_data.data()),
         input.host_data.size(),
         const_cast<int64_t *>(input.spec->shape.data()),
         input.spec->shape.size());
 
+    const auto run_started = Clock::now();
     run_options_.UnsetTerminate();
     try {
         {
@@ -633,7 +636,34 @@ std::span<const SsvFloatTensorView> OnnxRuntimeBackend::infer(
         throw;
     }
     run_options_.UnsetTerminate();
-    return output_views_;
+    const auto run_us = elapsed_us(run_started);
+    const auto &runtime = std::get<OnnxRuntimeBackendInfo>(info_.runtime);
+    const bool host_only = !runtime.active_provider_chain.empty()
+        && std::ranges::all_of(
+            runtime.active_provider_chain,
+            [](const auto provider) {
+                return provider == ssv::SsvProvider::Cpu;
+            });
+    if (host_only) {
+        return {
+            .outputs = output_views_,
+            .timings = {
+                .h2d_us = 0,
+                .execution_us = run_us,
+                .d2h_us = 0,
+                .unattributed_us = std::nullopt,
+            },
+        };
+    }
+    return {
+        .outputs = output_views_,
+        .timings = {
+            .h2d_us = std::nullopt,
+            .execution_us = std::nullopt,
+            .d2h_us = std::nullopt,
+            .unattributed_us = run_us,
+        },
+    };
 }
 
 void OnnxRuntimeBackend::terminate_run() noexcept

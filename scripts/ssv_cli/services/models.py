@@ -82,36 +82,6 @@ class ModelService:
         info(f"导出成功: {model_file}")
         return 0
 
-    def prepare(self, arguments: list[str]) -> int:
-        module = _import_optional(
-            "scripts.model.prepare_wrapper",
-            packages=("numpy", "onnx", "onnxruntime"),
-            extra="model",
-        )
-        try:
-            options = module.parse_args(arguments)
-            _require_optional(("numpy", "onnx", "onnxruntime"), extra="model")
-            options.input = self.context.resolve(options.input)
-            options.output = self.context.resolve(options.output)
-            status, source_sha256 = module.prepare_wrapper(options)
-        except SystemExit as exc:
-            return int(exc.code or 0)
-        except CliError:
-            raise
-        except module.PrepareModelError as exc:
-            print(module.format_fatal_error(exc), file=sys.stderr)
-            return exc.exit_code
-        except Exception as exc:  # noqa: BLE001
-            fatal = module.PrepareModelError(f"unexpected model preparation failure: {exc}")
-            print(module.format_fatal_error(fatal), file=sys.stderr)
-            return fatal.exit_code
-        print(
-            "event=model_prepared status="
-            f"{status} output={module.format_log_value(str(options.output))}"
-            f" contract={module.WRAPPER_CONTRACT} source_sha256={source_sha256}"
-        )
-        return 0
-
     def verify(self, arguments: list[str]) -> int:
         module = _import_optional(
             "scripts.model.verify_helmet_models",
@@ -165,7 +135,7 @@ class ModelService:
         try:
             options = module.parse_args(arguments)
             _require_optional(("onnx",), extra="model")
-            options.wrapper = self.context.resolve(options.wrapper)
+            options.model = self.context.resolve(options.model)
             options.engine = self.context.resolve(options.engine)
             options.output = self.context.resolve(options.output)
             manifest = module.build_manifest(options)

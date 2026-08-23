@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -77,8 +78,9 @@ struct SsvInferenceStats {
 };
 
 struct SsvLatencyPercentiles {
-    std::uint64_t p50_us = 0;
-    std::uint64_t p95_us = 0;
+    // Empty percentiles are rendered as "unmeasured" by runtime observers.
+    std::optional<std::uint64_t> p50_us;
+    std::optional<std::uint64_t> p95_us;
 };
 
 struct SsvInferenceStatsWindow {
@@ -88,8 +90,13 @@ struct SsvInferenceStatsWindow {
     double completed_fps = 0.0;
     std::uint64_t longest_result_gap_us = 0;
     SsvLatencyPercentiles queue;
-    SsvLatencyPercentiles device;
-    SsvLatencyPercentiles output_copy;
+    SsvLatencyPercentiles decode;
+    SsvLatencyPercentiles color_resize;
+    SsvLatencyPercentiles normalize_layout;
+    SsvLatencyPercentiles backend_h2d;
+    SsvLatencyPercentiles backend_execution;
+    SsvLatencyPercentiles backend_d2h;
+    SsvLatencyPercentiles backend_unattributed;
     SsvLatencyPercentiles postprocess;
     SsvLatencyPercentiles total;
 };

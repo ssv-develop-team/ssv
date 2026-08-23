@@ -15,10 +15,19 @@ ssv_inference_public_interface_test = executable(
   dependencies : [ssv_inference_core_dep],
 )
 
+ssv_image_preprocessor_test = executable(
+  'ssv-image-preprocessor-test',
+  'test_ssv_image_preprocessor.cpp',
+  include_directories : [ssv_inference_public_inc, ssv_inference_private_inc],
+  dependencies : [gst_deps, ssv_common_dep],
+  link_with : [ssv_inference_core_lib],
+)
+
 test(
   'ssv-inference-public-interface',
   ssv_inference_public_interface_test,
 )
+test('ssv-image-preprocessor', ssv_image_preprocessor_test)
 
 ssv_inference_test_support_dep = declare_dependency(
   link_with : ssv_inference_test_support_lib,
@@ -71,6 +80,16 @@ if tensorrt_enabled
   )
 endif
 
+if tensorrt_enabled and cuda_enabled
+  ssv_tensorrt_cuda_kernel_test = executable(
+    'ssv-tensorrt-cuda-kernel-test',
+    'test_ssv_tensorrt_cuda_kernel.cpp',
+    include_directories : [ssv_inference_public_inc, ssv_inference_private_inc],
+    dependencies : [ssv_common_dep, tensorrt_dep],
+    link_with : [ssv_inference_core_lib],
+  )
+endif
+
 ssv_tensorrt_unavailable_test = executable('ssv-tensorrt-unavailable-test',
   'test_ssv_tensorrt_unavailable.cpp',
   '../backends/tensorrt/ssv_tensorrt_backend_stub.cpp',
@@ -117,6 +136,9 @@ test('ssv-provider-runtime', ssv_provider_runtime_test,
 test('ssv-tensorrt-manifest', ssv_tensorrt_manifest_test)
 if tensorrt_enabled
   test('ssv-tensorrt-resources', ssv_tensorrt_resources_test)
+endif
+if tensorrt_enabled and cuda_enabled
+  test('ssv-tensorrt-cuda-kernel', ssv_tensorrt_cuda_kernel_test)
 endif
 test('ssv-tensorrt-unavailable', ssv_tensorrt_unavailable_test)
 test('ssv-infer-plugin', ssv_infer_plugin_test, env : ssv_infer_plugin_test_env)

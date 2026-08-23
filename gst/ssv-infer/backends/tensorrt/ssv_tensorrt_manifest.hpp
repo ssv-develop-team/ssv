@@ -7,7 +7,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 
 namespace ssv::infer {
 
@@ -25,14 +24,13 @@ struct SsvTensorRtRuntimeDescriptor {
 
 struct SsvTensorRtEngineManifest {
     std::string engine_sha256;
-    std::string wrapper_sha256;
+    std::string source_model_sha256;
     std::string tensorrt_version;
     int cuda_runtime_version = 0;
     int compute_capability_major = -1;
     int compute_capability_minor = -1;
     ssv::SsvPrecision precision = ssv::SsvPrecision::Fp32;
     TensorSpec input;
-    std::unordered_map<std::string, std::string> wrapper_properties;
 };
 
 [[nodiscard]] SsvTensorRtEngineManifest ssv_tensorrt_manifest_load_and_validate(

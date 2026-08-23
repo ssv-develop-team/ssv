@@ -6,6 +6,7 @@ ssv_inference_core_sources = [
   'core/ssv_inference_service.cpp',
   'core/ssv_inference_stats.cpp',
   'core/ssv_latest_frame_scheduler.cpp',
+  'model/ssv_image_preprocessor.cpp',
   'model/ssv_model_contract.cpp',
   'model/ssv_yolo_parser.cpp',
   'backends/onnxruntime/ssv_onnxruntime_backend.cpp',
@@ -32,6 +33,15 @@ if tensorrt_mode != 'disabled'
       'backends/tensorrt/ssv_tensorrt_backend.cpp',
       'backends/tensorrt/ssv_tensorrt_resources.cpp',
     ]
+    if cuda_enabled
+      ssv_inference_core_sources += [
+        'backends/tensorrt/ssv_tensorrt_cuda_kernel.cu',
+      ]
+    else
+      ssv_inference_core_sources += [
+        'backends/tensorrt/ssv_tensorrt_cuda_kernel.cpp',
+      ]
+    endif
     ssv_inference_core_deps += [tensorrt_dep]
   elif tensorrt_mode == 'enabled'
     error('TensorRT SDK not found; install TensorRT headers/libs or build with tensorrt_mode=disabled')

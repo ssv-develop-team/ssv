@@ -16,14 +16,14 @@
 namespace ssv::infer {
 namespace {
 
-ModelMetadata make_test_wrapper_metadata()
+ModelMetadata make_test_raw_metadata()
 {
     ModelMetadata metadata;
     metadata.inputs.push_back({
-        "images_rgba",
-        DataType::Uint8,
-        {1, 2, 3, 4},
-        TensorLayout::Nhwc,
+        "images",
+        DataType::Float32,
+        {1, 3, 2, 3},
+        TensorLayout::Nchw,
     });
     metadata.outputs.push_back({
         "output0",
@@ -31,20 +31,6 @@ ModelMetadata make_test_wrapper_metadata()
         {1, 1, 6},
         TensorLayout::Unknown,
     });
-    metadata.properties = {
-        {"ssv.wrapper.channel_rule", "drop_alpha_keep_rgb"},
-        {"ssv.wrapper.contract", "rgba_u8_nhwc_v1"},
-        {"ssv.wrapper.dtype", "uint8"},
-        {"ssv.wrapper.height", "2"},
-        {"ssv.wrapper.layout", "NHWC"},
-        {"ssv.wrapper.model_family", "yolo"},
-        {"ssv.wrapper.normalization", "divide_by_255"},
-        {"ssv.wrapper.output_format", "yolo_nx6"},
-        {"ssv.wrapper.source_sha256", std::string(64, 'b')},
-        {"ssv.wrapper.tool", "ssv.prepare_wrapper"},
-        {"ssv.wrapper.tool_version", "1.0.0"},
-        {"ssv.wrapper.width", "3"},
-    };
     return metadata;
 }
 
@@ -73,7 +59,7 @@ public:
         const InferenceConfig &,
         SsvInferenceBufferAllocator &allocator) override
     {
-        metadata_ = make_test_wrapper_metadata();
+        metadata_ = make_test_raw_metadata();
         output_buffer_ = allocator.allocate(
             6 * sizeof(float), alignof(float));
         output_view_ = {
@@ -83,8 +69,8 @@ public:
         return metadata_;
     }
 
-    std::span<const SsvFloatTensorView> infer(
-        const SsvUint8TensorView &,
+    SsvBackendRunResult infer(
+        const SsvFloatTensorView &,
         std::stop_token) override
     {
         static constexpr SsvInferenceTestDetection default_detection;
@@ -100,7 +86,14 @@ public:
         output[3] = detection.y2;
         output[4] = detection.confidence;
         output[5] = static_cast<float>(detection.class_id);
-        return {&output_view_, 1};
+        return {
+            .outputs = {&output_view_, 1},
+            .timings = {
+                .h2d_us = 0,
+                .execution_us = 0,
+                .d2h_us = 0,
+            },
+        };
     }
 
 private:

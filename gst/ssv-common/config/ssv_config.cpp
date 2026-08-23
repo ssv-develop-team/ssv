@@ -294,6 +294,132 @@ void validate_optional_string_field(
     }
 }
 
+YAML::Node required_node(
+    const YAML::Node &node,
+    std::string_view key,
+    std::string_view path)
+{
+    const auto child = node[std::string(key)];
+    if (!child || child.IsNull()) {
+        throw SsvConfigError(
+            SsvConfigErrorKind::MissingRequired,
+            std::string(path),
+            std::string(path) + " is required");
+    }
+    return child;
+}
+
+std::array<float, 3> parse_float_triplet(
+    const YAML::Node &node,
+    std::string_view path)
+{
+    require_sequence(node, path);
+    if (node.size() != 3) {
+        throw_invalid_value(
+            path, std::string(path) + " must contain exactly 3 values");
+    }
+
+    std::array<float, 3> values {};
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const auto item_path = std::string(path) + "["
+            + std::to_string(index) + "]";
+        values[index] = node_as<float>(node[index], item_path);
+        if (!std::isfinite(values[index])) {
+            throw_invalid_value(
+                item_path, item_path + " must be finite");
+        }
+    }
+    return values;
+}
+
+SsvPreprocessConfig parse_preprocess(const YAML::Node &node)
+{
+    constexpr std::string_view path = "inference.model.preprocess";
+    require_map(node, path);
+    reject_unknown_keys(
+        node,
+        path,
+        {"color_order", "resize", "normalization", "execution"});
+
+    SsvPreprocessConfig preprocess;
+    const auto color_order = node_as<std::string>(
+        required_node(node, "color_order", std::string(path) + ".color_order"),
+        std::string(path) + ".color_order");
+    if (color_order == "rgb") {
+        preprocess.color_order = SsvInputColorOrder::Rgb;
+    } else if (color_order == "bgr") {
+        preprocess.color_order = SsvInputColorOrder::Bgr;
+    } else {
+        throw_invalid_value(
+            std::string(path) + ".color_order",
+            std::string(path) + ".color_order must be rgb or bgr");
+    }
+
+    const auto resize = node_as<std::string>(
+        required_node(node, "resize", std::string(path) + ".resize"),
+        std::string(path) + ".resize");
+    if (resize == "letterbox") {
+        preprocess.resize_mode = SsvResizeMode::Letterbox;
+    } else if (resize == "stretch") {
+        preprocess.resize_mode = SsvResizeMode::Stretch;
+    } else {
+        throw_invalid_value(
+            std::string(path) + ".resize",
+            std::string(path) + ".resize must be letterbox or stretch");
+    }
+
+    const auto execution = get_or<std::string>(
+        node, "execution", "auto", std::string(path) + ".execution");
+    if (execution == "auto") {
+        preprocess.execution = SsvPreprocessExecution::Auto;
+    } else if (execution == "cpu") {
+        preprocess.execution = SsvPreprocessExecution::Cpu;
+    } else if (execution == "cuda") {
+        preprocess.execution = SsvPreprocessExecution::Cuda;
+    } else {
+        throw_invalid_value(
+            std::string(path) + ".execution",
+            std::string(path) + ".execution must be auto, cpu or cuda");
+    }
+
+    const auto normalization = required_node(
+        node, "normalization", std::string(path) + ".normalization");
+    require_map(normalization, std::string(path) + ".normalization");
+    reject_unknown_keys(
+        normalization,
+        std::string(path) + ".normalization",
+        {"scale", "mean", "std"});
+
+    const auto scale_path = std::string(path) + ".normalization.scale";
+    preprocess.normalization.scale = node_as<float>(
+        required_node(node["normalization"], "scale", scale_path),
+        scale_path);
+    if (!std::isfinite(preprocess.normalization.scale)
+        || preprocess.normalization.scale <= 0.0F) {
+        throw_invalid_value(
+            scale_path, scale_path + " must be finite and positive");
+    }
+
+    const auto mean_path = std::string(path) + ".normalization.mean";
+    preprocess.normalization.mean = parse_float_triplet(
+        required_node(node["normalization"], "mean", mean_path), mean_path);
+
+    const auto std_path = std::string(path) + ".normalization.std";
+    preprocess.normalization.std = parse_float_triplet(
+        required_node(node["normalization"], "std", std_path), std_path);
+    for (std::size_t index = 0;
+         index < preprocess.normalization.std.size();
+         ++index) {
+        if (preprocess.normalization.std[index] <= 0.0F) {
+            const auto item_path = std_path + "["
+                + std::to_string(index) + "]";
+            throw_invalid_value(
+                item_path, item_path + " must be positive");
+        }
+    }
+    return preprocess;
+}
+
 void validate_worker_common(
     const YAML::Node &node,
     std::string_view path)
@@ -743,6 +869,7 @@ SsvModelConfig parse_model(const YAML::Node &node)
         "family",
         "output_format",
         "label_map",
+        "preprocess",
     });
 
     model.path = get_or<std::string>(
@@ -760,6 +887,10 @@ SsvModelConfig parse_model(const YAML::Node &node)
         "label_map",
         model.label_map,
         "inference.model.label_map");
+    if (const auto preprocess = node["preprocess"];
+        preprocess && !preprocess.IsNull()) {
+        model.preprocess = parse_preprocess(preprocess);
+    }
     if (is_blank(model.label_map)) {
         throw SsvConfigError(
             SsvConfigErrorKind::InvalidValue,
@@ -1004,6 +1135,12 @@ SsvInferenceConfig parse_inference(const YAML::Node &node)
         "target_class",
         inference.target_class,
         "inference.target_class");
+    if (inference.enabled && !inference.model.preprocess) {
+        throw SsvConfigError(
+            SsvConfigErrorKind::MissingRequired,
+            "inference.model.preprocess",
+            "inference.model.preprocess is required when inference is enabled");
+    }
     return inference;
 }
 

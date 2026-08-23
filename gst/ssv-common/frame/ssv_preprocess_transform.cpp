@@ -5,17 +5,36 @@
 #include <cstdint>
 #include <stdexcept>
 
-PreprocessTransform ssv_make_letterbox_transform(
+PreprocessTransform ssv_make_resize_transform(
     int source_width,
     int source_height,
     int model_width,
-    int model_height)
+    int model_height,
+    ssv::SsvResizeMode resize_mode)
 {
     if (source_width <= 0 || source_height <= 0
         || model_width <= 0 || model_height <= 0) {
         throw std::invalid_argument(
-            "letterbox dimensions must be positive");
+            "resize dimensions must be positive");
     }
+
+    if (resize_mode == ssv::SsvResizeMode::Stretch) {
+        return {
+            source_width,
+            source_height,
+            model_width,
+            model_height,
+            static_cast<float>(model_width) / source_width,
+            static_cast<float>(model_height) / source_height,
+            0,
+            0,
+            0,
+            0,
+        };
+    }
+
+    if (resize_mode != ssv::SsvResizeMode::Letterbox)
+        throw std::invalid_argument("unsupported resize mode");
 
     const bool width_limited =
         static_cast<std::int64_t>(source_width) * model_height
@@ -46,11 +65,26 @@ PreprocessTransform ssv_make_letterbox_transform(
         model_width,
         model_height,
         scale,
+        scale,
         pad_left,
         pad_top,
         horizontal_padding - pad_left,
         vertical_padding - pad_top,
     };
+}
+
+PreprocessTransform ssv_make_letterbox_transform(
+    int source_width,
+    int source_height,
+    int model_width,
+    int model_height)
+{
+    return ssv_make_resize_transform(
+        source_width,
+        source_height,
+        model_width,
+        model_height,
+        ssv::SsvResizeMode::Letterbox);
 }
 
 std::optional<SsvDetection> ssv_unmap_model_detection(
@@ -59,7 +93,8 @@ std::optional<SsvDetection> ssv_unmap_model_detection(
 {
     if (transform.source_width <= 0 || transform.source_height <= 0
         || transform.model_width <= 0 || transform.model_height <= 0
-        || !std::isfinite(transform.scale) || transform.scale <= 0.0F
+        || !std::isfinite(transform.scale_x) || transform.scale_x <= 0.0F
+        || !std::isfinite(transform.scale_y) || transform.scale_y <= 0.0F
         || transform.pad_left < 0 || transform.pad_top < 0
         || transform.pad_right < 0 || transform.pad_bottom < 0
         || transform.pad_left + transform.pad_right >= transform.model_width
@@ -70,13 +105,13 @@ std::optional<SsvDetection> ssv_unmap_model_detection(
     const float source_width = static_cast<float>(transform.source_width);
     const float source_height = static_cast<float>(transform.source_height);
     detection.x1 = (detection.x1 - transform.pad_left)
-        / transform.scale / source_width;
+        / transform.scale_x / source_width;
     detection.y1 = (detection.y1 - transform.pad_top)
-        / transform.scale / source_height;
+        / transform.scale_y / source_height;
     detection.x2 = (detection.x2 - transform.pad_left)
-        / transform.scale / source_width;
+        / transform.scale_x / source_width;
     detection.y2 = (detection.y2 - transform.pad_top)
-        / transform.scale / source_height;
+        / transform.scale_y / source_height;
 
     if (!std::isfinite(detection.x1) || !std::isfinite(detection.y1)
         || !std::isfinite(detection.x2) || !std::isfinite(detection.y2)) {

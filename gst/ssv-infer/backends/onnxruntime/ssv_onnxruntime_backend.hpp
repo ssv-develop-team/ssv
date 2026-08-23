@@ -20,9 +20,9 @@ public:
     ModelMetadata load(
         const InferenceConfig &config,
         SsvInferenceBufferAllocator &allocator) override;
-    void warmup() override;
-    std::span<const SsvFloatTensorView> infer(
-        const SsvUint8TensorView &input,
+    void warmup(const SsvFloatTensorView &input) override;
+    SsvBackendRunResult infer(
+        const SsvFloatTensorView &input,
         std::stop_token stop_token) override;
 
 private:

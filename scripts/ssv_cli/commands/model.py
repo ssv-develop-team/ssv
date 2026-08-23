@@ -14,10 +14,6 @@ def export(context: ProjectContext, _args: Namespace) -> int:
     return ModelService(context).export_default()
 
 
-def prepare(context: ProjectContext, args: Namespace) -> int:
-    return ModelService(context).prepare(list(getattr(args, "model_args", ())))
-
-
 def verify(context: ProjectContext, args: Namespace) -> int:
     return ModelService(context).verify(list(getattr(args, "model_args", ())))
 

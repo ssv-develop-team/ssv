@@ -15,6 +15,20 @@ public:
         return info;
     }
 
+    bool supports_hardware_preprocess(
+        const SsvPreprocessPlan &) const override
+    {
+        return false;
+    }
+
+    SsvBackendRunResult infer_hardware(
+        const SsvHardwarePreprocessInput &,
+        std::stop_token) override
+    {
+        throw std::runtime_error(
+            "TensorRT backend is not built; hardware preprocessing is unavailable");
+    }
+
     ModelMetadata load(
         const InferenceConfig &,
         SsvInferenceBufferAllocator &) override
@@ -23,8 +37,8 @@ public:
             "TensorRT backend is not built; set SSV_TENSORRT_MODE=enabled and rerun ./ssv build on a host with TensorRT SDK");
     }
 
-    std::span<const SsvFloatTensorView> infer(
-        const SsvUint8TensorView &,
+    SsvBackendRunResult infer(
+        const SsvFloatTensorView &,
         std::stop_token) override
     {
         throw std::runtime_error("TensorRT backend is not built");

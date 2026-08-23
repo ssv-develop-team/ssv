@@ -41,7 +41,8 @@ struct GmcFrameView {
     int model_width = 0;
     int model_height = 0;
     std::size_t rgba_stride = 0;
-    float source_to_model_scale = 0.0F;
+    float source_to_model_scale_x = 0.0F;
+    float source_to_model_scale_y = 0.0F;
     int pad_left = 0;
     int pad_top = 0;
 };

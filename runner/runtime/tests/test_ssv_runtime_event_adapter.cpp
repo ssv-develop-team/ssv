@@ -59,7 +59,7 @@ void test_disabled_runtime_is_snapshotted_without_runtime_handles()
     assert(payload.cache_status == "disabled");
 }
 
-void test_tensorrt_runtime_uses_wrapper_identity_and_device_capability()
+void test_tensorrt_runtime_uses_source_model_identity_and_device_capability()
 {
     ssv::SsvConfig config;
     ssv::SsvSourceConfig source;
@@ -88,7 +88,7 @@ void test_tensorrt_runtime_uses_wrapper_identity_and_device_capability()
             .provider_device = "device:2/compute_capability:8.9",
             .precision = "fp16",
             .model_hash = std::string(64, 'c'),
-            .input_contract = "rgba_u8_nhwc_v1",
+            .input_contract = "float32[1,3,640,640]:NCHW",
             .cache_status = "disabled",
             .fallbacks = {},
         },
@@ -107,7 +107,7 @@ void test_tensorrt_runtime_uses_wrapper_identity_and_device_capability()
     assert(payload.precision == "fp16");
     assert(payload.model_hash == std::string(64, 'c'));
     assert(payload.model_hash != std::string(64, 'b'));
-    assert(payload.input_contract == "rgba_u8_nhwc_v1");
+    assert(payload.input_contract == "float32[1,3,640,640]:NCHW");
     assert(payload.cache_status == "disabled");
 }
 
@@ -166,7 +166,7 @@ void test_provider_fallbacks_copy_snapshot_values_in_order()
         .provider_device = "device:0",
         .precision = "fp16",
         .model_hash = std::string(64, 'a'),
-        .input_contract = "rgba_u8_nhwc_v1",
+        .input_contract = "float32[1,3,640,640]:NCHW",
         .cache_status = "hit",
         .fallbacks = {
             {
@@ -245,8 +245,8 @@ void test_inference_stats_converts_microseconds_to_owning_durations()
     stats.completed_fps = 1.6;
     stats.longest_result_gap_us = 750'000;
     stats.queue = {10, 20};
-    stats.device = {100, 200};
-    stats.output_copy = {0, 0};
+    stats.backend_execution = {100, 200};
+    stats.backend_d2h = {};
     stats.postprocess = {30, 60};
     stats.total = {140, 280};
 
@@ -261,16 +261,22 @@ void test_inference_stats_converts_microseconds_to_owning_durations()
     assert(payload.completed == 8);
     assert(payload.completed_fps == 1.6);
     assert(payload.longest_result_gap == std::chrono::microseconds {750'000});
-    assert(payload.queue.p50 == std::chrono::microseconds {10});
-    assert(payload.queue.p95 == std::chrono::microseconds {20});
-    assert(payload.device.p50 == std::chrono::microseconds {100});
-    assert(payload.device.p95 == std::chrono::microseconds {200});
-    assert(payload.output_copy.p50 == std::chrono::microseconds {0});
-    assert(payload.output_copy.p95 == std::chrono::microseconds {0});
-    assert(payload.postprocess.p50 == std::chrono::microseconds {30});
-    assert(payload.postprocess.p95 == std::chrono::microseconds {60});
-    assert(payload.total.p50 == std::chrono::microseconds {140});
-    assert(payload.total.p95 == std::chrono::microseconds {280});
+    assert(payload.queue.p50 && *payload.queue.p50 == std::chrono::microseconds {10});
+    assert(payload.queue.p95 && *payload.queue.p95 == std::chrono::microseconds {20});
+    assert(payload.backend_execution.p50
+        && *payload.backend_execution.p50 == std::chrono::microseconds {100});
+    assert(payload.backend_execution.p95
+        && *payload.backend_execution.p95 == std::chrono::microseconds {200});
+    assert(!payload.backend_d2h.p50);
+    assert(!payload.backend_d2h.p95);
+    assert(payload.postprocess.p50
+        && *payload.postprocess.p50 == std::chrono::microseconds {30});
+    assert(payload.postprocess.p95
+        && *payload.postprocess.p95 == std::chrono::microseconds {60});
+    assert(payload.total.p50
+        && *payload.total.p50 == std::chrono::microseconds {140});
+    assert(payload.total.p95
+        && *payload.total.p95 == std::chrono::microseconds {280});
 }
 
 } // namespace
@@ -278,7 +284,7 @@ void test_inference_stats_converts_microseconds_to_owning_durations()
 int main()
 {
     test_disabled_runtime_is_snapshotted_without_runtime_handles();
-    test_tensorrt_runtime_uses_wrapper_identity_and_device_capability();
+    test_tensorrt_runtime_uses_source_model_identity_and_device_capability();
     test_runtime_snapshot_presence_must_match_inference_config();
     test_provider_fallbacks_copy_snapshot_values_in_order();
     test_buffer_contract_failure_copies_all_contract_fields();

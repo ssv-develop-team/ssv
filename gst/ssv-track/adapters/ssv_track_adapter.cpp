@@ -49,7 +49,8 @@ bool same_geometry(
         && left.source_height == right.source_height
         && left.model_width == right.model_width
         && left.model_height == right.model_height
-        && left.scale == right.scale
+        && left.scale_x == right.scale_x
+        && left.scale_y == right.scale_y
         && left.pad_left == right.pad_left
         && left.pad_top == right.pad_top
         && left.pad_right == right.pad_right
@@ -86,7 +87,8 @@ std::vector<SsvTrackedObject> SsvTrackAdapter::process(
         gmc_frame.model_width = rgba_frame->width;
         gmc_frame.model_height = rgba_frame->height;
         gmc_frame.rgba_stride = rgba_frame->stride;
-        gmc_frame.source_to_model_scale = transform.scale;
+        gmc_frame.source_to_model_scale_x = transform.scale_x;
+        gmc_frame.source_to_model_scale_y = transform.scale_y;
         gmc_frame.pad_left = transform.pad_left;
         gmc_frame.pad_top = transform.pad_top;
     }

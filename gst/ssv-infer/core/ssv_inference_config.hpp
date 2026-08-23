@@ -21,6 +21,7 @@ struct InferenceConfig {
     float confidence_threshold = 0.5f;
     std::string target_class = "person";
     std::string label_map = "config/model-labels/coco80.txt";
+    std::optional<ssv::SsvPreprocessConfig> preprocess;
 };
 
 [[nodiscard]] InferenceConfig make_inference_config(

@@ -3,6 +3,8 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
+#include "ssv_config.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -30,7 +32,8 @@ struct PreprocessTransform {
     int source_height = 0;
     int model_width = 0;
     int model_height = 0;
-    float scale = 0.0F;
+    float scale_x = 0.0F;
+    float scale_y = 0.0F;
     int pad_left = 0;
     int pad_top = 0;
     int pad_right = 0;
@@ -38,6 +41,13 @@ struct PreprocessTransform {
 
     bool operator==(const PreprocessTransform &) const = default;
 };
+
+[[nodiscard]] PreprocessTransform ssv_make_resize_transform(
+    int source_width,
+    int source_height,
+    int model_width,
+    int model_height,
+    ssv::SsvResizeMode resize_mode);
 
 [[nodiscard]] PreprocessTransform ssv_make_letterbox_transform(
     int source_width,

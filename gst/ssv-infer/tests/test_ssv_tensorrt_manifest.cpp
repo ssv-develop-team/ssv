@@ -53,7 +53,7 @@ nlohmann::json valid_manifest(std::span<const std::byte> engine_bytes)
 {
     return {
         {"schema", "ssv.tensorrt-engine-manifest"},
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"engine",
             {
                 {"sha256", sha256(engine_bytes)},
@@ -66,20 +66,15 @@ nlohmann::json valid_manifest(std::span<const std::byte> engine_bytes)
                         {"minor", 9},
                     }},
             }},
-        {"wrapper",
+        {"source_model",
             {
-                {"sha256", std::string(64, 'b')},
-                {"contract", "rgba_u8_nhwc_v1"},
-                {"source_sha256", std::string(64, 'a')},
-                {"tool_version", "1.0.0"},
-                {"model_family", "yolo"},
-                {"output_format", "yolov8"},
+                {"sha256", std::string(64, 'a')},
                 {"input",
                     {
-                        {"name", "images_rgba"},
-                        {"dtype", "uint8"},
-                        {"layout", "NHWC"},
-                        {"shape", {1, 2, 3, 4}},
+                        {"name", "images"},
+                        {"dtype", "float32"},
+                        {"layout", "NCHW"},
+                        {"shape", {1, 3, 2, 3}},
                     }},
             }},
     };
@@ -117,7 +112,7 @@ void expect_manifest_error(nlohmann::json manifest_json,
     }
 }
 
-void test_valid_manifest_supplies_the_wrapper_contract()
+void test_valid_manifest_supplies_the_engine_input_contract()
 {
     TemporaryDirectory temporary;
     const std::string engine_bytes = "engine-bytes";
@@ -131,10 +126,10 @@ void test_valid_manifest_supplies_the_wrapper_contract()
 
     ssv::infer::ModelMetadata metadata;
     metadata.inputs.push_back({
-        .name = "images_rgba",
-        .dtype = ssv::infer::DataType::Uint8,
-        .shape = {1, 2, 3, 4},
-        .layout = ssv::infer::TensorLayout::Nhwc,
+        .name = "images",
+        .dtype = ssv::infer::DataType::Float32,
+        .shape = {1, 3, 2, 3},
+        .layout = ssv::infer::TensorLayout::Nchw,
     });
     metadata.outputs.push_back({
         .name = "output0",
@@ -145,12 +140,13 @@ void test_valid_manifest_supplies_the_wrapper_contract()
 
     const auto contract = ssv::infer::ssv_model_contract_validate(metadata,
         ssv::infer::ModelFamily::Yolo,
-        ssv::infer::OutputFormat::YoloV8);
+        ssv::infer::OutputFormat::YoloV8,
+        ssv::SsvResizeMode::Letterbox);
     assert(contract.width == 3);
     assert(contract.height == 2);
-    assert(contract.input_bytes == 24);
+    assert(contract.resize_mode == ssv::SsvResizeMode::Letterbox);
     assert(manifest.precision == ssv::SsvPrecision::Fp16);
-    assert(manifest.wrapper_sha256 == std::string(64, 'b'));
+    assert(manifest.source_model_sha256 == std::string(64, 'a'));
 }
 
 void test_rejects_unknown_manifest_keys()
@@ -175,16 +171,16 @@ void test_rejects_wrong_manifest_field_types()
         std::move(manifest), engine_view, "schema_version must be an integer");
 }
 
-void test_rejects_unsupported_wrapper_contract()
+void test_rejects_v1_manifest()
 {
     const std::string engine_bytes = "engine-bytes";
     const auto engine_view = std::as_bytes(std::span(engine_bytes));
     auto manifest = valid_manifest(engine_view);
-    manifest["wrapper"]["contract"] = "legacy_rgba";
+    manifest["schema_version"] = 1;
 
     expect_manifest_error(std::move(manifest),
         engine_view,
-        "wrapper.contract must be rgba_u8_nhwc_v1");
+        "unsupported TensorRT engine manifest schema");
 }
 
 void test_rejects_engine_identity_mismatches()
@@ -230,10 +226,10 @@ void test_rejects_engine_input_mismatch()
 
     ssv::infer::ModelMetadata metadata;
     metadata.inputs.push_back({
-        .name = "images_rgba",
-        .dtype = ssv::infer::DataType::Uint8,
+        .name = "images",
+        .dtype = ssv::infer::DataType::Float32,
         .shape = {1, 3, 2, 4},
-        .layout = ssv::infer::TensorLayout::Nhwc,
+        .layout = ssv::infer::TensorLayout::Nchw,
     });
     try {
         ssv::infer::ssv_tensorrt_manifest_apply(manifest, metadata);
@@ -248,10 +244,10 @@ void test_rejects_engine_input_mismatch()
 
 int main()
 {
-    test_valid_manifest_supplies_the_wrapper_contract();
+    test_valid_manifest_supplies_the_engine_input_contract();
     test_rejects_unknown_manifest_keys();
     test_rejects_wrong_manifest_field_types();
-    test_rejects_unsupported_wrapper_contract();
+    test_rejects_v1_manifest();
     test_rejects_engine_identity_mismatches();
     test_rejects_engine_input_mismatch();
     return 0;

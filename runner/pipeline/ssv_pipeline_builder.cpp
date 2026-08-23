@@ -122,6 +122,23 @@ void set_caps(GstElement *filter, const std::string &description)
     g_object_set(filter, "caps", caps.get(), nullptr);
 }
 
+void configure_resize_borders(
+    GstElement *element,
+    bool add_borders)
+{
+    const auto *property = g_object_class_find_property(
+        G_OBJECT_GET_CLASS(element), "add-borders");
+    if (property == nullptr
+        || (property->flags & G_PARAM_WRITABLE) == 0) {
+        throw SsvPipelineBuilderError(
+            SsvExitCode::CapabilityUnavailable,
+            "capability.pipeline",
+            std::string("resize element does not support writable add-borders: ")
+                + GST_ELEMENT_NAME(element));
+    }
+    g_object_set(element, "add-borders", add_borders, nullptr);
+}
+
 void link_elements(GstElement *upstream, GstElement *downstream)
 {
     if (!gst_element_link(upstream, downstream)) {
@@ -734,6 +751,14 @@ SsvPipelineInstance SsvPipelineBuilder::build(
     }
 
     if (topology.analysis) {
+        if (!model_contract) {
+            throw SsvPipelineBuilderError(
+                SsvExitCode::ModelInitializationFailed,
+                "inference.model_contract",
+                "analysis pipeline requires a validated model contract");
+        }
+        const bool add_borders = model_contract->resize_mode
+            == SsvResizeMode::Letterbox;
         configure_queue(
             required_element(elements, topology.analysis->stages.front().name),
             *topology.analysis);
@@ -741,19 +766,13 @@ SsvPipelineInstance SsvPipelineBuilder::build(
             if (item.factory == "videorate") {
                 configure_rate(required_element(elements, item.name),
                                *topology.analysis);
+            } else if (item.factory == "videoscale") {
+                configure_resize_borders(
+                    required_element(elements, item.name), add_borders);
             } else if (item.factory == plan.decode.va_postproc_factory) {
                 auto *postproc = required_element(elements, item.name);
                 configure_va_device(postproc, plan.decode);
-                const auto *add_borders = g_object_class_find_property(
-                    G_OBJECT_GET_CLASS(postproc), "add-borders");
-                if (add_borders == nullptr
-                    || (add_borders->flags & G_PARAM_WRITABLE) == 0) {
-                    throw SsvPipelineBuilderError(
-                        SsvExitCode::CapabilityUnavailable,
-                        "capability.pipeline",
-                        "VA post-processor does not support letterbox borders");
-                }
-                g_object_set(postproc, "add-borders", TRUE, nullptr);
+                configure_resize_borders(postproc, add_borders);
             }
         }
         set_caps(

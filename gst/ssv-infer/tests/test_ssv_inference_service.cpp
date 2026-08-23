@@ -54,15 +54,14 @@ private:
     std::filesystem::path path_;
 };
 
-ssv::infer::ModelMetadata make_wrapper_metadata(
-    std::string output_format = "yolov8")
+ssv::infer::ModelMetadata make_raw_metadata()
 {
     ssv::infer::ModelMetadata metadata;
     ssv::infer::TensorSpec input;
-    input.name = "images_rgba";
-    input.dtype = ssv::infer::DataType::Uint8;
-    input.shape = {1, 2, 3, 4};
-    input.layout = ssv::infer::TensorLayout::Nhwc;
+    input.name = "images";
+    input.dtype = ssv::infer::DataType::Float32;
+    input.shape = {1, 3, 2, 3};
+    input.layout = ssv::infer::TensorLayout::Nchw;
     metadata.inputs.push_back(std::move(input));
 
     ssv::infer::TensorSpec output;
@@ -71,20 +70,6 @@ ssv::infer::ModelMetadata make_wrapper_metadata(
     output.shape = {1, 1, 6};
     metadata.outputs.push_back(std::move(output));
 
-    metadata.properties = {
-        {"ssv.wrapper.channel_rule", "drop_alpha_keep_rgb"},
-        {"ssv.wrapper.contract", "rgba_u8_nhwc_v1"},
-        {"ssv.wrapper.dtype", "uint8"},
-        {"ssv.wrapper.height", "2"},
-        {"ssv.wrapper.layout", "NHWC"},
-        {"ssv.wrapper.model_family", "yolo"},
-        {"ssv.wrapper.normalization", "divide_by_255"},
-        {"ssv.wrapper.output_format", std::move(output_format)},
-        {"ssv.wrapper.source_sha256", std::string(64, 'a')},
-        {"ssv.wrapper.tool", "ssv.prepare_wrapper"},
-        {"ssv.wrapper.tool_version", "1.0.0"},
-        {"ssv.wrapper.width", "3"},
-    };
     return metadata;
 }
 
@@ -107,8 +92,11 @@ private:
 
 class FakeBackend final : public ssv::infer::InferenceBackend {
 public:
-    explicit FakeBackend(ssv::infer::BackendInfo info = {})
+    explicit FakeBackend(
+        ssv::infer::BackendInfo info = {},
+        bool hardware_preprocess_supported = false)
         : info_(std::move(info))
+        , hardware_preprocess_supported_(hardware_preprocess_supported)
     {
     }
 
@@ -118,7 +106,7 @@ public:
         const ssv::infer::InferenceConfig &,
         ssv::infer::SsvInferenceBufferAllocator &allocator) override
     {
-        metadata_ = make_wrapper_metadata("yolo_nx6");
+        metadata_ = make_raw_metadata();
         output_buffer_ = allocator.allocate(
             6 * sizeof(float), alignof(float));
         output_view_.spec = &metadata_.outputs.front();
@@ -126,22 +114,73 @@ public:
         return metadata_;
     }
 
-    std::span<const ssv::infer::SsvFloatTensorView> infer(
-        const ssv::infer::SsvUint8TensorView &input,
+    bool supports_hardware_preprocess(
+        const ssv::infer::SsvPreprocessPlan &plan) const override
+    {
+        assert(plan.canvas_width == 3);
+        assert(plan.canvas_height == 2);
+        return hardware_preprocess_supported_;
+    }
+
+    ssv::infer::SsvBackendRunResult infer(
+        const ssv::infer::SsvFloatTensorView &input,
         std::stop_token) override
     {
-        assert(input.host_data.size() == 24);
+        assert(input.host_data.size() == 18);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         auto output = output_buffer_.as_span<float>();
         const std::array<float, 6> detection = {
             0.1F, 0.2F, 0.4F, 0.8F, 0.9F, 0.0F};
         std::copy(detection.begin(), detection.end(), output.begin());
-        return std::span<const ssv::infer::SsvFloatTensorView>(
-            &output_view_, 1);
+        return {
+            .outputs = std::span<const ssv::infer::SsvFloatTensorView>(
+                &output_view_, 1),
+            .timings = {
+                .h2d_us = 0,
+                .execution_us = 2'000,
+                .d2h_us = 0,
+            },
+        };
+    }
+
+    ssv::infer::SsvBackendRunResult infer_hardware(
+        const ssv::infer::SsvHardwarePreprocessInput &input,
+        std::stop_token) override
+    {
+        assert(hardware_preprocess_supported_);
+        assert(input.rgba.width == 3);
+        assert(input.rgba.height == 2);
+        assert(input.rgba.stride >= 12);
+        assert(input.rgba.bytes.size() >= 24);
+        assert(input.plan.color_order == ssv::SsvInputColorOrder::Rgb);
+        assert(input.plan.resize_mode == ssv::SsvResizeMode::Letterbox);
+        assert(input.cpu_input.host_data.size() == 18);
+        ++hardware_call_count_;
+        auto output = output_buffer_.as_span<float>();
+        const std::array<float, 6> detection = {
+            0.1F, 0.2F, 0.4F, 0.8F, 0.9F, 0.0F};
+        std::copy(detection.begin(), detection.end(), output.begin());
+        return {
+            .outputs = std::span<const ssv::infer::SsvFloatTensorView>(
+                &output_view_, 1),
+            .timings = {
+                .h2d_us = 11,
+                .preprocess_us = 7,
+                .execution_us = 13,
+                .d2h_us = 17,
+            },
+        };
+    }
+
+    [[nodiscard]] std::size_t hardware_call_count() const noexcept
+    {
+        return hardware_call_count_;
     }
 
 private:
     ssv::infer::BackendInfo info_;
+    bool hardware_preprocess_supported_ = false;
+    std::size_t hardware_call_count_ = 0;
     ssv::infer::ModelMetadata metadata_;
     ssv::infer::SsvInferenceBuffer output_buffer_;
     ssv::infer::SsvFloatTensorView output_view_;
@@ -155,13 +194,11 @@ public:
         const ssv::infer::InferenceConfig &,
         ssv::infer::SsvInferenceBufferAllocator &) override
     {
-        auto metadata = make_wrapper_metadata();
-        metadata.properties.clear();
-        return metadata;
+        return make_raw_metadata();
     }
 
-    std::span<const ssv::infer::SsvFloatTensorView> infer(
-        const ssv::infer::SsvUint8TensorView &,
+    ssv::infer::SsvBackendRunResult infer(
+        const ssv::infer::SsvFloatTensorView &,
         std::stop_token) override
     {
         return {};
@@ -176,7 +213,7 @@ public:
         const ssv::infer::InferenceConfig &,
         ssv::infer::SsvInferenceBufferAllocator &allocator) override
     {
-        metadata_ = make_wrapper_metadata("yolo_nx6");
+        metadata_ = make_raw_metadata();
         output_buffer_ = allocator.allocate(
             6 * sizeof(float), alignof(float));
         output_view_.spec = &metadata_.outputs.front();
@@ -184,10 +221,11 @@ public:
         return metadata_;
     }
 
-    std::span<const ssv::infer::SsvFloatTensorView> infer(
-        const ssv::infer::SsvUint8TensorView &,
+    ssv::infer::SsvBackendRunResult infer(
+        const ssv::infer::SsvFloatTensorView &,
         std::stop_token stop_token) override
     {
+        const auto execution_started = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(mutex_);
         ++entered_count_;
         const auto call_index = entered_count_;
@@ -216,8 +254,19 @@ public:
         const std::array<float, 6> detection = {
             0.1F, 0.2F, 0.4F, 0.8F, 0.9F, 0.0F};
         std::copy(detection.begin(), detection.end(), output.begin());
-        return std::span<const ssv::infer::SsvFloatTensorView>(
-            &output_view_, 1);
+        const auto execution_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - execution_started)
+                .count());
+        return {
+            .outputs = std::span<const ssv::infer::SsvFloatTensorView>(
+                &output_view_, 1),
+            .timings = {
+                .h2d_us = 0,
+                .execution_us = execution_us,
+                .d2h_us = 0,
+            },
+        };
     }
 
     bool wait_until_entered(std::size_t expected)
@@ -268,6 +317,15 @@ ssv::SsvInferenceConfig make_inference_config()
     config.model.family = "yolo";
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {
+        .color_order = ssv::SsvInputColorOrder::Rgb,
+        .resize_mode = ssv::SsvResizeMode::Letterbox,
+        .normalization = {
+            .scale = 1.0F / 255.0F,
+            .mean = {0.0F, 0.0F, 0.0F},
+            .std = {1.0F, 1.0F, 1.0F},
+        },
+    };
     config.target_class = "person";
     return config;
 }
@@ -297,7 +355,7 @@ ssv::infer::SsvInferenceRequest make_request(
             service,
             buffer,
             info,
-            {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+            {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
             {frame_id * GST_SECOND, GST_SECOND / 15, 7});
     gst_buffer_unref(buffer);
     return request;
@@ -362,9 +420,24 @@ void test_inference_stats_summarizes_a_fixed_window()
     input.received = 5;
     input.dropped = 2;
     input.completed_samples = {
-        {2'000'000, {10, 100, 0, 40, 160}},
-        {3'000'000, {30, 300, 0, 60, 390}},
-        {5'500'000, {20, 200, 0, 50, 270}},
+        {2'000'000, {
+            .queue_us = 10,
+            .backend_execution_us = 100,
+            .postprocess_us = 40,
+            .total_us = 160,
+        }},
+        {3'000'000, {
+            .queue_us = 30,
+            .backend_execution_us = 300,
+            .postprocess_us = 60,
+            .total_us = 390,
+        }},
+        {5'500'000, {
+            .queue_us = 20,
+            .backend_execution_us = 200,
+            .postprocess_us = 50,
+            .total_us = 270,
+        }},
     };
 
     const auto stats = ssv::infer::ssv_inference_stats_summarize(input);
@@ -374,38 +447,95 @@ void test_inference_stats_summarizes_a_fixed_window()
     assert(stats.completed == 3);
     assert(stats.completed_fps == 0.6);
     assert(stats.longest_result_gap_us == 2'500'000);
-    assert(stats.queue.p50_us == 20);
-    assert(stats.queue.p95_us == 30);
-    assert(stats.device.p50_us == 200);
-    assert(stats.device.p95_us == 300);
-    assert(stats.output_copy.p50_us == 0);
-    assert(stats.output_copy.p95_us == 0);
-    assert(stats.postprocess.p50_us == 50);
-    assert(stats.postprocess.p95_us == 60);
-    assert(stats.total.p50_us == 270);
-    assert(stats.total.p95_us == 390);
+    assert(stats.queue.p50_us && *stats.queue.p50_us == 20);
+    assert(stats.queue.p95_us && *stats.queue.p95_us == 30);
+    assert(stats.backend_execution.p50_us && *stats.backend_execution.p50_us == 200);
+    assert(stats.backend_execution.p95_us && *stats.backend_execution.p95_us == 300);
+    assert(!stats.backend_d2h.p50_us);
+    assert(!stats.backend_d2h.p95_us);
+    assert(stats.postprocess.p50_us && *stats.postprocess.p50_us == 50);
+    assert(stats.postprocess.p95_us && *stats.postprocess.p95_us == 60);
+    assert(stats.total.p50_us && *stats.total.p50_us == 270);
+    assert(stats.total.p95_us && *stats.total.p95_us == 390);
 }
 
-void test_model_contract_accepts_only_wrapper_input()
+void test_unmeasured_backend_stage_is_not_reported_as_zero()
 {
-    auto metadata = make_wrapper_metadata();
+    ssv::infer::SsvInferenceStatsWindowInput input;
+    input.started_at_us = 0;
+    input.ended_at_us = 1'000;
+    input.completed_samples = {
+        {500, {
+            .backend_unattributed_us = 123,
+            .total_us = 140,
+        }},
+    };
+
+    const auto stats = ssv::infer::ssv_inference_stats_summarize(input);
+    assert(!stats.backend_d2h.p50_us);
+    assert(!stats.backend_d2h.p95_us);
+    assert(stats.backend_unattributed.p50_us
+        && *stats.backend_unattributed.p50_us == 123);
+    assert(stats.backend_unattributed.p95_us
+        && *stats.backend_unattributed.p95_us == 123);
+}
+
+void test_model_contract_accepts_raw_float_input_without_metadata()
+{
+    auto metadata = make_raw_metadata();
     const auto contract = ssv::infer::ssv_model_contract_validate(
         metadata,
         ssv::infer::ModelFamily::Yolo,
-        ssv::infer::OutputFormat::YoloV8);
+        ssv::infer::OutputFormat::YoloV8,
+        ssv::SsvResizeMode::Letterbox);
     assert(contract.width == 3);
     assert(contract.height == 2);
-    assert(contract.input_bytes == 24);
+    assert(contract.resize_mode == ssv::SsvResizeMode::Letterbox);
 
-    metadata.properties.clear();
+    const auto input = ssv::infer::ssv_model_input_contract_validate(
+        metadata,
+        ssv::infer::ModelFamily::Yolo,
+        ssv::infer::OutputFormat::YoloV8);
+    assert(input.element_count == 18);
+    assert(input.byte_size == 18 * sizeof(float));
+    assert(input.description() == "float32[1,3,2,3]:NCHW");
+
+    auto invalid_dtype = metadata;
+    invalid_dtype.inputs.front().dtype = ssv::infer::DataType::Uint8;
     try {
-        static_cast<void>(ssv::infer::ssv_model_contract_validate(
-            metadata,
+        static_cast<void>(ssv::infer::ssv_model_input_contract_validate(
+            invalid_dtype,
             ssv::infer::ModelFamily::Yolo,
             ssv::infer::OutputFormat::YoloV8));
-        assert(false && "raw model was accepted as an SSV wrapper");
+        assert(false && "uint8 raw input was accepted");
     } catch (const ssv::infer::SsvModelContractError &error) {
-        assert(std::string(error.what()).find("ssv.wrapper.contract")
+        assert(std::string(error.what()).find("float32")
+            != std::string::npos);
+    }
+
+    auto invalid_layout = metadata;
+    invalid_layout.inputs.front().layout = ssv::infer::TensorLayout::Nhwc;
+    try {
+        static_cast<void>(ssv::infer::ssv_model_input_contract_validate(
+            invalid_layout,
+            ssv::infer::ModelFamily::Yolo,
+            ssv::infer::OutputFormat::YoloV8));
+        assert(false && "NHWC raw input was accepted");
+    } catch (const ssv::infer::SsvModelContractError &error) {
+        assert(std::string(error.what()).find("NCHW")
+            != std::string::npos);
+    }
+
+    auto invalid_shape = metadata;
+    invalid_shape.inputs.front().shape = {1, 3, 0, 3};
+    try {
+        static_cast<void>(ssv::infer::ssv_model_input_contract_validate(
+            invalid_shape,
+            ssv::infer::ModelFamily::Yolo,
+            ssv::infer::OutputFormat::YoloV8));
+        assert(false && "dynamic raw input was accepted");
+    } catch (const ssv::infer::SsvModelContractError &error) {
+        assert(std::string(error.what()).find("[1,3,H,W]")
             != std::string::npos);
     }
 }
@@ -445,7 +575,7 @@ void test_service_projects_onnx_runtime_snapshot()
     assert(snapshot.provider_device == "pci:0000:01:00.0");
     assert(snapshot.precision == "fp16");
     assert(snapshot.model_hash == std::string(64, 'd'));
-    assert(snapshot.input_contract == "rgba_u8_nhwc_v1");
+    assert(snapshot.input_contract == "float32[1,3,2,3]:NCHW");
     assert(snapshot.cache_status == "hit");
     assert(snapshot.fallbacks.size() == 2);
     assert(snapshot.fallbacks[0].provider
@@ -479,7 +609,7 @@ void test_service_projects_cpu_runtime_defaults()
     assert(snapshot.provider_device == "unknown");
     assert(snapshot.precision == "unknown");
     assert(snapshot.model_hash == "unknown");
-    assert(snapshot.input_contract == "rgba_u8_nhwc_v1");
+    assert(snapshot.input_contract == "float32[1,3,2,3]:NCHW");
     assert(snapshot.cache_status == "disabled");
     assert(snapshot.fallbacks.empty());
 }
@@ -489,7 +619,7 @@ void test_service_projects_tensorrt_runtime_snapshot()
     ssv::infer::BackendInfo backend;
     backend.runtime = ssv::infer::TensorRtEngineBackendInfo {
         .engine_hash = std::string(64, 'b'),
-        .wrapper_hash = std::string(64, 'c'),
+        .source_model_hash = std::string(64, 'c'),
         .tensorrt_version = "11.1.0.106",
         .cuda_runtime_version = 13020,
         .compute_capability_major = 8,
@@ -509,7 +639,7 @@ void test_service_projects_tensorrt_runtime_snapshot()
         == "device:2/compute_capability:8.9");
     assert(snapshot.precision == "fp32");
     assert(snapshot.model_hash == std::string(64, 'c'));
-    assert(snapshot.input_contract == "rgba_u8_nhwc_v1");
+    assert(snapshot.input_contract == "float32[1,3,2,3]:NCHW");
     assert(snapshot.cache_status == "disabled");
     assert(snapshot.fallbacks.empty());
 }
@@ -562,7 +692,7 @@ void test_runtime_snapshot_is_stable_and_owning()
     assert(snapshot.provider_device == "unknown");
     assert(snapshot.precision == "auto");
     assert(snapshot.model_hash == std::string(64, 'e'));
-    assert(snapshot.input_contract == "rgba_u8_nhwc_v1");
+    assert(snapshot.input_contract == "float32[1,3,2,3]:NCHW");
     assert(snapshot.cache_status == "disabled");
     assert(snapshot.fallbacks.size() == 1);
     assert(snapshot.fallbacks[0].reason
@@ -642,19 +772,14 @@ void test_runtime_snapshot_rejects_invalid_services()
     g_object_unref(invalid_service);
 }
 
-void test_service_reports_raw_model_as_contract_failure()
+void test_service_accepts_raw_model_without_wrapper_metadata()
 {
-    try {
-        static_cast<void>(
-            ssv::infer::ssv_inference_service_create_with_backend(
-                make_inference_config(),
-                std::make_unique<RawModelBackend>()));
-        assert(false && "service accepted raw model metadata");
-    } catch (const ssv::infer::SsvInferenceServiceError &error) {
-        assert(error.stage() == "inference.model_contract");
-        assert(std::string(error.what()).find("ssv.wrapper.contract")
-            != std::string::npos);
-    }
+    auto service = ssv::infer::ssv_inference_service_create_with_backend(
+        make_inference_config(), std::make_unique<RawModelBackend>());
+    assert(ssv::infer::ssv_inference_service_is_running(service.get()));
+    const auto snapshot =
+        ssv::infer::ssv_inference_service_runtime_snapshot(service.get());
+    assert(snapshot.input_contract == "float32[1,3,2,3]:NCHW");
 }
 
 void test_service_rejects_empty_label_map_before_backend_load()
@@ -714,7 +839,7 @@ void test_service_owns_the_model_sized_analysis_frame_pool()
         service.get(),
         buffer,
         info,
-        {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+        {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
         {GST_SECOND, GST_SECOND / 15, 2});
     gst_buffer_unref(buffer);
 
@@ -758,7 +883,8 @@ void test_service_exposes_model_contract_and_source_letterbox_transform()
     assert(transform.source_height == 4);
     assert(transform.model_width == 3);
     assert(transform.model_height == 2);
-    assert(transform.scale == 0.5F);
+    assert(transform.scale_x == 0.5F);
+    assert(transform.scale_y == 0.5F);
     assert(transform.pad_left == 0);
     assert(transform.pad_right == 1);
     assert(transform.pad_top == 0);
@@ -768,9 +894,32 @@ void test_service_exposes_model_contract_and_source_letterbox_transform()
         service.get(), "camera-01", 6, 2);
     transform = ssv::infer::ssv_inference_service_preprocess_transform(
         service.get(), "camera-01");
-    assert(transform.scale == 0.5F);
+    assert(transform.scale_x == 0.5F);
+    assert(transform.scale_y == 0.5F);
     assert(transform.pad_top == 0);
     assert(transform.pad_bottom == 1);
+}
+
+void test_service_exposes_source_stretch_transform()
+{
+    auto config = make_inference_config();
+    config.model.preprocess->resize_mode = ssv::SsvResizeMode::Stretch;
+    auto service = ssv::infer::ssv_inference_service_create_with_backend(
+        config, std::make_unique<FakeBackend>());
+
+    ssv::infer::ssv_inference_service_update_source_geometry(
+        service.get(), "camera-01", 4, 4);
+    const auto transform =
+        ssv::infer::ssv_inference_service_preprocess_transform(
+            service.get(), "camera-01");
+    assert(transform.source_width == 4);
+    assert(transform.source_height == 4);
+    assert(transform.scale_x == 0.75F);
+    assert(transform.scale_y == 0.5F);
+    assert(transform.pad_left == 0);
+    assert(transform.pad_top == 0);
+    assert(transform.pad_right == 0);
+    assert(transform.pad_bottom == 0);
 }
 
 void test_completed_detection_shares_the_analysis_frame()
@@ -786,7 +935,7 @@ void test_completed_detection_shares_the_analysis_frame()
         service.get(),
         buffer,
         info,
-        {6, 4, 3, 2, 0.5F, 0, 0, 0, 0},
+        {6, 4, 3, 2, 0.5F, 0.5F, 0, 0, 0, 0},
         {5 * GST_SECOND, GST_SECOND / 15, 7});
     gst_buffer_unref(buffer);
 
@@ -823,7 +972,7 @@ void test_service_preserves_timing_and_reuses_fixed_buffers()
         config, std::make_unique<FakeBackend>(), allocator);
     assert(service != nullptr);
     assert(ssv::infer::ssv_inference_service_is_running(service.get()));
-    assert(allocator->allocation_count == 1);
+    assert(allocator->allocation_count == 2);
 
     auto request = make_request(service.get(), 42);
     const auto expected_timing = request.analysis_frame->timing();
@@ -839,7 +988,7 @@ void test_service_preserves_timing_and_reuses_fixed_buffers()
         assert(result.detections.detections.size() == 1);
     }
 
-    assert(allocator->allocation_count == 1);
+    assert(allocator->allocation_count == 2);
     const auto stats =
         ssv::infer::ssv_inference_service_stats(service.get());
     assert(stats.submitted == 2);
@@ -872,10 +1021,13 @@ void test_service_exposes_and_resets_inference_stats_windows()
     assert(window.dropped == 0);
     assert(window.completed == 2);
     assert(window.completed_fps > 0.0);
-    assert(window.device.p50_us >= 1'000);
-    assert(window.device.p95_us >= window.device.p50_us);
-    assert(window.output_copy.p50_us == 0);
-    assert(window.total.p50_us >= window.device.p50_us);
+    assert(window.backend_execution.p50_us
+        && *window.backend_execution.p50_us >= 1'000);
+    assert(window.backend_execution.p95_us
+        && *window.backend_execution.p95_us >= *window.backend_execution.p50_us);
+    assert(window.backend_d2h.p50_us && *window.backend_d2h.p50_us == 0);
+    assert(window.total.p50_us
+        && *window.total.p50_us >= *window.backend_execution.p50_us);
 
     const auto empty =
         ssv::infer::ssv_inference_service_take_stats_window(service.get());
@@ -923,10 +1075,13 @@ void test_total_latency_includes_queue_wait()
     const auto window =
         ssv::infer::ssv_inference_service_take_stats_window(service.get());
     assert(window.completed == 1);
-    assert(window.queue.p50_us >= 10'000);
-    assert(window.device.p50_us >= 10'000);
+    assert(window.queue.p50_us && *window.queue.p50_us >= 10'000);
+    assert(window.backend_execution.p50_us
+        && *window.backend_execution.p50_us >= 10'000);
     assert(window.total.p50_us
-        >= window.queue.p50_us + window.device.p50_us);
+        && window.queue.p50_us
+        && *window.total.p50_us
+            >= *window.queue.p50_us + *window.backend_execution.p50_us);
 }
 
 void test_service_replaces_only_the_latest_pending_request()
@@ -1122,24 +1277,82 @@ void test_backend_failure_does_not_stop_the_worker()
         .analysis_frames.outstanding_staging_leases == 0);
 }
 
+void test_auto_preprocess_falls_back_to_cpu_backend()
+{
+    auto backend = std::make_unique<FakeBackend>();
+    auto *backend_observer = backend.get();
+    auto service = ssv::infer::ssv_inference_service_create_with_backend(
+        make_inference_config(), std::move(backend));
+
+    auto request = make_request(service.get(), 1);
+    auto result = ssv::infer::ssv_inference_service_submit(
+        service.get(), std::move(request));
+    assert(result.status
+        == ssv::infer::SsvInferenceSubmissionStatus::Completed);
+    assert(backend_observer->hardware_call_count() == 0);
+    result.detections.analysis_frame.reset();
+}
+
+void test_hardware_preprocess_route_borrows_frame_and_plan()
+{
+    auto backend = std::make_unique<FakeBackend>(
+        ssv::infer::BackendInfo {}, true);
+    auto *backend_observer = backend.get();
+    auto service = ssv::infer::ssv_inference_service_create_with_backend(
+        make_inference_config(), std::move(backend));
+
+    auto request = make_request(service.get(), 1, "camera-01", true);
+    auto result = ssv::infer::ssv_inference_service_submit(
+        service.get(), std::move(request));
+    assert(result.status
+        == ssv::infer::SsvInferenceSubmissionStatus::Completed);
+    assert(backend_observer->hardware_call_count() == 1);
+
+    const auto window =
+        ssv::infer::ssv_inference_service_take_stats_window(service.get());
+    assert(window.normalize_layout.p50_us
+        && *window.normalize_layout.p50_us == 7);
+    assert(window.backend_h2d.p50_us && *window.backend_h2d.p50_us == 11);
+    assert(window.backend_execution.p50_us
+        && *window.backend_execution.p50_us == 13);
+    assert(window.backend_d2h.p50_us && *window.backend_d2h.p50_us == 17);
+    result.detections.analysis_frame.reset();
+}
+
+void test_explicit_cuda_preprocess_requires_backend_capability()
+{
+    auto config = make_inference_config();
+    config.model.preprocess->execution = ssv::SsvPreprocessExecution::Cuda;
+    try {
+        static_cast<void>(ssv::infer::ssv_inference_service_create_with_backend(
+            config, std::make_unique<FakeBackend>()));
+        assert(false && "unsupported CUDA preprocessing was accepted");
+    } catch (const ssv::infer::SsvInferenceServiceError &error) {
+        assert(error.stage() == "inference.start");
+        assert(std::string(error.what()).find("CUDA") != std::string::npos);
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
     test_inference_stats_summarizes_a_fixed_window();
-    test_model_contract_accepts_only_wrapper_input();
+    test_unmeasured_backend_stage_is_not_reported_as_zero();
+    test_model_contract_accepts_raw_float_input_without_metadata();
     test_service_projects_onnx_runtime_snapshot();
     test_service_projects_cpu_runtime_defaults();
     test_service_projects_tensorrt_runtime_snapshot();
     test_runtime_snapshot_is_stable_and_owning();
     test_runtime_snapshot_preserves_fallback_order_and_stage_names();
     test_runtime_snapshot_rejects_invalid_services();
-    test_service_reports_raw_model_as_contract_failure();
+    test_service_accepts_raw_model_without_wrapper_metadata();
     test_service_rejects_empty_label_map_before_backend_load();
     test_tensorrt_manifest_must_be_a_regular_file();
     test_service_owns_the_model_sized_analysis_frame_pool();
     test_service_exposes_model_contract_and_source_letterbox_transform();
+    test_service_exposes_source_stretch_transform();
     test_completed_detection_shares_the_analysis_frame();
     test_service_preserves_timing_and_reuses_fixed_buffers();
     test_service_exposes_and_resets_inference_stats_windows();
@@ -1147,5 +1360,8 @@ int main(int argc, char **argv)
     test_service_replaces_only_the_latest_pending_request();
     test_cancel_and_stop_release_submitters();
     test_backend_failure_does_not_stop_the_worker();
+    test_auto_preprocess_falls_back_to_cpu_backend();
+    test_hardware_preprocess_route_borrows_frame_and_plan();
+    test_explicit_cuda_preprocess_requires_backend_capability();
     return 0;
 }

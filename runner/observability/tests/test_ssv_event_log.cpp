@@ -392,11 +392,11 @@ void test_inference_stats_groups_throughput_and_millisecond_latency()
                 .p50 = std::chrono::microseconds {65},
                 .p95 = std::chrono::microseconds {113},
             },
-            .device = {
+            .backend_execution = {
                 .p50 = std::chrono::microseconds {2941},
                 .p95 = std::chrono::microseconds {4146},
             },
-            .output_copy = {},
+            .backend_d2h = {},
             .postprocess = {
                 .p50 = std::chrono::microseconds {39},
                 .p95 = std::chrono::microseconds {49},
@@ -415,8 +415,11 @@ void test_inference_stats_groups_throughput_and_millisecond_latency()
     assert(sink_state->records.front().bytes
         == "event=inference_stats source_id=local-test run_attempt_id=1 "
            "frames=75/75 dropped=0 fps=14.998 max_gap_ms=90.297 "
-           "latency_ms=\"p50/p95 queue=0.065/0.113 device=2.941/4.146 "
-           "output_copy=0.000/0.000 postprocess=0.039/0.049 "
+           "latency_ms=\"p50/p95 queue=0.065/0.113 decode=unmeasured "
+           "color_resize=unmeasured normalize_layout=unmeasured "
+           "backend_h2d=unmeasured backend_execution=2.941/4.146 "
+           "backend_d2h=unmeasured backend_unattributed=unmeasured "
+           "postprocess=0.039/0.049 "
            "total=3.046/4.285\"\n");
 }
 
@@ -443,11 +446,11 @@ void test_inference_stats_pretty_output_aligns_latency_percentiles()
                 .p50 = std::chrono::microseconds {45},
                 .p95 = std::chrono::microseconds {84},
             },
-            .device = {
+            .backend_execution = {
                 .p50 = std::chrono::microseconds {50'763},
                 .p95 = std::chrono::microseconds {52'370},
             },
-            .output_copy = {},
+            .backend_d2h = {},
             .postprocess = {
                 .p50 = std::chrono::microseconds {50},
                 .p95 = std::chrono::microseconds {63},
@@ -477,7 +480,7 @@ void test_inference_stats_pretty_output_aligns_latency_percentiles()
         != std::string::npos);
     assert(bytes.find("    queue            0.045    0.084\n")
         != std::string::npos);
-    assert(bytes.find("    device           50.763   52.370\n")
+    assert(bytes.find("    backend_execution  50.763   52.370\n")
         != std::string::npos);
     assert(bytes.ends_with("    total            50.873   52.509\n"));
 }

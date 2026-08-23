@@ -151,8 +151,12 @@ SsvEvent ssv_inference_stats_event(
     };
     const auto percentiles = [&](const auto &source) {
         return SsvLatencyPercentiles {
-            .p50 = duration(source.p50_us),
-            .p95 = duration(source.p95_us),
+            .p50 = source.p50_us
+                ? std::optional {duration(*source.p50_us)}
+                : std::nullopt,
+            .p95 = source.p95_us
+                ? std::optional {duration(*source.p95_us)}
+                : std::nullopt,
         };
     };
     return {
@@ -164,8 +168,13 @@ SsvEvent ssv_inference_stats_event(
             .completed_fps = stats.completed_fps,
             .longest_result_gap = duration(stats.longest_result_gap_us),
             .queue = percentiles(stats.queue),
-            .device = percentiles(stats.device),
-            .output_copy = percentiles(stats.output_copy),
+            .decode = percentiles(stats.decode),
+            .color_resize = percentiles(stats.color_resize),
+            .normalize_layout = percentiles(stats.normalize_layout),
+            .backend_h2d = percentiles(stats.backend_h2d),
+            .backend_execution = percentiles(stats.backend_execution),
+            .backend_d2h = percentiles(stats.backend_d2h),
+            .backend_unattributed = percentiles(stats.backend_unattributed),
             .postprocess = percentiles(stats.postprocess),
             .total = percentiles(stats.total),
         },

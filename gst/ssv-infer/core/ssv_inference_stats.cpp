@@ -32,9 +32,16 @@ SsvLatencyPercentiles timing_percentiles(
 {
     std::vector<std::uint64_t> values;
     values.reserve(samples.size());
-    for (const auto &sample : samples)
-        values.push_back(std::invoke(projection, sample.timings));
-    return percentiles(std::move(values));
+    for (const auto &sample : samples) {
+        const auto value = std::invoke(projection, sample.timings);
+        if (value)
+            values.push_back(*value);
+    }
+    const auto result = percentiles(std::move(values));
+    return {
+        result.p50_us,
+        result.p95_us,
+    };
 }
 
 } // namespace
@@ -82,10 +89,20 @@ SsvInferenceStatsWindow ssv_inference_stats_summarize(
     result.longest_result_gap_us = longest_gap;
     result.queue = timing_percentiles(
         samples, &SsvInferenceStageTimings::queue_us);
-    result.device = timing_percentiles(
-        samples, &SsvInferenceStageTimings::device_us);
-    result.output_copy = timing_percentiles(
-        samples, &SsvInferenceStageTimings::output_copy_us);
+    result.decode = timing_percentiles(
+        samples, &SsvInferenceStageTimings::decode_us);
+    result.color_resize = timing_percentiles(
+        samples, &SsvInferenceStageTimings::color_resize_us);
+    result.normalize_layout = timing_percentiles(
+        samples, &SsvInferenceStageTimings::normalize_layout_us);
+    result.backend_h2d = timing_percentiles(
+        samples, &SsvInferenceStageTimings::backend_h2d_us);
+    result.backend_execution = timing_percentiles(
+        samples, &SsvInferenceStageTimings::backend_execution_us);
+    result.backend_d2h = timing_percentiles(
+        samples, &SsvInferenceStageTimings::backend_d2h_us);
+    result.backend_unattributed = timing_percentiles(
+        samples, &SsvInferenceStageTimings::backend_unattributed_us);
     result.postprocess = timing_percentiles(
         samples, &SsvInferenceStageTimings::postprocess_us);
     result.total = timing_percentiles(

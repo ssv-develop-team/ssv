@@ -90,7 +90,7 @@ std::shared_ptr<const SsvAnalysisFrame> make_direct_frame(
     auto frame = pool.create(
         buffer,
         info,
-        {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+        {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
         timing);
     gst_buffer_unref(buffer);
     return frame;
@@ -117,7 +117,7 @@ void test_direct_frame_maps_once_and_releases_after_shared_consumers()
     auto frame = pool.create(
         buffer,
         info,
-        {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+        {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
         {GST_SECOND, GST_SECOND / 15, 4});
 
     assert(frame->view().bytes.data() == pixels.data());
@@ -177,7 +177,7 @@ void test_padded_rows_use_and_reuse_the_bounded_staging_pool()
 
     SsvAnalysisFramePool pool(3, 2, 1);
     const PreprocessTransform transform {
-        3, 2, 3, 2, 1.0F, 0, 0, 0, 0};
+        3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0};
     auto frame = pool.create(buffer, info, transform, {});
     const auto *first_lease = frame->view().bytes.data();
     assert(frame->view().bytes.size() == 24);
@@ -259,7 +259,7 @@ void test_multiple_memory_blocks_are_copied_by_row_into_one_lease()
     auto frame = pool.create(
         buffer,
         info,
-        {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+        {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
         {});
     for (std::size_t index = 0; index < frame->view().bytes.size(); ++index)
         assert(frame->view().bytes[index] == index + 1);
@@ -388,7 +388,7 @@ void test_map_failure_releases_active_map_and_staging_lease()
         static_cast<void>(pool.create(
             buffer,
             info,
-            {3, 2, 3, 2, 1.0F, 0, 0, 0, 0},
+            {3, 2, 3, 2, 1.0F, 1.0F, 0, 0, 0, 0},
             {}));
         assert(false && "non-mappable memory was accepted");
     } catch (const std::runtime_error &error) {

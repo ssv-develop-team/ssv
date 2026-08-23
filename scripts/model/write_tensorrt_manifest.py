@@ -16,9 +16,7 @@ onnx: Any
 TensorProto: Any
 
 MANIFEST_SCHEMA = "ssv.tensorrt-engine-manifest"
-MANIFEST_SCHEMA_VERSION = 1
-WRAPPER_CONTRACT = "rgba_u8_nhwc_v1"
-SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+MANIFEST_SCHEMA_VERSION = 2
 TENSORRT_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\Z")
 COMPUTE_CAPABILITY_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)\Z")
 
@@ -63,7 +61,7 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         description="Write an SSV TensorRT engine manifest.",
         allow_abbrev=False,
     )
-    parser.add_argument("--wrapper", required=True, type=Path)
+    parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--engine", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--precision", required=True, choices=("fp32", "fp16"))
@@ -85,74 +83,34 @@ def sha256_file(path: Path, label: str) -> str:
         raise ManifestError(f"cannot read {label}: {path}: {error}") from error
 
 
-def required_metadata(metadata: dict[str, str], key: str) -> str:
-    value = metadata.get(key, "")
-    if not value:
-        raise ManifestError(f"wrapper metadata is missing {key}")
-    return value
-
-
-def load_wrapper_contract(path: Path) -> dict[str, object]:
+def load_source_model_input(path: Path) -> dict[str, object]:
     _load_onnx()
     from google.protobuf.message import DecodeError
 
     try:
         model = onnx.load_model(path, load_external_data=False)
     except (OSError, DecodeError) as error:
-        raise ManifestError(f"cannot load wrapper ONNX: {path}: {error}") from error
-
-    metadata = {entry.key: entry.value for entry in model.metadata_props}
-    fixed_properties = {
-        "ssv.wrapper.contract": WRAPPER_CONTRACT,
-        "ssv.wrapper.dtype": "uint8",
-        "ssv.wrapper.layout": "NHWC",
-        "ssv.wrapper.channel_rule": "drop_alpha_keep_rgb",
-        "ssv.wrapper.normalization": "divide_by_255",
-        "ssv.wrapper.tool": "ssv.prepare_wrapper",
-    }
-    for key, expected in fixed_properties.items():
-        if required_metadata(metadata, key) != expected:
-            raise ManifestError(f"wrapper metadata {key} must be {expected}")
-
-    source_sha256 = required_metadata(metadata, "ssv.wrapper.source_sha256")
-    if SHA256_PATTERN.fullmatch(source_sha256) is None:
-        raise ManifestError(
-            "wrapper metadata ssv.wrapper.source_sha256 must be lowercase SHA-256"
-        )
-    tool_version = required_metadata(metadata, "ssv.wrapper.tool_version")
-    model_family = required_metadata(metadata, "ssv.wrapper.model_family")
-    output_format = required_metadata(metadata, "ssv.wrapper.output_format")
+        raise ManifestError(f"cannot load source ONNX: {path}: {error}") from error
 
     if len(model.graph.input) != 1:
-        raise ManifestError("wrapper must have exactly one graph input")
+        raise ManifestError("source model must have exactly one graph input")
     graph_input = model.graph.input[0]
     tensor_type = graph_input.type.tensor_type
-    if tensor_type.elem_type != TensorProto.UINT8:
-        raise ManifestError("wrapper input must use uint8")
+    if tensor_type.elem_type != TensorProto.FLOAT:
+        raise ManifestError("source model input must use float32")
     shape: list[int] = []
     for dimension in tensor_type.shape.dim:
         if dimension.WhichOneof("value") != "dim_value" or dimension.dim_value <= 0:
-            raise ManifestError("wrapper input must be static uint8 [1,H,W,4]")
+            raise ManifestError("source model input must be static float32 [1,3,H,W]")
         shape.append(dimension.dim_value)
-    if len(shape) != 4 or shape[0] != 1 or shape[3] != 4:
-        raise ManifestError("wrapper input must be static uint8 [1,H,W,4]")
-    if required_metadata(metadata, "ssv.wrapper.height") != str(
-        shape[1]
-    ) or required_metadata(metadata, "ssv.wrapper.width") != str(shape[2]):
-        raise ManifestError("wrapper input shape does not match width/height metadata")
+    if len(shape) != 4 or shape[0] != 1 or shape[1] != 3:
+        raise ManifestError("source model input must be static float32 [1,3,H,W]")
 
     return {
-        "contract": WRAPPER_CONTRACT,
-        "source_sha256": source_sha256,
-        "tool_version": tool_version,
-        "model_family": model_family,
-        "output_format": output_format,
-        "input": {
-            "name": graph_input.name,
-            "dtype": "uint8",
-            "layout": "NHWC",
-            "shape": shape,
-        },
+        "name": graph_input.name,
+        "dtype": "float32",
+        "layout": "NCHW",
+        "shape": shape,
     }
 
 
@@ -163,8 +121,8 @@ def build_manifest(arguments: argparse.Namespace) -> dict[str, object]:
     if capability is None:
         raise ManifestError("--compute-capability must use major.minor")
 
-    wrapper = load_wrapper_contract(arguments.wrapper)
-    wrapper["sha256"] = sha256_file(arguments.wrapper, "wrapper ONNX")
+    source_model = load_source_model_input(arguments.model)
+    source_model["sha256"] = sha256_file(arguments.model, "source ONNX")
     return {
         "schema": MANIFEST_SCHEMA,
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -178,7 +136,15 @@ def build_manifest(arguments: argparse.Namespace) -> dict[str, object]:
                 "minor": int(capability.group(2)),
             },
         },
-        "wrapper": wrapper,
+        "source_model": {
+            "sha256": source_model["sha256"],
+            "input": {
+                "name": source_model["name"],
+                "dtype": source_model["dtype"],
+                "layout": source_model["layout"],
+                "shape": source_model["shape"],
+            },
+        },
     }
 
 

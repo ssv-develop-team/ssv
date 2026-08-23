@@ -52,7 +52,7 @@ public:
         ssv::infer::SsvInferenceRunResult result;
         result.detections.frame_id = request.frame_id;
         result.detections.source_id = request.source_id;
-        result.timings.device_us = 100;
+        result.timings.backend_execution_us = 100;
         result.timings.total_us = 100;
         return result;
     }
@@ -275,8 +275,11 @@ void test_scheduler_reports_queue_latency_and_window_stats()
     assert(window.dropped == 0);
     assert(window.completed == 2);
     assert(window.queue.p50_us > 0);
-    assert(window.device.p50_us == 100);
-    assert(window.total.p50_us >= window.queue.p50_us + 100);
+    assert(window.backend_execution.p50_us
+        && *window.backend_execution.p50_us == 100);
+    assert(window.total.p50_us
+        && window.queue.p50_us
+        && *window.total.p50_us >= *window.queue.p50_us + 100);
 
     const auto empty = scheduler.take_stats_window();
     assert(empty.received == 0);

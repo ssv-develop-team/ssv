@@ -38,27 +38,34 @@ GmcWarp::is_identity() const {
 GmcWarp
 gmc_warp_to_source_coordinates(
     const GmcWarp &model_warp,
-    float source_to_model_scale,
+    float source_to_model_scale_x,
+    float source_to_model_scale_y,
     int pad_left,
     int pad_top)
 {
-    if (!std::isfinite(source_to_model_scale)
-        || source_to_model_scale <= 0.0F) {
-        throw std::invalid_argument("GMC source-to-model scale must be positive");
+    if (!std::isfinite(source_to_model_scale_x)
+        || source_to_model_scale_x <= 0.0F
+        || !std::isfinite(source_to_model_scale_y)
+        || source_to_model_scale_y <= 0.0F) {
+        throw std::invalid_argument(
+            "GMC source-to-model scales must be positive");
     }
 
     GmcWarp source_warp = model_warp;
-    const double scale = source_to_model_scale;
+    const double scale_x = source_to_model_scale_x;
+    const double scale_y = source_to_model_scale_y;
     const double pad_x = pad_left;
     const double pad_y = pad_top;
-    // Conjugate by the per-frame letterbox transform so tracker state never
+    // Conjugate by the per-frame resize transform so tracker state never
     // mixes model-canvas motion with source-coordinate detections.
+    source_warp.m01 = model_warp.m01 * scale_y / scale_x;
+    source_warp.m10 = model_warp.m10 * scale_x / scale_y;
     source_warp.m02 = (
         model_warp.m00 * pad_x + model_warp.m01 * pad_y
-        + model_warp.m02 - pad_x) / scale;
+        + model_warp.m02 - pad_x) / scale_x;
     source_warp.m12 = (
         model_warp.m10 * pad_x + model_warp.m11 * pad_y
-        + model_warp.m12 - pad_y) / scale;
+        + model_warp.m12 - pad_y) / scale_y;
     return source_warp;
 }
 
@@ -106,7 +113,8 @@ BoTSortGmc::estimate(const GmcFrameView *frame) {
     }
     return gmc_warp_to_source_coordinates(
         estimate_sparse_opt_flow(*frame),
-        frame->source_to_model_scale,
+        frame->source_to_model_scale_x,
+        frame->source_to_model_scale_y,
         frame->pad_left,
         frame->pad_top);
 }

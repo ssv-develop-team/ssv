@@ -13,7 +13,7 @@ namespace ssv::infer {
 namespace {
 
 constexpr std::string_view MANIFEST_SCHEMA = "ssv.tensorrt-engine-manifest";
-constexpr int MANIFEST_SCHEMA_VERSION = 1;
+constexpr int MANIFEST_SCHEMA_VERSION = 2;
 
 void require_object_keys(const nlohmann::json &value,
     std::string_view path,
@@ -106,43 +106,44 @@ ssv::SsvPrecision parse_precision(const std::string &value)
 TensorSpec parse_input(const nlohmann::json &input)
 {
     require_object_keys(input,
-        "TensorRT engine manifest wrapper.input",
+        "TensorRT engine manifest source_model.input",
         {"name", "dtype", "layout", "shape"});
     TensorSpec spec;
-    constexpr std::string_view path = "TensorRT engine manifest wrapper.input";
+    constexpr std::string_view path =
+        "TensorRT engine manifest source_model.input";
     spec.name = required_string(input, "name", path);
     if (spec.name.empty()) {
         throw SsvTensorRtManifestError(
             "TensorRT engine manifest input name must not be empty");
     }
-    if (required_string(input, "dtype", path) != "uint8") {
+    if (required_string(input, "dtype", path) != "float32") {
         throw SsvTensorRtManifestError(
-            "TensorRT engine manifest input dtype must be uint8");
+            "TensorRT engine manifest input dtype must be float32");
     }
-    if (required_string(input, "layout", path) != "NHWC") {
+    if (required_string(input, "layout", path) != "NCHW") {
         throw SsvTensorRtManifestError(
-            "TensorRT engine manifest input layout must be NHWC");
+            "TensorRT engine manifest input layout must be NCHW");
     }
-    spec.dtype = DataType::Uint8;
-    spec.layout = TensorLayout::Nhwc;
+    spec.dtype = DataType::Float32;
+    spec.layout = TensorLayout::Nchw;
     const auto &shape = required_value(input, "shape", path);
     if (!shape.is_array()) {
         throw SsvTensorRtManifestError(
-            "TensorRT engine manifest wrapper.input.shape must be an array");
+            "TensorRT engine manifest source_model.input.shape must be an array");
     }
     for (const auto &dimension : shape) {
         if (!dimension.is_number_integer()) {
             throw SsvTensorRtManifestError(
-                "TensorRT engine manifest wrapper.input.shape dimensions must "
+                "TensorRT engine manifest source_model.input.shape dimensions must "
                 "be "
                 "integers");
         }
         spec.shape.push_back(dimension.get<std::int64_t>());
     }
-    if (spec.shape.size() != 4 || spec.shape[0] != 1 || spec.shape[1] <= 0
-        || spec.shape[2] <= 0 || spec.shape[3] != 4) {
+    if (spec.shape.size() != 4 || spec.shape[0] != 1 || spec.shape[1] != 3
+        || spec.shape[2] <= 0 || spec.shape[3] <= 0) {
         throw SsvTensorRtManifestError(
-            "TensorRT engine manifest input must be static uint8 [1,H,W,4]");
+            "TensorRT engine manifest input must be static float32 [1,3,H,W]");
     }
     return spec;
 }
@@ -193,7 +194,7 @@ SsvTensorRtEngineManifest ssv_tensorrt_manifest_load_and_validate(
                 std::istreambuf_iterator<char>());
         require_object_keys(root,
             "TensorRT engine manifest",
-            {"schema", "schema_version", "engine", "wrapper"});
+            {"schema", "schema_version", "engine", "source_model"});
         if (required_string(root, "schema", "TensorRT engine manifest")
                 != MANIFEST_SCHEMA
             || required_integer(
@@ -204,7 +205,7 @@ SsvTensorRtEngineManifest ssv_tensorrt_manifest_load_and_validate(
         }
 
         const auto &engine = root.at("engine");
-        const auto &wrapper = root.at("wrapper");
+        const auto &source_model = root.at("source_model");
         const auto &compute_capability = engine.at("compute_capability");
         require_object_keys(engine,
             "TensorRT engine manifest engine",
@@ -216,25 +217,22 @@ SsvTensorRtEngineManifest ssv_tensorrt_manifest_load_and_validate(
         require_object_keys(compute_capability,
             "TensorRT engine manifest engine.compute_capability",
             {"major", "minor"});
-        require_object_keys(wrapper,
-            "TensorRT engine manifest wrapper",
-            {"sha256",
-                "contract",
-                "source_sha256",
-                "tool_version",
-                "model_family",
-                "output_format",
-                "input"});
+        require_object_keys(source_model,
+            "TensorRT engine manifest source_model",
+            {"sha256", "input"});
 
         SsvTensorRtEngineManifest manifest;
         manifest.engine_sha256 = required_string(
             engine, "sha256", "TensorRT engine manifest engine");
-        manifest.wrapper_sha256 = required_string(
-            wrapper, "sha256", "TensorRT engine manifest wrapper");
+        manifest.source_model_sha256 = required_string(
+            source_model,
+            "sha256",
+            "TensorRT engine manifest source_model");
         require_hash(
             "TensorRT engine manifest engine.sha256", manifest.engine_sha256);
         require_hash(
-            "TensorRT engine manifest wrapper.sha256", manifest.wrapper_sha256);
+            "TensorRT engine manifest source_model.sha256",
+            manifest.source_model_sha256);
         if (manifest.engine_sha256 != sha256(engine_bytes)) {
             throw SsvTensorRtManifestError(
                 "TensorRT engine SHA-256 does not match manifest");
@@ -252,40 +250,7 @@ SsvTensorRtEngineManifest ssv_tensorrt_manifest_load_and_validate(
         manifest.compute_capability_minor = required_integer(compute_capability,
             "minor",
             "TensorRT engine manifest engine.compute_capability");
-        manifest.input = parse_input(wrapper.at("input"));
-
-        const auto contract = required_string(
-            wrapper, "contract", "TensorRT engine manifest wrapper");
-        if (contract != "rgba_u8_nhwc_v1") {
-            throw SsvTensorRtManifestError(
-                "TensorRT engine manifest wrapper.contract must be "
-                "rgba_u8_nhwc_v1");
-        }
-        const auto source_sha256 = required_string(
-            wrapper, "source_sha256", "TensorRT engine manifest wrapper");
-        const auto tool_version = required_string(
-            wrapper, "tool_version", "TensorRT engine manifest wrapper");
-        const auto model_family = required_string(
-            wrapper, "model_family", "TensorRT engine manifest wrapper");
-        const auto output_format = required_string(
-            wrapper, "output_format", "TensorRT engine manifest wrapper");
-        require_hash(
-            "TensorRT engine manifest wrapper.source_sha256", source_sha256);
-
-        manifest.wrapper_properties = {
-            {"ssv.wrapper.channel_rule", "drop_alpha_keep_rgb"},
-            {"ssv.wrapper.contract", contract},
-            {"ssv.wrapper.dtype", "uint8"},
-            {"ssv.wrapper.height", std::to_string(manifest.input.shape[1])},
-            {"ssv.wrapper.layout", "NHWC"},
-            {"ssv.wrapper.model_family", model_family},
-            {"ssv.wrapper.normalization", "divide_by_255"},
-            {"ssv.wrapper.output_format", output_format},
-            {"ssv.wrapper.source_sha256", source_sha256},
-            {"ssv.wrapper.tool", "ssv.prepare_wrapper"},
-            {"ssv.wrapper.tool_version", tool_version},
-            {"ssv.wrapper.width", std::to_string(manifest.input.shape[2])},
-        };
+        manifest.input = parse_input(source_model.at("input"));
         require_runtime_match(manifest, runtime);
         return manifest;
     } catch (const SsvTensorRtManifestError &) {
@@ -310,7 +275,6 @@ void ssv_tensorrt_manifest_apply(
         throw SsvTensorRtManifestError(
             "TensorRT engine input does not match manifest");
     }
-    metadata.properties = manifest.wrapper_properties;
 }
 
 } // namespace ssv::infer

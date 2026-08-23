@@ -58,7 +58,8 @@ void validate_frame_contract(
     if (transform.source_width <= 0 || transform.source_height <= 0
         || transform.model_width != model_width
         || transform.model_height != model_height
-        || !std::isfinite(transform.scale) || transform.scale <= 0.0F
+        || !std::isfinite(transform.scale_x) || transform.scale_x <= 0.0F
+        || !std::isfinite(transform.scale_y) || transform.scale_y <= 0.0F
         || transform.pad_left < 0 || transform.pad_top < 0
         || transform.pad_right < 0 || transform.pad_bottom < 0
         || transform.pad_right > model_width

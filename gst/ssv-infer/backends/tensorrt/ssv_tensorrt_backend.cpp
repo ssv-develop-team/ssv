@@ -1,4 +1,5 @@
 #include "core/ssv_inference_backend.hpp"
+#include "backends/tensorrt/ssv_tensorrt_cuda_kernel.hpp"
 #include "backends/tensorrt/ssv_tensorrt_manifest.hpp"
 #include "backends/tensorrt/ssv_tensorrt_resources.hpp"
 
@@ -7,6 +8,7 @@
 #include <cuda_runtime_api.h>
 
 #include <cstddef>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -20,6 +22,16 @@
 namespace ssv::infer {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t elapsed_us(Clock::time_point started)
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            Clock::now() - started)
+            .count());
+}
 
 class TrtLogger final : public nvinfer1::ILogger {
 public:
@@ -155,6 +167,27 @@ public:
             "cudaMemcpyAsync input failed");
     }
 
+    void copy_host_to_device_2d(
+        void *device,
+        std::size_t device_pitch,
+        const void *host,
+        std::size_t host_pitch,
+        std::size_t width_bytes,
+        std::size_t height,
+        void *stream) override
+    {
+        check_cuda(cudaMemcpy2DAsync(
+                       device,
+                       device_pitch,
+                       host,
+                       host_pitch,
+                       width_bytes,
+                       height,
+                       cudaMemcpyHostToDevice,
+                       cuda_stream(stream)),
+            "cudaMemcpy2DAsync input failed");
+    }
+
     void copy_device_to_host(
         void *host,
         const void *device,
@@ -174,6 +207,59 @@ public:
         check_cuda(cudaStreamSynchronize(cuda_stream(stream)),
             "cudaStreamSynchronize failed");
     }
+
+    [[nodiscard]] bool supports_hardware_preprocess() const noexcept override
+    {
+        return ssv_tensorrt_cuda_preprocess_available();
+    }
+
+    void launch_rgba_to_float_nchw(
+        void *output,
+        const void *rgba,
+        std::size_t rgba_stride,
+        const SsvPreprocessPlan &plan,
+        void *stream) override
+    {
+        ssv_tensorrt_launch_rgba_to_float_nchw(
+            output, rgba, rgba_stride, plan, stream);
+    }
+
+    [[nodiscard]] bool timing_supported() const noexcept override
+    {
+        return true;
+    }
+
+    [[nodiscard]] void *create_event() override
+    {
+        cudaEvent_t event = nullptr;
+        check_cuda(cudaEventCreate(&event), "cudaEventCreate failed");
+        return reinterpret_cast<void *>(event);
+    }
+
+    void destroy_event(void *event) noexcept override
+    {
+        static_cast<void>(cudaEventDestroy(
+            reinterpret_cast<cudaEvent_t>(event)));
+    }
+
+    void record_event(void *event, void *stream) override
+    {
+        check_cuda(cudaEventRecord(
+                       reinterpret_cast<cudaEvent_t>(event),
+                       cuda_stream(stream)),
+            "cudaEventRecord failed");
+    }
+
+    [[nodiscard]] float elapsed_event_ms(void *start, void *end) override
+    {
+        float milliseconds = 0.0F;
+        check_cuda(cudaEventElapsedTime(
+                       &milliseconds,
+                       reinterpret_cast<cudaEvent_t>(start),
+                       reinterpret_cast<cudaEvent_t>(end)),
+            "cudaEventElapsedTime failed");
+        return milliseconds;
+    }
 };
 
 std::vector<int64_t> shape_from_dims(const nvinfer1::Dims &dims)
@@ -192,15 +278,12 @@ TensorSpec spec_from_tensor(
     bool input)
 {
     const auto data_type = engine.getTensorDataType(name);
-    if ((!input || data_type != nvinfer1::DataType::kUINT8)
-        && data_type != nvinfer1::DataType::kFLOAT) {
+    if (data_type != nvinfer1::DataType::kFLOAT) {
         throw std::runtime_error("unsupported TensorRT binding data type");
     }
     TensorSpec spec;
     spec.name = name;
-    spec.dtype = data_type == nvinfer1::DataType::kUINT8
-        ? DataType::Uint8
-        : DataType::Float32;
+    spec.dtype = DataType::Float32;
     spec.shape = shape_from_dims(engine.getTensorShape(name));
     if (spec.shape.size() == 4 && spec.shape[3] == 4)
         spec.layout = TensorLayout::Nhwc;
@@ -233,15 +316,12 @@ TensorSpec spec_from_binding(
     bool input)
 {
     const auto data_type = engine.getBindingDataType(binding);
-    if ((!input || data_type != nvinfer1::DataType::kUINT8)
-        && data_type != nvinfer1::DataType::kFLOAT) {
+    if (data_type != nvinfer1::DataType::kFLOAT) {
         throw std::runtime_error("unsupported TensorRT binding data type");
     }
     TensorSpec spec;
     spec.name = engine.getBindingName(binding);
-    spec.dtype = data_type == nvinfer1::DataType::kUINT8
-        ? DataType::Uint8
-        : DataType::Float32;
+    spec.dtype = DataType::Float32;
     spec.shape = shape_from_dims(engine.getBindingDimensions(binding));
     if (spec.shape.size() == 4 && spec.shape[3] == 4)
         spec.layout = TensorLayout::Nhwc;
@@ -280,8 +360,14 @@ public:
     ModelMetadata load(
         const InferenceConfig &config,
         SsvInferenceBufferAllocator &allocator) override;
-    std::span<const SsvFloatTensorView> infer(
-        const SsvUint8TensorView &input,
+    void warmup(const SsvFloatTensorView &input) override;
+    bool supports_hardware_preprocess(
+        const SsvPreprocessPlan &plan) const override;
+    SsvBackendRunResult infer(
+        const SsvFloatTensorView &input,
+        std::stop_token stop_token) override;
+    SsvBackendRunResult infer_hardware(
+        const SsvHardwarePreprocessInput &input,
         std::stop_token stop_token) override;
 
 private:
@@ -393,6 +479,20 @@ ModelMetadata TensorRtBackend::load(
     for (const auto &binding : bindings_)
         device_buffer_sizes.push_back(binding_bytes(binding.spec));
     resources_.allocate(device_buffer_sizes);
+    if (config.preprocess
+        && config.preprocess->execution != SsvPreprocessExecution::Cpu
+        && input_binding_index_ != std::numeric_limits<std::size_t>::max()) {
+        const auto &input_spec = bindings_[input_binding_index_].spec;
+        if (input_spec.shape.size() == 4 && input_spec.shape[0] == 1
+            && input_spec.shape[1] == 3
+            && input_spec.shape[2] > 0 && input_spec.shape[3] > 0
+            && input_spec.shape[2] <= std::numeric_limits<int>::max()
+            && input_spec.shape[3] <= std::numeric_limits<int>::max()) {
+            static_cast<void>(resources_.prepare_hardware_preprocess(
+                static_cast<int>(input_spec.shape[3]),
+                static_cast<int>(input_spec.shape[2])));
+        }
+    }
 
 #if NV_TENSORRT_MAJOR >= 10
     const auto device_buffers = resources_.device_buffers();
@@ -409,7 +509,7 @@ ModelMetadata TensorRtBackend::load(
     info_ = {};
     info_.runtime = TensorRtEngineBackendInfo {
         .engine_hash = manifest.engine_sha256,
-        .wrapper_hash = manifest.wrapper_sha256,
+        .source_model_hash = manifest.source_model_sha256,
         .tensorrt_version = manifest.tensorrt_version,
         .cuda_runtime_version = manifest.cuda_runtime_version,
         .compute_capability_major =
@@ -424,8 +524,35 @@ ModelMetadata TensorRtBackend::load(
     return metadata_;
 }
 
-std::span<const SsvFloatTensorView> TensorRtBackend::infer(
-    const SsvUint8TensorView &input,
+void TensorRtBackend::warmup(const SsvFloatTensorView &input)
+{
+    static_cast<void>(infer(input, std::stop_token {}));
+}
+
+bool TensorRtBackend::supports_hardware_preprocess(
+    const SsvPreprocessPlan &plan) const
+{
+    if (!resources_.hardware_preprocess_available())
+        return false;
+    if (input_binding_index_ >= bindings_.size())
+        return false;
+    const auto &input = bindings_[input_binding_index_].spec;
+    if (input.shape.size() != 4 || input.shape[2] <= 0
+        || input.shape[3] <= 0
+        || input.shape[2] > std::numeric_limits<int>::max()
+        || input.shape[3] > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    return plan.input.name == input.name
+        && plan.input.dtype == input.dtype
+        && plan.input.shape == input.shape
+        && plan.input.layout == input.layout
+        && plan.canvas_width == static_cast<int>(input.shape[3])
+        && plan.canvas_height == static_cast<int>(input.shape[2]);
+}
+
+SsvBackendRunResult TensorRtBackend::infer(
+    const SsvFloatTensorView &input,
     std::stop_token stop_token)
 {
     if (stop_token.stop_requested())
@@ -439,9 +566,12 @@ std::span<const SsvFloatTensorView> TensorRtBackend::infer(
         || input.spec->dtype != input_binding.spec.dtype
         || input.spec->shape != input_binding.spec.shape
         || input.spec->layout != input_binding.spec.layout) {
-        throw std::runtime_error("TensorRT backend expects one uint8 input tensor");
+        throw std::runtime_error("TensorRT backend expects one float32 NCHW input tensor");
     }
+    const auto run_started = Clock::now();
+    resources_.begin_run_timing();
     resources_.copy_input(input_binding_index_, input.host_data);
+    resources_.mark_execution_start();
     if (stop_token.stop_requested())
         throw std::runtime_error("TensorRT inference cancelled");
 
@@ -456,6 +586,8 @@ std::span<const SsvFloatTensorView> TensorRtBackend::infer(
     }
 #endif
 
+    resources_.mark_execution_end();
+
     for (std::size_t output_index = 0;
          output_index < output_binding_indices_.size();
          ++output_index) {
@@ -463,10 +595,82 @@ std::span<const SsvFloatTensorView> TensorRtBackend::infer(
         resources_.copy_output(output_binding_indices_[output_index],
             std::as_writable_bytes(host_output));
     }
+    resources_.mark_output_end();
     resources_.synchronize();
     if (stop_token.stop_requested())
         throw std::runtime_error("TensorRT inference cancelled");
-    return output_views_;
+    auto timings = resources_.finish_run_timing();
+    if (!timings.h2d_us || !timings.execution_us || !timings.d2h_us)
+        timings.unattributed_us = elapsed_us(run_started);
+    return {
+        .outputs = output_views_,
+        .timings = std::move(timings),
+    };
+}
+
+SsvBackendRunResult TensorRtBackend::infer_hardware(
+    const SsvHardwarePreprocessInput &input,
+    std::stop_token stop_token)
+{
+    if (stop_token.stop_requested())
+        throw std::runtime_error("TensorRT inference cancelled");
+    if (!context_ || !engine_)
+        throw std::runtime_error("TensorRT backend is not loaded");
+    if (!supports_hardware_preprocess(input.plan)) {
+        throw std::runtime_error(
+            "TensorRT hardware preprocessing is not available");
+    }
+
+    void *stream = resources_.activate_stream();
+    const auto &input_binding = bindings_[input_binding_index_];
+    if (input.cpu_input.spec == nullptr
+        || input.cpu_input.spec->name != input_binding.spec.name
+        || input.cpu_input.spec->dtype != input_binding.spec.dtype
+        || input.cpu_input.spec->shape != input_binding.spec.shape
+        || input.cpu_input.spec->layout != input_binding.spec.layout) {
+        throw std::runtime_error(
+            "TensorRT backend expects one float32 NCHW input tensor");
+    }
+    const auto run_started = Clock::now();
+    resources_.begin_run_timing();
+    resources_.preprocess_rgba_to_float_nchw(
+        input_binding_index_, input.rgba, input.plan);
+    resources_.mark_execution_start();
+    if (stop_token.stop_requested())
+        throw std::runtime_error("TensorRT inference cancelled");
+
+#if NV_TENSORRT_MAJOR >= 10
+    if (!context_->enqueueV3(cuda_stream(stream)))
+        throw std::runtime_error("TensorRT enqueueV3 failed");
+#else
+    const auto device_buffers = resources_.device_buffers();
+    if (!context_->enqueueV2(device_buffers.data(),
+            cuda_stream(stream), nullptr)) {
+        throw std::runtime_error("TensorRT enqueueV2 failed");
+    }
+#endif
+
+    resources_.mark_execution_end();
+    for (std::size_t output_index = 0;
+         output_index < output_binding_indices_.size();
+         ++output_index) {
+        auto host_output = output_buffers_[output_index].as_span<float>();
+        resources_.copy_output(output_binding_indices_[output_index],
+            std::as_writable_bytes(host_output));
+    }
+    resources_.mark_output_end();
+    resources_.synchronize();
+    if (stop_token.stop_requested())
+        throw std::runtime_error("TensorRT inference cancelled");
+    auto timings = resources_.finish_run_timing();
+    if (!timings.h2d_us || !timings.preprocess_us
+        || !timings.execution_us || !timings.d2h_us) {
+        timings.unattributed_us = elapsed_us(run_started);
+    }
+    return {
+        .outputs = output_views_,
+        .timings = std::move(timings),
+    };
 }
 
 std::unique_ptr<InferenceBackend> create_tensorrt_backend()

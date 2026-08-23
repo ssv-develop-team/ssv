@@ -99,7 +99,7 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
     const auto registry = make_registry();
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     const ssv::infer::SsvModelContract model {
-        640, 640, 640U * 640U * 4U, "rgba_u8_nhwc_v1", std::string(64, 'a')};
+        640, 640, ssv::SsvResizeMode::Letterbox};
 
     const auto topology = ssv::pipeline_internal::resolve_topology(
         config, plan, registry, model);
@@ -192,7 +192,7 @@ void test_fake_registry_reports_the_exact_missing_element()
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     std::erase(registry.gstreamer_elements, "clocksync");
     const ssv::infer::SsvModelContract model {
-        640, 640, 640U * 640U * 4U, "contract", std::string(64, 'a')};
+        640, 640, ssv::SsvResizeMode::Letterbox};
     try {
         static_cast<void>(ssv::pipeline_internal::resolve_topology(
             config,
@@ -215,7 +215,7 @@ void test_gtksink_compatibility_does_not_require_dmabuf_export()
     const auto registry = make_registry();
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     const ssv::infer::SsvModelContract model {
-        640, 640, 640U * 640U * 4U, "contract", std::string(64, 'a')};
+        640, 640, ssv::SsvResizeMode::Letterbox};
 
     const auto topology = ssv::pipeline_internal::resolve_topology(
         config, plan, registry, model);
@@ -396,6 +396,7 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     const char *label_map = std::getenv("SSV_TEST_LABEL_MAP_PATH");
     assert(label_map != nullptr && label_map[0] != '\0');
     config.inference.model.label_map = label_map;
+    config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
     config.tracking.enabled = true;
     config.tracking.publish_cooldown_ms = 12345;
 
@@ -423,7 +424,10 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
         GST_BIN(instance.pipeline()), "analysis-track");
     GstElement *publish = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "analysis-publish");
+    GstElement *analysis_scale = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "analysis-scale");
     assert(infer != nullptr && track != nullptr && publish != nullptr);
+    assert(analysis_scale != nullptr);
 
     gpointer infer_context = nullptr;
     gpointer track_context = nullptr;
@@ -439,11 +443,34 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     g_object_get(publish, "publish-cooldown-ms", &publish_cooldown_ms, nullptr);
     assert(publish_cooldown_ms == 12345);
 
+    gboolean add_borders = FALSE;
+    g_object_get(analysis_scale, "add-borders", &add_borders, nullptr);
+    assert(add_borders);
+
     gst_object_unref(infer);
     gst_object_unref(track);
     gst_object_unref(publish);
+    gst_object_unref(analysis_scale);
     instance.reset();
     ssv::infer::ssv_inference_service_stop(service.get());
+
+    config.inference.model.preprocess->resize_mode =
+        ssv::SsvResizeMode::Stretch;
+    service_config = config.inference;
+    const auto stretch_plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    auto stretch_service = ssv::infer::ssv_inference_test_service_create(
+        service_config);
+    auto stretch_instance = ssv::SsvPipelineBuilder::build(
+        config, stretch_plan, registry, stretch_service.get());
+    analysis_scale = gst_bin_get_by_name(
+        GST_BIN(stretch_instance.pipeline()), "analysis-scale");
+    assert(analysis_scale != nullptr);
+    add_borders = TRUE;
+    g_object_get(analysis_scale, "add-borders", &add_borders, nullptr);
+    assert(!add_borders);
+    gst_object_unref(analysis_scale);
+    stretch_instance.reset();
+    ssv::infer::ssv_inference_service_stop(stretch_service.get());
 }
 
 void test_pipeline_instance_releases_attachment_before_pipeline()

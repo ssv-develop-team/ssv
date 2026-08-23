@@ -1,8 +1,8 @@
 #include "core/ssv_inference_engine.hpp"
 
-#include "model/ssv_model_contract_internal.hpp"
 #include "ssv_inference_service.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <fstream>
@@ -78,9 +78,49 @@ void InferenceEngine::start(const InferenceConfig &config)
     if (!backend_)
         backend_ = create_backend(config);
     metadata_ = backend_->load(config, *allocator_);
-    model_contract_ = ssv_model_contract_validate(
+    input_contract_ = ssv_model_input_contract_validate(
         metadata_, config.model_family, config.output_format);
-    backend_->warmup();
+    model_contract_ = ssv_model_contract_validate(
+        metadata_, config.model_family, config.output_format,
+        config.preprocess->resize_mode);
+    preprocessor_ = std::make_unique<SsvImagePreprocessor>(
+        ssv_make_preprocess_plan(
+            input_contract_.input, *config.preprocess));
+    hardware_preprocess_enabled_ = false;
+    bool hardware_preprocess_supported = false;
+    if (config.preprocess->execution != SsvPreprocessExecution::Cpu) {
+        try {
+            hardware_preprocess_supported =
+                backend_->supports_hardware_preprocess(preprocessor_->plan());
+        } catch (const std::exception &error) {
+            if (config.preprocess->execution == SsvPreprocessExecution::Cuda) {
+                throw std::runtime_error(
+                    std::string("inference.start: CUDA preprocess capability "
+                                "query failed: ")
+                    + error.what());
+            }
+        } catch (...) {
+            if (config.preprocess->execution == SsvPreprocessExecution::Cuda) {
+                throw std::runtime_error(
+                    "inference.start: CUDA preprocess capability query failed");
+            }
+        }
+    }
+    if (config.preprocess->execution == SsvPreprocessExecution::Cuda
+        && !hardware_preprocess_supported) {
+        throw std::runtime_error(
+            "inference.start: requested CUDA preprocessing is unavailable "
+            "for the selected backend");
+    }
+    hardware_preprocess_enabled_ =
+        config.preprocess->execution != SsvPreprocessExecution::Cpu
+        && hardware_preprocess_supported;
+    input_buffer_ = allocator_->allocate(
+        input_contract_.byte_size, alignof(float));
+    auto input_data = input_buffer_.as_span<float>();
+    std::fill(input_data.begin(), input_data.end(), 0.0F);
+    input_view_ = {&metadata_.inputs.front(), input_data};
+    backend_->warmup(input_view_);
     metadata_.backend = backend_->info();
     parser_.configure(config, metadata_, std::move(labels));
 }
@@ -90,6 +130,11 @@ void InferenceEngine::stop()
     backend_.reset();
     metadata_ = {};
     model_contract_.reset();
+    input_contract_ = {};
+    input_view_ = {};
+    input_buffer_ = {};
+    preprocessor_.reset();
+    hardware_preprocess_enabled_ = false;
 }
 
 SsvInferenceRunResult InferenceEngine::run(
@@ -114,36 +159,35 @@ SsvInferenceRunResult InferenceEngine::run(
     const auto &transform = analysis_frame.transform();
     result.detections.timing = analysis_frame.timing();
 
-    const auto &contract = *model_contract_;
-    const std::size_t row_bytes =
-        static_cast<std::size_t>(contract.width) * 4U;
-    if (rgba.width != contract.width
-        || rgba.height != contract.height) {
-        throw std::invalid_argument(
-            "RGBA frame dimensions do not match wrapper input contract");
+    if (!preprocessor_ || input_view_.spec == nullptr)
+        throw std::logic_error("inference input plan is not initialized");
+    SsvBackendRunResult backend_result;
+    if (hardware_preprocess_enabled_) {
+        const SsvHardwarePreprocessInput hardware_input {
+            rgba,
+            preprocessor_->plan(),
+            input_view_,
+        };
+        backend_result = backend_->infer_hardware(
+            hardware_input, stop_token);
+        result.timings.normalize_layout_us =
+            backend_result.timings.preprocess_us;
+    } else {
+        const auto preprocess_timing = preprocessor_->run(
+            rgba, input_buffer_.as_span<float>());
+        result.timings.normalize_layout_us =
+            preprocess_timing.normalize_layout_us;
+        backend_result = backend_->infer(input_view_, stop_token);
     }
-    if (rgba.stride != row_bytes) {
-        throw std::invalid_argument(
-            "RGBA frame must be tightly packed before inference");
-    }
-    if (rgba.bytes.size() < contract.input_bytes) {
-        throw std::invalid_argument(
-            "RGBA frame is smaller than wrapper input contract");
-    }
-
-    const SsvUint8TensorView input {
-        &metadata_.inputs.front(),
-        rgba.bytes.first(contract.input_bytes),
-    };
-    const auto device_start = Clock::now();
-    const auto outputs = backend_->infer(input, stop_token);
-    result.timings.device_us = elapsed_us(device_start);
-    // Backends expose reusable host output views. Any Provider-controlled
-    // device-to-host synchronization is therefore included in device_us;
-    // SSV performs no additional output copy after infer() returns.
-    result.timings.output_copy_us = 0;
+    result.timings.backend_h2d_us = backend_result.timings.h2d_us;
+    result.timings.backend_execution_us =
+        backend_result.timings.execution_us;
+    result.timings.backend_d2h_us = backend_result.timings.d2h_us;
+    result.timings.backend_unattributed_us =
+        backend_result.timings.unattributed_us;
     const auto postprocess_start = Clock::now();
-    result.detections.detections = parser_.parse(outputs, transform);
+    result.detections.detections = parser_.parse(
+        backend_result.outputs, transform);
     result.timings.postprocess_us = elapsed_us(postprocess_start);
     result.timings.total_us = elapsed_us(total_start);
     return result;
@@ -154,6 +198,13 @@ BackendInfo InferenceEngine::backend_info() const
     if (!backend_)
         return {};
     return backend_->info();
+}
+
+std::string InferenceEngine::input_contract_description() const
+{
+    if (!backend_ || !model_contract_)
+        throw std::logic_error("inference engine is not started");
+    return input_contract_.description();
 }
 
 const SsvModelContract &InferenceEngine::model_contract() const

@@ -65,6 +65,13 @@ inference:
     family: yolo
     output_format: yolov8
     label_map: "$label_map_path"
+    preprocess:
+      color_order: rgb
+      resize: letterbox
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
   runtime:
     type: onnxruntime
     providers:
@@ -99,7 +106,7 @@ assert_fatal \
     "$raw_output" \
     "$raw_status" \
     4 \
-    inference.model_contract \
+    inference.start \
     cli-raw-model
 
 set +e

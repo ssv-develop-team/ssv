@@ -75,19 +75,19 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.command, "run")
         self.assertFalse(hasattr(args, "runner_args"))
 
-    def test_model_arguments_are_preserved_after_model_prepare(self) -> None:
+    def test_model_arguments_are_preserved_after_manifest(self) -> None:
         parser = build_parser()
         args, unknown = parser.parse_known_args(
-            ["model", "prepare", "--input", "source.onnx", "--output", "wrapper.onnx"]
+            ["model", "manifest", "--model", "source.onnx", "--engine", "model.engine"]
         )
         self.assertEqual(args.command, "model")
-        self.assertEqual(args.model_action, "prepare")
-        self.assertEqual(unknown, ["--input", "source.onnx", "--output", "wrapper.onnx"])
+        self.assertEqual(args.model_action, "manifest")
+        self.assertEqual(unknown, ["--model", "source.onnx", "--engine", "model.engine"])
 
     def test_model_arguments_default_to_empty(self) -> None:
-        args = build_parser().parse_args(["model", "prepare"])
+        args = build_parser().parse_args(["model", "manifest"])
         self.assertEqual(args.command, "model")
-        self.assertEqual(args.model_action, "prepare")
+        self.assertEqual(args.model_action, "manifest")
         self.assertFalse(hasattr(args, "model_args"))
 
     def test_runner_help_is_preserved_for_native_runner(self) -> None:
@@ -96,12 +96,17 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.command, "run")
         self.assertEqual(unknown, ["--help"])
 
-    def test_model_help_is_preserved_for_wrapper_tool(self) -> None:
+    def test_model_help_is_preserved_for_manifest_tool(self) -> None:
         parser = build_parser()
-        args, unknown = parser.parse_known_args(["model", "prepare", "--help"])
+        args, unknown = parser.parse_known_args(["model", "manifest", "--help"])
         self.assertEqual(args.command, "model")
-        self.assertEqual(args.model_action, "prepare")
+        self.assertEqual(args.model_action, "manifest")
         self.assertEqual(unknown, ["--help"])
+
+    def test_model_prepare_is_not_a_command(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            build_parser().parse_args(["model", "prepare"])
+        self.assertEqual(raised.exception.code, 2)
 
     def test_redis_stop_is_an_explicit_action(self) -> None:
         args = build_parser().parse_args(["redis", "stop"])

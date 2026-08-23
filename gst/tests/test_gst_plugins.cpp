@@ -86,6 +86,7 @@ GST_START_TEST(test_source_geometry_change_resets_infer_and_tracker_generation) 
     config.model.path = "/bin/true";
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {};
     config.target_class = "person";
     ssv::infer::SsvInferenceTestServiceOptions service_options;
     service_options.detection_sequence = {
@@ -171,6 +172,7 @@ GST_START_TEST(test_infer_and_sparse_gmc_share_one_analysis_frame_map) {
     config.model.path = "/bin/true";
     config.model.output_format = "yolo_nx6";
     config.model.label_map = label_map;
+    config.model.preprocess = ssv::SsvPreprocessConfig {};
     config.target_class = "person";
     auto service = ssv::infer::ssv_inference_test_service_create(config);
     ssv::infer::ssv_inference_service_update_source_geometry(
@@ -404,7 +406,7 @@ GST_START_TEST(test_ssvtrack_resets_real_state_for_consumed_generation) {
         detection.analysis_frame = analysis_pool.create(
             buffer,
             video_info,
-            {64, 48, 64, 48, 1.0F, 0, 0, 0, 0},
+            {64, 48, 64, 48, 1.0F, 1.0F, 0, 0, 0, 0},
             detection.timing);
         fail_unless(meta->publish_detection(std::move(detection)) ==
             SsvMetaResult::Published);

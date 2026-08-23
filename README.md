@@ -2,7 +2,7 @@
 
 安全帽佩戴视频监测分析系统。当前项目以 GStreamer C++ 插件承载实时视频分析链路，Redis Streams 作为实时链路和 Agent 复核链路之间的异步边界，Python 服务负责事件消费和后续智能复核编排。
 
-`./ssv` 是 Python 统一开发入口。Python 负责命令解析、依赖准备、Meson 编排、运行环境、测试编排、模型准备、本地服务及 Redis 运维；Meson、编译器和 `pkg-config` 等系统工具由 Python 以参数数组调用。长期实时链路由 C++ `ssv-runner` 负责配置校验、pipeline 构建、GTK、错误处理、结构化日志和资源释放。
+`./ssv` 是 Python 统一开发入口。Python 负责命令解析、依赖准备、Meson 编排、运行环境、测试编排、模型验证、TensorRT manifest、本地服务及 Redis 运维；Meson、编译器和 `pkg-config` 等系统工具由 Python 以参数数组调用。长期实时链路由 C++ `ssv-runner` 负责配置校验、pipeline 构建、GTK、错误处理、结构化日志和资源释放。
 
 ## 架构概览
 
@@ -35,7 +35,7 @@ C++ pipeline 与运行时
 - 共享 C++ 模块：配置、分析帧 lease、检测/跟踪元数据、展示选择与运动预测。
 - ONNX Runtime 正式推理路径：单一 runtime profile、Provider chain、session/cache key、latest-pending worker 和五秒统计窗口。
 - 独立 TensorRT 实验对照：严格 engine manifest、固定 CUDA 资源复用和无 SDK unavailable stub。
-- 模型尺寸 `uint8 RGBA NHWC` wrapper 输入；完整原始帧不在加速路径映射到 CPU。
+- 分析分支保留固定 RGBA model canvas，由 C++ 单遍融合转换为原始模型要求的 `float32 NCHW` 输入；完整原始帧不在加速路径映射到 CPU。
 - Redis Streams 发布插件和 Python Agent 消费基线。
 - Docker Redis 开发环境。
 - `./ssv` Python 统一入口和 `scripts/ssv_cli` 命令包。
@@ -74,7 +74,7 @@ sudo apt-get install -y \
 ```
 
 基础 CLI 只需要项目 Python 依赖；模型命令需要安装对应 optional extra。`./ssv test` 会运行
-wrapper/manifest 契约测试，因此至少需要 `model` extra，并且还会运行 Agent 测试，所以需要 `uv`。
+原始模型/manifest 契约测试，因此至少需要 `model` extra，并且还会运行 Agent 测试，所以需要 `uv`。
 首次准备完整开发环境可执行：
 
 ```bash
@@ -209,25 +209,32 @@ cp config/ssv.example.yaml config/ssv.yaml
 ### 3. 准备模型
 
 默认示例使用 YOLOv8n。`model export` 使用已安装的 `ultralytics` 导出原始
-`models/yolov8n.onnx`，它不是任意模型下载器；已有自己的 ONNX 文件时可以跳过该命令。
+`models/yolov8n.onnx`，它不是任意模型下载器；已有自己的原始 ONNX 文件时可以跳过该命令。
 
 ```bash
 ./ssv model export
-./ssv model prepare \
-  --input models/yolov8n.onnx \
-  --output models/yolov8n-preproc.onnx \
-  --family yolo \
-  --output-format yolov8
 ```
 
-然后把 `config/ssv.yaml` 中的 `inference.model.path` 改为
-`models/yolov8n-preproc.onnx`。原始 float32 NCHW ONNX 不能直接运行；如果输出已经是
-`[1,N,6]` 的 `x1,y1,x2,y2,score,class_id`，使用 `--output-format yolo_nx6`。输出格式应按
-实际图结构选择，不能只看模型文件名。
+然后把 `config/ssv.yaml` 中的 `inference.model.path` 指向该原始 ONNX。启动时会读取并校验
+模型 I/O：当前支持静态 `float32 [1,3,H,W]`、NCHW 输入和静态 float32 输出，不要求任何
+自定义 metadata。颜色顺序、resize/letterbox 和归一化必须在
+`inference.model.preprocess` 中显式声明；如果输出已经是 `[1,N,6]` 的
+`x1,y1,x2,y2,score,class_id`，使用 `output_format: yolo_nx6`。输出格式应按实际图结构选择，
+不能只看模型文件名。
 
-如果手上的模型已经带有 `rgba_u8_nhwc_v1` wrapper metadata，可跳过 `model export` 和
-`model prepare`，直接把 `inference.model.path` 指向该 wrapper；仍需确保 `family`、
-`output_format` 和 label map 与模型实际输出一致。
+### 阶段计时与验证边界
+
+`inference_stats` 事件按阶段报告 `decode`、`color_resize`、`normalize_layout`、后端
+`backend_h2d`/`backend_execution`/`backend_d2h`、`backend_unattributed`、`postprocess` 和
+`total`。`decode` 与 GStreamer 颜色转换/resize 目前没有由推理 engine 伪造的时间，日志会显示
+`unmeasured`；后续 pipeline probe 接入后再填充。CPU ONNX Runtime 已知没有 H2D/D2H，因此这两项
+显示为 `0`，`backend_execution` 是 `Run()` 的实测时间。CUDA/TensorRT EP 无法从 `Run()` 可靠拆分时，
+整段时间归入 `backend_unattributed`；直接 TensorRT 只在具备 CUDA event、GPU 和真实 engine 的主机
+上提供三段 event 计时。
+
+当前验收分别记录 CPU 与 GPU：本地 CPU 已验证原始 float32 NCHW ONNX 的启动、warmup、单帧推理和
+预处理结果；GPU Provider、真实 TensorRT engine、CUDA event 数值及 GPU surface 预处理未由 CPU
+测试代替，必须在对应硬件上单独验证。
 
 ### 4. 编译并检查插件
 
@@ -308,7 +315,7 @@ GDK_BACKEND=x11 ./ssv run --display --overlay
 | `./ssv agent` | 启动 Python Agent 服务 |
 | `./ssv inspect` | 查看插件注册和属性信息 |
 | `./ssv model export` | 用 `ultralytics` 导出默认 YOLOv8n ONNX 模型 |
-| `./ssv model prepare ...` | 生成经过校验的 RGBA uint8 wrapper ONNX 模型 |
+| `./ssv model manifest ...` | 从原始 ONNX 和 TensorRT engine 生成 schema v2 manifest |
 | `./ssv model verify ...` | 验证安全帽 YOLO 模型 |
 | `./ssv model manifest ...` | 生成 TensorRT engine manifest |
 
@@ -411,34 +418,33 @@ SSV_TENSORRT_MODE=disabled ./ssv build
 
 ONNX Runtime 版本由 `--profile` 固定派生，不再接受 `SSV_ONNXRUNTIME_VERSION` 覆盖。成功依赖快照为 ONNX Runtime、OpenCV 和 TensorRT 统一保留各自的 `PCDIR` 与 `RUNTIME_DIRS`，供 Meson 和运行入口精确定位实际库。
 
-### 模型准备
+### 原始模型与预处理
 
-正式推理路径不直接接受原始 float NCHW ONNX。先用离线工具生成一个输入为 `uint8 [1,H,W,4]`、layout 为 NHWC 的 wrapper：
+正式推理路径直接接受原始 float NCHW ONNX。运行时启动阶段读取模型输入输出、创建预处理计划、
+分配并复用 host float buffer、创建 session 并 warmup；每帧从 RGBA model canvas 一次融合完成
+颜色转换、resize/letterbox、归一化和 NCHW 写入。
 
 ```bash
-./ssv model prepare \
-  --input models/yolov8n.onnx \
-  --output models/yolov8n-preproc.onnx \
-  --family yolo \
-  --output-format yolov8
+./ssv model export
+# 或将社区提供的原始 ONNX 直接配置到 inference.model.path
 ```
-
-原模型必须恰好有一个 float32、batch 1、静态 `[1,3,H,W]` 输入。工具只在图首加入去 alpha、Cast、除以 255 和 NHWC 到 NCHW 的 Transpose；resize 与 letterbox 仍由视频管线完成。产物写入 `rgba_u8_nhwc_v1` 契约、宽高、layout、dtype、归一化、通道规则、原模型 SHA-256、模型族、输出格式和工具版本 metadata，并在发布前执行 ONNX checker、shape inference 与 ORT CPU smoke。该隔离环境不安装或导入 OpenCV。
 
 `--output-format` 支持 `yolov8` 和 `yolo_nx6`。原模型输出为 `[1,N,6]`、每行已经是
 `x1,y1,x2,y2,score,class_id` 的端到端检测结果时，必须使用 `yolo_nx6`；不能仅按模型名称
 把它标记为 `yolov8`。
 
-同一输入和参数重复执行会幂等成功。已有目标内容不同则默认拒绝；`--force` 仅允许替换能通过完整契约和 ORT smoke 的本工具产物，不会覆盖任意用户文件。输入文件始终只读，输出通过同目录临时文件原子发布。
+预处理配置使用 `color_order: rgb|bgr`、`resize: letterbox|stretch` 和
+`normalization.scale/mean/std`；旧的 `/255` RGB 语义对应 `scale: 0.00392156862745098`、
+零 mean 和单位 std。运行时不会根据模型文件名或 ONNX metadata 猜测这些语义。
 
 TensorRT 后端只加载已构建好的 `.engine` 文件，不在插件内把 `.onnx` 转成 `.engine`。独立
-TensorRT 路径是实验对照，正式主路径仍是 ONNX Runtime。先在最终运行机器上从同一个 wrapper
+TensorRT 路径是实验对照，正式主路径仍是 ONNX Runtime。先在最终运行机器上从同一个原始 ONNX
 构建 engine，再为现有产物写 manifest：
 
 ```bash
 trtexec \
-  --onnx=models/yolov8n-preproc.onnx \
-  --saveEngine=models/yolov8n-preproc.engine \
+  --onnx=models/yolov8n.onnx \
+  --saveEngine=models/yolov8n.engine \
   --fp16
 
 # 示例值；替换为构建 engine 的实际软件栈与 GPU
@@ -447,9 +453,9 @@ CUDA_RUNTIME_VERSION=13020
 COMPUTE_CAPABILITY=8.9
 
 ./ssv model manifest \
-  --wrapper models/yolov8n-preproc.onnx \
-  --engine models/yolov8n-preproc.engine \
-  --output models/yolov8n-preproc.engine.json \
+  --model models/yolov8n.onnx \
+  --engine models/yolov8n.engine \
+  --output models/yolov8n.engine.json \
   --precision fp16 \
   --tensorrt-version "$TENSORRT_VERSION" \
   --cuda-runtime-version "$CUDA_RUNTIME_VERSION" \
@@ -458,29 +464,46 @@ COMPUTE_CAPABILITY=8.9
 
 `TENSORRT_VERSION` 使用 `major.minor.patch.build`，`CUDA_RUNTIME_VERSION` 使用
 `cudaRuntimeGetVersion` 的整数值，`COMPUTE_CAPABILITY` 使用 `major.minor`。这三个值必须来自
-构建并运行 engine 的同一软件栈和 GPU。工具不会调用 `trtexec`、探测设备或改写 wrapper/engine；
+构建并运行 engine 的同一软件栈和 GPU。工具不会调用 `trtexec`、探测设备或改写 ONNX/engine；
 相同内容幂等成功，不同 manifest 默认拒绝覆盖，确认替换时显式传 `--force`。
 
-manifest 的 `schema` 固定为 `ssv.tensorrt-engine-manifest`，`schema_version` 为 `1`。`engine`
-记录 engine SHA-256、精度、TensorRT/CUDA 版本和 compute capability；`wrapper` 记录 wrapper
-及原模型 SHA-256、`rgba_u8_nhwc_v1` 契约、工具/模型族/输出格式和静态
-`uint8 RGBA NHWC` 输入。加载时严格拒绝未知键、类型错误、hash/版本/设备不匹配、非法精度
-以及实际 engine 输入不一致。配置使用：
+manifest 的 `schema` 固定为 `ssv.tensorrt-engine-manifest`，`schema_version` 为 `2`。`engine`
+记录 engine SHA-256、精度、TensorRT/CUDA 版本和 compute capability；`source_model` 记录原始
+ONNX SHA-256 以及 engine 的输入名称、dtype、layout 和静态 shape。manifest 不承载颜色顺序、
+归一化、resize、模型族或输出格式。加载时严格拒绝未知键、类型错误、hash/版本/设备不匹配、
+非法精度以及实际 engine 输入不一致。配置使用：
 
 ```yaml
 inference:
   model:
-    path: models/yolov8n-preproc.engine
-    manifest: models/yolov8n-preproc.engine.json
+    path: models/yolov8n.engine
+    manifest: models/yolov8n.engine.json
     family: yolo
     output_format: yolov8
     label_map: config/model-labels/coco80.txt
+    preprocess:
+      color_order: rgb
+      resize: letterbox
+      # auto：TensorRT + CUDA kernel 可用时使用硬件预处理，否则使用 CPU；也可显式 cpu/cuda。
+      execution: auto
+      normalization:
+        scale: 0.00392156862745098
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
   runtime:
     type: tensorrt-engine
     device_id: 0
 ```
 
 该 runtime 不接受 `providers`、`precision`、`cpu_threads` 或 `cache`；精度只取 manifest。
+
+`inference.model.preprocess.execution` 的取值为 `auto`、`cpu` 或 `cuda`。第一阶段只有直接
+TensorRT backend 提供硬件预处理：分析分支产生的 model-sized RGBA canvas 先通过同一 CUDA
+stream 复制到可复用的 device scratch，再由融合 kernel 完成 RGB/BGR 通道选择、scale/mean/std
+归一化和 float32 NCHW 写入。resize/letterbox 仍由视频前端完成。`auto` 在 TensorRT/CUDA
+能力不可用时可靠回退 CPU，`cuda` 则在启动阶段失败；ONNX Runtime（包括 CUDA/TensorRT EP）
+当前仍使用 CPU 预处理。该路径不承诺零拷贝，运行统计分别记录 H2D、CUDA 预处理、TensorRT
+执行和 D2H 阶段。
 
 ## 运行和调试
 
@@ -499,7 +522,7 @@ inference:
 ./ssv test
 ```
 
-该命令会先跑依赖、wrapper 准备和 TensorRT manifest 契约测试，再跑构建、Meson 测试、Python CLI 测试和 Python Agent 测试。存在本地运行配置时，最后通过 `./ssv run` 启动一次 30 秒无头 runner smoke；超时向 runner 发送 `SIGINT`，不解析或改写 YAML。没有本地配置时明确跳过这项环境相关检查。
+该命令会先跑依赖、原始模型和 TensorRT manifest 契约测试，再跑构建、Meson 测试、Python CLI 测试和 Python Agent 测试。存在本地运行配置时，最后通过 `./ssv run` 启动一次 30 秒无头 runner smoke；超时向 runner 发送 `SIGINT`，不解析或改写 YAML。没有本地配置时明确跳过这项环境相关检查。
 
 ### 显示调试
 
@@ -620,11 +643,8 @@ meson test -C build
 # Python Agent 单元测试
 cd agent && uv run --extra dev pytest
 
-# wrapper ONNX 准备工具
-python scripts/ssv_cli/tests/ssv_prepare_model_test.py
-
 # TensorRT engine manifest 工具
-python scripts/ssv_cli/tests/ssv_tensorrt_manifest_test.py
+uv run --extra model python scripts/ssv_cli/tests/ssv_tensorrt_manifest_test.py
 
 # Python CLI、依赖和模型服务测试
 python3 -m unittest discover -s scripts/ssv_cli/tests -p 'test_*.py'

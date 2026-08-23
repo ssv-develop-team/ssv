@@ -1,155 +1,124 @@
 #include "model/ssv_model_contract_internal.hpp"
 
-#include <charconv>
-#include <cctype>
 #include <limits>
-#include <string_view>
+#include <string>
 
 namespace ssv::infer {
 namespace {
 
-constexpr std::string_view WRAPPER_CONTRACT = "rgba_u8_nhwc_v1";
-
-const std::string &required_property(
-    const ModelMetadata &metadata,
-    std::string_view key)
+std::size_t tensor_element_count(
+    const TensorSpec &spec,
+    const char *kind)
 {
-    const auto found = metadata.properties.find(std::string(key));
-    if (found == metadata.properties.end() || found->second.empty()) {
+    if (spec.shape.empty())
         throw SsvModelContractError(
-            "wrapper metadata is missing " + std::string(key));
+            std::string(kind) + " tensor shape must not be empty");
+    std::size_t count = 1;
+    for (const auto dimension : spec.shape) {
+        if (dimension <= 0) {
+            throw SsvModelContractError(
+                std::string(kind)
+                + " tensor must have static positive dimensions");
+        }
+        const auto value = static_cast<std::size_t>(dimension);
+        if (count > std::numeric_limits<std::size_t>::max() / value) {
+            throw SsvModelContractError(
+                std::string(kind) + " tensor element count overflows size_t");
+        }
+        count *= value;
     }
-    return found->second;
+    return count;
 }
 
-void require_property(
-    const ModelMetadata &metadata,
-    std::string_view key,
-    std::string_view expected)
+void validate_model_family_and_output_format(
+    ModelFamily model_family,
+    OutputFormat output_format)
 {
-    const auto &actual = required_property(metadata, key);
-    if (actual != expected) {
-        throw SsvModelContractError(
-            "wrapper metadata " + std::string(key) + " must be '"
-            + std::string(expected) + "'");
-    }
-}
-
-int positive_integer_property(
-    const ModelMetadata &metadata,
-    std::string_view key)
-{
-    const auto &text = required_property(metadata, key);
-    int value = 0;
-    const auto parsed = std::from_chars(
-        text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size()
-        || value <= 0) {
-        throw SsvModelContractError(
-            "wrapper metadata " + std::string(key)
-            + " must be a positive integer");
-    }
-    return value;
-}
-
-std::string_view model_family_name(ModelFamily family)
-{
-    if (family == ModelFamily::Yolo)
-        return "yolo";
-    throw SsvModelContractError("model family must be explicitly resolved");
-}
-
-std::string_view output_format_name(OutputFormat format)
-{
-    switch (format) {
-    case OutputFormat::YoloV5: return "yolov5";
-    case OutputFormat::YoloV8: return "yolov8";
-    case OutputFormat::YoloNx6: return "yolo_nx6";
+    if (model_family != ModelFamily::Yolo)
+        throw SsvModelContractError("model family must be explicitly resolved");
+    switch (output_format) {
+    case OutputFormat::YoloV5:
+    case OutputFormat::YoloV8:
+    case OutputFormat::YoloNx6:
+        return;
     }
     throw SsvModelContractError("model output format must be explicitly resolved");
 }
 
-bool is_lower_hex_sha256(std::string_view value)
-{
-    if (value.size() != 64)
-        return false;
-    for (const unsigned char character : value) {
-        if (!std::isdigit(character)
-            && (character < static_cast<unsigned char>('a')
-                || character > static_cast<unsigned char>('f'))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 } // namespace
 
-SsvModelContract ssv_model_contract_validate(
+std::string SsvModelInputContract::description() const
+{
+    std::string result = "float32[";
+    for (std::size_t index = 0; index < input.shape.size(); ++index) {
+        if (index != 0)
+            result += ',';
+        result += std::to_string(input.shape[index]);
+    }
+    result += "]:NCHW";
+    return result;
+}
+
+SsvModelInputContract ssv_model_input_contract_validate(
     const ModelMetadata &metadata,
     ModelFamily model_family,
     OutputFormat output_format)
 {
-    require_property(metadata, "ssv.wrapper.contract", WRAPPER_CONTRACT);
-    require_property(metadata, "ssv.wrapper.dtype", "uint8");
-    require_property(metadata, "ssv.wrapper.layout", "NHWC");
-    require_property(
-        metadata, "ssv.wrapper.channel_rule", "drop_alpha_keep_rgb");
-    require_property(
-        metadata, "ssv.wrapper.normalization", "divide_by_255");
-    require_property(metadata, "ssv.wrapper.tool", "ssv.prepare_wrapper");
-    static_cast<void>(required_property(
-        metadata, "ssv.wrapper.tool_version"));
-    require_property(
-        metadata, "ssv.wrapper.model_family", model_family_name(model_family));
-    require_property(
-        metadata, "ssv.wrapper.output_format", output_format_name(output_format));
-
-    const auto &source_sha256 =
-        required_property(metadata, "ssv.wrapper.source_sha256");
-    if (!is_lower_hex_sha256(source_sha256)) {
-        throw SsvModelContractError(
-            "wrapper metadata ssv.wrapper.source_sha256 must be lowercase SHA-256");
-    }
-
+    validate_model_family_and_output_format(model_family, output_format);
     if (metadata.inputs.size() != 1)
-        throw SsvModelContractError("wrapper must have exactly one input");
+        throw SsvModelContractError(
+            "raw model must have exactly one input tensor");
     if (metadata.outputs.empty())
-        throw SsvModelContractError("wrapper must have at least one output");
+        throw SsvModelContractError(
+            "raw model must have at least one output tensor");
 
     const TensorSpec &input = metadata.inputs.front();
-    if (input.dtype != DataType::Uint8)
-        throw SsvModelContractError("wrapper input must use uint8");
-    if (input.layout != TensorLayout::Nhwc)
-        throw SsvModelContractError("wrapper input must use NHWC layout");
+    if (input.dtype != DataType::Float32)
+        throw SsvModelContractError("raw model input must use float32");
+    if (input.layout != TensorLayout::Nchw)
+        throw SsvModelContractError("raw model input must use NCHW layout");
     if (input.shape.size() != 4 || input.shape[0] != 1
-        || input.shape[3] != 4 || input.shape[1] <= 0
-        || input.shape[2] <= 0) {
+        || input.shape[1] != 3 || input.shape[2] <= 0
+        || input.shape[3] <= 0) {
         throw SsvModelContractError(
-            "wrapper input must be static uint8 [1,H,W,4]");
+            "raw model input must be static float32 [1,3,H,W]");
     }
 
-    const int height = positive_integer_property(
-        metadata, "ssv.wrapper.height");
-    const int width = positive_integer_property(
-        metadata, "ssv.wrapper.width");
-    if (input.shape[1] != height || input.shape[2] != width) {
+    const auto input_elements = tensor_element_count(input, "raw model input");
+    if (input_elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
         throw SsvModelContractError(
-            "wrapper input shape does not match width/height metadata");
+            "raw model input byte size overflows size_t");
     }
-    if (static_cast<std::size_t>(width)
-        > std::numeric_limits<std::size_t>::max()
-            / static_cast<std::size_t>(height) / 4U) {
-        throw SsvModelContractError("wrapper input byte size overflows size_t");
+    for (const auto &output : metadata.outputs) {
+        if (output.dtype != DataType::Float32)
+            throw SsvModelContractError("raw model outputs must use float32");
+        static_cast<void>(tensor_element_count(output, "raw model output"));
     }
 
     return {
-        width,
-        height,
-        static_cast<std::size_t>(width)
-            * static_cast<std::size_t>(height) * 4U,
-        std::string(WRAPPER_CONTRACT),
-        source_sha256,
+        input,
+        input_elements,
+        input_elements * sizeof(float),
+    };
+}
+
+SsvModelContract ssv_model_contract_validate(
+    const ModelMetadata &metadata,
+    ModelFamily model_family,
+    OutputFormat output_format,
+    ssv::SsvResizeMode resize_mode)
+{
+    const auto input = ssv_model_input_contract_validate(
+        metadata, model_family, output_format);
+    if (input.input.shape[2] > std::numeric_limits<int>::max()
+        || input.input.shape[3] > std::numeric_limits<int>::max()) {
+        throw SsvModelContractError(
+            "raw model input dimensions exceed runtime geometry limits");
+    }
+    return {
+        static_cast<int>(input.input.shape[3]),
+        static_cast<int>(input.input.shape[2]),
+        resize_mode,
     };
 }
 
