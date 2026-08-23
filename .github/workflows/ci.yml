@@ -21,6 +21,9 @@ jobs:
       SSV_OPENCV_SOURCE: managed
       SSV_OPENCV_MODE: enabled
       SSV_TENSORRT_MODE: auto
+      SSV_AGENT_MODEL: ci-test-model
+      SSV_AGENT_API_KEY: ci-test-api-key
+      SSV_AGENT_BASE_URL: https://example.invalid
 
     steps:
       - name: Checkout
