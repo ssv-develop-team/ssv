@@ -118,6 +118,16 @@ agent:
   # 空列表保持 fail closed，事件仍会入账但不会获得证据引用。
   evidence_roots: []
   # - "/var/lib/ssv/evidence"
+  # 启用前必须把 evidence_roots 的首项设置为实际的绝对证据目录。
+  recording_evidence:
+    enabled: false
+    clip_before_ms: 2500
+    clip_after_ms: 2500
+    frame_offsets_ms: [-1000, 0, 1000]
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 2000
   # Redis 只在 SQLite 账本事务提交后 ACK；默认不启动外部模型。
   review:
     enabled: false
@@ -138,3 +148,8 @@ agent:
     embedding_model: null
     # 离线 BGE-M3 示例：embedding_backend: "bge_m3"
     # embedding_model: "/opt/models/bge-m3"
+  # 规则默认使用本地词法检索；切换为 qdrant 前必须完成规则入库并配置真实 embedding。
+  knowledge:
+    backend: "local_markdown"
+    qdrant_path: "data/qdrant"
+    min_score: 0.5

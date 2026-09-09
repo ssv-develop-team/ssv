@@ -192,6 +192,10 @@ agent:
   output_dir: "outputs-test"
   dedup_enabled: false
   dedup_cooldown_seconds: 12.5
+  knowledge:
+    backend: "qdrant"
+    qdrant_path: "/var/lib/ssv/qdrant"
+    min_score: 0.65
 )yaml");
 
     const auto config = ssv::ssv_config_load(path.string());
@@ -907,6 +911,65 @@ display:
         "display.overlay.font.weight");
 }
 
+void test_accepts_recording_evidence_extension()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("recording-evidence.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  enabled: false
+agent:
+  recording_evidence:
+    enabled: true
+    clip_before_ms: 2500
+    clip_after_ms: 2500
+    frame_offsets_ms: [-1000, 0, 1000]
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 2000
+)yaml");
+
+    static_cast<void>(ssv::ssv_config_load(path.string()));
+}
+
+void test_rejects_recording_evidence_unknown_key()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  enabled: false
+agent:
+  recording_evidence:
+    unknown: true
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "agent.recording_evidence.unknown");
+}
+
+void test_rejects_recording_evidence_wrong_type()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  enabled: false
+agent:
+  recording_evidence:
+    clip_before_ms: "2500"
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidType,
+        "agent.recording_evidence.clip_before_ms");
+}
+
 void test_rejects_unknown_keys_in_every_section()
 {
     struct Case {
@@ -924,6 +987,8 @@ void test_rejects_unknown_keys_in_every_section()
         {"agent:\n  extra: true", "agent.extra"},
         {"agent:\n  review:\n    extra: true", "agent.review.extra"},
         {"agent:\n  indexing:\n    extra: true", "agent.indexing.extra"},
+        {"agent:\n  knowledge:\n    extra: true",
+            "agent.knowledge.extra"},
     };
 
     for (const auto &test_case : cases) {
@@ -1217,6 +1282,12 @@ void test_rejects_out_of_range_values()
             "agent.review.lease_ms"},
         {"agent:\n  indexing:\n    embedding_backend: remote",
             "agent.indexing.embedding_backend"},
+        {"agent:\n  knowledge:\n    backend: remote",
+            "agent.knowledge.backend"},
+        {"agent:\n  knowledge:\n    qdrant_path: \"  \"",
+            "agent.knowledge.qdrant_path"},
+        {"agent:\n  knowledge:\n    min_score: 1.1",
+            "agent.knowledge.min_score"},
         {"tracking:\n  track_buffer: 0", "tracking.track_buffer"},
         {"tracking:\n  track_buffer: 301", "tracking.track_buffer"},
         {"tracking:\n  gmc:\n    downscale: 0", "tracking.gmc.downscale"},
@@ -1431,6 +1502,9 @@ int main(int argc, char **argv)
     test_validates_cpu_threads();
     test_validates_explicit_decode_devices();
     test_rejects_deep_unknown_key();
+    test_accepts_recording_evidence_extension();
+    test_rejects_recording_evidence_unknown_key();
+    test_rejects_recording_evidence_wrong_type();
     test_rejects_unknown_keys_in_every_section();
     test_reports_non_string_mapping_keys();
     test_reports_structural_type_errors();
