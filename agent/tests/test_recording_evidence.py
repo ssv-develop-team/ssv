@@ -211,6 +211,8 @@ def test_extract_selects_covering_segments_and_commits_four_artifacts(tmp_path: 
     assert all(call.kwargs["timeout"] > 0 for call in runner.calls)
     assert [call.args[0] for call in runner.calls] == ["ffprobe", "ffmpeg", "ffmpeg", "ffmpeg", "ffmpeg"]
     assert all("-f" in call.args and "concat" in call.args for call in runner.calls[1:])
+    seeks = [float(call.args[call.args.index("-ss") + 1]) for call in runner.calls[1:5]]
+    assert [round(value - seeks[0], 3) for value in seeks] == [0.0, 1.5, 2.5, 3.5]
 
     manifest = json.loads((tmp_path / "derived" / "case-1" / "manifest.json").read_text())
     assert manifest["time_basis"] == "wall_clock_approximate"

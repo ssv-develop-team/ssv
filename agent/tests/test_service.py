@@ -138,7 +138,7 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
             return None
         def stop(self):
             return None
-    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True, "lease_ms": 123, "max_retries": 4, "retry_delay_ms": 456, "poll_interval_ms": 789}}})
+    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True}}})
     def extractor_factory(**kwargs):
         observed["extractor"] = kwargs
         return object()
@@ -150,7 +150,10 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
     runtime.stop(join_timeout_seconds=1)
     assert observed["extractor"] == {"sources": {"camera-1": cfg.sources[0]}, "config": cfg.agent.recording_evidence, "evidence_roots": ["/tmp"]}
     worker_args = observed["worker"]
-    assert worker_args["lease_ms"] == 123 and worker_args["max_retries"] == 4 and worker_args["retry_delay_ms"] == 456 and worker_args["poll_interval_seconds"] == 0.789
+    assert worker_args["lease_ms"] == service._EVIDENCE_WORKER_LEASE_MS == 30_000
+    assert worker_args["max_retries"] == service._EVIDENCE_WORKER_MAX_RETRIES == 3
+    assert worker_args["retry_delay_ms"] == service._EVIDENCE_WORKER_RETRY_DELAY_MS == 2000
+    assert worker_args["poll_interval_seconds"] == service._EVIDENCE_WORKER_POLL_SECONDS == 1.0
 
 
 def test_builtin_consumer_factory_receives_recording_ledger(monkeypatch) -> None:

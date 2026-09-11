@@ -12,6 +12,7 @@
 #include <string_view>
 #include <system_error>
 
+#include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 
 namespace ssv {
@@ -309,6 +310,91 @@ YAML::Node required_node(
     return child;
 }
 
+nlohmann::json yaml_to_json(
+    const YAML::Node &node,
+    std::string_view path)
+{
+    using json = nlohmann::json;
+
+    if (node.IsMap()) {
+        json object = json::object();
+        for (const auto &entry : node) {
+            const auto key = node_as<std::string>(entry.first, path);
+            object[key] = yaml_to_json(
+                entry.second,
+                std::string(path) + "." + key);
+        }
+        return object;
+    }
+    if (node.IsSequence()) {
+        json array = json::array();
+        for (std::size_t index = 0; index < node.size(); ++index) {
+            array.push_back(yaml_to_json(
+                node[index],
+                std::string(path) + "[" + std::to_string(index) + "]"));
+        }
+        return array;
+    }
+    if (!node.IsScalar() || node.IsNull())
+        throw_invalid_type(path);
+
+    if (has_yaml_scalar_type<bool>(node))
+        return node_as<bool>(node, path);
+    if (has_yaml_scalar_type<int>(node))
+        return node_as<int>(node, path);
+    if (has_yaml_scalar_type<float>(node))
+        return node_as<float>(node, path);
+    if (has_yaml_scalar_type<std::string>(node))
+        return node_as<std::string>(node, path);
+    throw_invalid_type(path);
+}
+
+SsvEventRuleConfig parse_event_rule(
+    const YAML::Node &node,
+    std::string_view path)
+{
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "event_type",
+        "severity",
+        "rule_id",
+        "rule_version",
+        "rule_facts",
+    });
+
+    SsvEventRuleConfig rule;
+    rule.event_type = node_as<std::string>(
+        required_node(node, "event_type", std::string(path) + ".event_type"),
+        std::string(path) + ".event_type");
+    rule.severity = node_as<std::string>(
+        required_node(node, "severity", std::string(path) + ".severity"),
+        std::string(path) + ".severity");
+    rule.rule_id = node_as<std::string>(
+        required_node(node, "rule_id", std::string(path) + ".rule_id"),
+        std::string(path) + ".rule_id");
+    rule.rule_version = node_as<std::string>(
+        required_node(node, "rule_version", std::string(path) + ".rule_version"),
+        std::string(path) + ".rule_version");
+    for (const auto &[value, field] : {
+        std::pair<const std::string &, std::string_view> {rule.event_type, "event_type"},
+        {rule.severity, "severity"},
+        {rule.rule_id, "rule_id"},
+        {rule.rule_version, "rule_version"},
+    }) {
+        if (is_blank(value))
+            throw_invalid_value(
+                std::string(path) + "." + std::string(field),
+                std::string(path) + "." + std::string(field)
+                    + " must not be empty");
+    }
+
+    const auto facts_path = std::string(path) + ".rule_facts";
+    const auto facts = required_node(node, "rule_facts", facts_path);
+    require_map(facts, facts_path);
+    rule.rule_facts_json = yaml_to_json(facts, facts_path).dump();
+    return rule;
+}
+
 std::array<float, 3> parse_float_triplet(
     const YAML::Node &node,
     std::string_view path)
@@ -509,37 +595,12 @@ void validate_recording_evidence_extension(const YAML::Node &node)
     require_map(node, path);
     reject_unknown_keys(node, path, {
         "enabled",
-        "poll_interval_ms",
-        "lease_ms",
-        "max_retries",
-        "retry_delay_ms",
         "clip_before_ms",
         "clip_after_ms",
-        "frame_offsets_ms",
     });
 
     static_cast<void>(get_or<bool>(
         node, "enabled", false, "agent.recording_evidence.enabled"));
-    static_cast<void>(get_or<int>(
-        node,
-        "poll_interval_ms",
-        1000,
-        "agent.recording_evidence.poll_interval_ms"));
-    static_cast<void>(get_or<int>(
-        node,
-        "lease_ms",
-        30000,
-        "agent.recording_evidence.lease_ms"));
-    static_cast<void>(get_or<int>(
-        node,
-        "max_retries",
-        3,
-        "agent.recording_evidence.max_retries"));
-    static_cast<void>(get_or<int>(
-        node,
-        "retry_delay_ms",
-        2000,
-        "agent.recording_evidence.retry_delay_ms"));
     static_cast<void>(get_or<int>(
         node,
         "clip_before_ms",
@@ -550,16 +611,6 @@ void validate_recording_evidence_extension(const YAML::Node &node)
         "clip_after_ms",
         2500,
         "agent.recording_evidence.clip_after_ms"));
-
-    if (const auto offsets = node["frame_offsets_ms"]) {
-        require_sequence(offsets, "agent.recording_evidence.frame_offsets_ms");
-        for (std::size_t index = 0; index < offsets.size(); ++index) {
-            static_cast<void>(node_as<int>(
-                offsets[index],
-                std::string("agent.recording_evidence.frame_offsets_ms[")
-                    + std::to_string(index) + "]"));
-        }
-    }
 }
 
 void validate_knowledge_extension(const YAML::Node &node)
@@ -802,6 +853,7 @@ SsvSourceConfig parse_source(
         "codec",
         "protocols",
         "latency_ms",
+        "event_rule",
         "decode",
     });
 
@@ -843,6 +895,13 @@ SsvSourceConfig parse_source(
         throw_invalid_value(
             std::string(path) + ".latency_ms",
             std::string(path) + ".latency_ms must not be negative");
+    }
+
+    if (const auto event_rule = node["event_rule"];
+        event_rule && !event_rule.IsNull()) {
+        source.event_rule = parse_event_rule(
+            event_rule,
+            std::string(path) + ".event_rule");
     }
 
     if (const auto decode = node["decode"]) {
@@ -1537,6 +1596,24 @@ SsvConfig parse_and_validate(const YAML::Node &root)
     return config;
 }
 
+void validate_event_rules(const SsvConfig &config)
+{
+    for (std::size_t index = 0; index < config.sources.size(); ++index) {
+        const auto &rule = config.sources[index].event_rule;
+        if (rule.event_type.empty()
+            && rule.severity.empty()
+            && rule.rule_id.empty()
+            && rule.rule_version.empty()) {
+            const auto path = "sources[" + std::to_string(index)
+                + "].event_rule";
+            throw SsvConfigError(
+                SsvConfigErrorKind::MissingRequired,
+                path,
+                path + " is required");
+        }
+    }
+}
+
 } // namespace
 
 SsvConfig ssv_config_load(const std::string &path)
@@ -1544,6 +1621,7 @@ SsvConfig ssv_config_load(const std::string &path)
     const auto resolved = resolve_config_path(path);
     auto config = parse_and_validate(read_yaml(resolved));
     apply_deployment_overrides(config);
+    validate_event_rules(config);
     return config;
 }
 

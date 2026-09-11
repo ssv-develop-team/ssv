@@ -131,6 +131,14 @@ sources:
     codec: "h264"
     protocols: "tcp"
     latency_ms: 120
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "GB26860-2011-5.2.2"
+      rule_version: "GB/T 26860-2011"
+      rule_facts:
+        helmet_required: true
+        subject: "person"
     decode:
       mode: "vaapi"
       device: "drm:/dev/dri/renderD128"
@@ -206,6 +214,12 @@ agent:
     assert(config.sources.size() == 1);
     assert(config.sources.front().id == "camera-01");
     assert(config.sources.front().codec == "h264");
+    assert(config.sources.front().event_rule.event_type == "person_without_helmet");
+    assert(config.sources.front().event_rule.severity == "high");
+    assert(config.sources.front().event_rule.rule_id == "GB26860-2011-5.2.2");
+    assert(config.sources.front().event_rule.rule_version == "GB/T 26860-2011");
+    assert(config.sources.front().event_rule.rule_facts_json
+        == R"({"helmet_required":true,"subject":"person"})");
     assert(config.sources.front().decode.mode == ssv::SsvDecodeMode::Vaapi);
     assert(config.sources.front().decode.device.kind ==
         ssv::SsvDecodeDeviceKind::Drm);
@@ -268,6 +282,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 inference:
   model:
     preprocess:
@@ -318,6 +338,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 inference:
   model:
     preprocess:
@@ -442,6 +468,12 @@ version: "2.0"
 sources:
   - id: "environment-source"
     uri: "rtsp://environment.example/stream"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 )yaml");
     setenv("SSV_CONFIG_PATH", path.c_str(), 1);
 
@@ -460,6 +492,12 @@ version: "2.0"
 sources:
   - id: "environment-source"
     uri: "rtsp://environment.example/stream"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 )yaml");
     const auto explicit_path = environment.write(
         "explicit-config.yaml", R"yaml(
@@ -467,6 +505,12 @@ version: "2.0"
 sources:
   - id: "explicit-source"
     uri: "rtsp://explicit.example/stream"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 )yaml");
     setenv("SSV_CONFIG_PATH", environment_path.c_str(), 1);
 
@@ -487,6 +531,12 @@ redis:
 sources:
   - id: "camera-01"
     uri: "rtsp://yaml.invalid/stream"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 )yaml");
     setenv("SSV_RTSP_URL", "rtsps://camera.example/stream", 1);
     setenv("REDIS_HOST", "redis.example", 1);
@@ -530,6 +580,12 @@ redis:
 sources:
   - id: "camera-01"
     uri: "rtsp://yaml.example/stream"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 )yaml");
     setenv("SSV_RTSP_URL", "", 1);
     setenv("REDIS_HOST", "", 1);
@@ -704,6 +760,50 @@ sources:
         "sources[0].id");
 }
 
+void test_requires_event_rule()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+)yaml",
+        ssv::SsvConfigErrorKind::MissingRequired,
+        "sources[0].event_rule");
+}
+
+void test_rejects_invalid_event_rule()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_version: "v1"
+      rule_facts: {}
+)yaml",
+        ssv::SsvConfigErrorKind::MissingRequired,
+        "sources[0].event_rule.rule_id");
+
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: []
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidType,
+        "sources[0].event_rule.rule_facts");
+}
+
 void test_enforces_provider_mode_and_order()
 {
     expect_config_error(R"yaml(
@@ -813,6 +913,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 inference:
   model:
     preprocess:
@@ -863,6 +969,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
     decode:
       mode: "nvdec"
       device: "cuda:2"
@@ -919,6 +1031,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 inference:
   enabled: false
 agent:
@@ -926,11 +1044,6 @@ agent:
     enabled: true
     clip_before_ms: 2500
     clip_after_ms: 2500
-    frame_offsets_ms: [-1000, 0, 1000]
-    poll_interval_ms: 1000
-    lease_ms: 30000
-    max_retries: 3
-    retry_delay_ms: 2000
 )yaml");
 
     static_cast<void>(ssv::ssv_config_load(path.string()));
@@ -989,6 +1102,16 @@ void test_rejects_unknown_keys_in_every_section()
         {"agent:\n  indexing:\n    extra: true", "agent.indexing.extra"},
         {"agent:\n  knowledge:\n    extra: true",
             "agent.knowledge.extra"},
+        {"agent:\n  recording_evidence:\n    frame_offsets_ms: [-1000, 0, 1000]",
+            "agent.recording_evidence.frame_offsets_ms"},
+        {"agent:\n  recording_evidence:\n    poll_interval_ms: 1000",
+            "agent.recording_evidence.poll_interval_ms"},
+        {"agent:\n  recording_evidence:\n    lease_ms: 30000",
+            "agent.recording_evidence.lease_ms"},
+        {"agent:\n  recording_evidence:\n    max_retries: 3",
+            "agent.recording_evidence.max_retries"},
+        {"agent:\n  recording_evidence:\n    retry_delay_ms: 2000",
+            "agent.recording_evidence.retry_delay_ms"},
     };
 
     for (const auto &test_case : cases) {
@@ -1368,6 +1491,12 @@ version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
 display:
   enabled: false
   backend: "auto"
@@ -1497,6 +1626,8 @@ int main(int argc, char **argv)
     test_rejects_invalid_decode_mode();
     test_requires_exactly_one_source();
     test_requires_non_empty_source_id();
+    test_requires_event_rule();
+    test_rejects_invalid_event_rule();
     test_enforces_provider_mode_and_order();
     test_enforces_runtime_discriminator();
     test_validates_cpu_threads();

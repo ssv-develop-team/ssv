@@ -37,6 +37,10 @@ _REVIEW_TOOL_NAMES = frozenset(
 _REVIEW_CONFIGURED_TOOL_NAMES = _REVIEW_TOOL_NAMES - {"view_image"}
 _REVIEW_VIEW_IMAGE_MODULE = "deerflow.tools.builtins.view_image_tool"
 _ENV_UNSET = object()
+_EVIDENCE_WORKER_POLL_SECONDS = 1.0
+_EVIDENCE_WORKER_LEASE_MS = 30_000
+_EVIDENCE_WORKER_MAX_RETRIES = 3
+_EVIDENCE_WORKER_RETRY_DELAY_MS = 2_000
 _DEERFLOW_ENV_KEYS = (
     "DEER_FLOW_CONFIG_PATH",
     "DEER_FLOW_PROJECT_ROOT",
@@ -323,10 +327,10 @@ class AgentService:
             ledger_factory=self._ledger_factory,
             extractor=extractor,
             worker_id="ssv-recording-evidence-0",
-            lease_ms=worker_config.lease_ms,
-            max_retries=worker_config.max_retries,
-            retry_delay_ms=worker_config.retry_delay_ms,
-            poll_interval_seconds=worker_config.poll_interval_ms / 1000,
+            lease_ms=_EVIDENCE_WORKER_LEASE_MS,
+            max_retries=_EVIDENCE_WORKER_MAX_RETRIES,
+            retry_delay_ms=_EVIDENCE_WORKER_RETRY_DELAY_MS,
+            poll_interval_seconds=_EVIDENCE_WORKER_POLL_SECONDS,
         )
         if self._stopping.is_set():
             return

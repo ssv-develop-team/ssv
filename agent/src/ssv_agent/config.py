@@ -69,14 +69,12 @@ class AgentSourceConfig(_StrictConfigModel):
     uri: str = Field(min_length=1)
 
 
-class RecordingEvidenceConfig(WorkerConfig):
+class RecordingEvidenceConfig(_StrictConfigModel):
     """由 Agent 持久 worker 生成录像上下文证据的配置。"""
 
     enabled: bool = False
-    clip_before_ms: int = Field(default=2500, gt=0)
-    clip_after_ms: int = Field(default=2500, gt=0)
-    frame_offsets_ms: list[int] = Field(default_factory=lambda: [-1000, 0, 1000])
-    retry_delay_ms: int = Field(default=2000, gt=0)
+    clip_before_ms: int = Field(default=2500, ge=1000)
+    clip_after_ms: int = Field(default=2500, ge=1000)
 
 
 class KnowledgeConfig(_StrictConfigModel):
@@ -113,22 +111,6 @@ class AgentConfig(_StrictConfigModel):
         recording_evidence = self.recording_evidence
         if recording_evidence.enabled and not self.evidence_roots:
             raise ValueError("recording_evidence requires non-empty evidence_roots")
-
-        offsets = recording_evidence.frame_offsets_ms
-        if len(offsets) != 3:
-            raise ValueError("recording_evidence.frame_offsets_ms must contain exactly three offsets")
-        if any(left >= right for left, right in zip(offsets, offsets[1:])):
-            raise ValueError("recording_evidence.frame_offsets_ms must be strictly increasing")
-        if offsets != [-1000, 0, 1000]:
-            raise ValueError(
-                "recording_evidence.frame_offsets_ms must be [-1000, 0, 1000]"
-            )
-        if any(
-            offset < -recording_evidence.clip_before_ms
-            or offset > recording_evidence.clip_after_ms
-            for offset in offsets
-        ):
-            raise ValueError("recording_evidence.frame_offsets_ms must fall within the clip window")
         return self
 
 

@@ -121,14 +121,9 @@ agent:
     enabled: true
     clip_before_ms: 2500
     clip_after_ms: 2500
-    frame_offsets_ms: [-1000, 0, 1000]
-    poll_interval_ms: 1000
-    lease_ms: 30000
-    max_retries: 3
-    retry_delay_ms: 2000
 ```
 
-默认窗口为事件时间点前后各 2.5 秒，共 5 秒；三帧分别位于 `T-1000ms`、`T` 和 `T+1000ms`。`timestamp_ms` 来自发布端墙钟，只能标记为 `wall_clock_approximate`，因此 clip/帧是墙钟附近的上下文，不应被描述为检测同帧证据。
+默认窗口为事件时间点前后各 2.5 秒，共 5 秒；三帧分别位于 `T-1000ms`、`T` 和 `T+1000ms`。`clip_before_ms` 与 `clip_after_ms` 都不得小于 1000：三帧偏移固定为 `-1000`/`0`/`+1000` 毫秒，窗口更小会让帧落到窗口之外。`timestamp_ms` 来自发布端墙钟，只能标记为 `wall_clock_approximate`，因此 clip/帧是墙钟附近的上下文，不应被描述为检测同帧证据。
 
 原始 `recordings/` 分段由 MediaMTX 按 `recordDeleteAfter: 1d` 自动清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。窗口缺段、录像尚未就绪或达到重试上限时，事件状态进入 `manual_review`，不创建无图 review job；人工复核应据此判断证据不可用，不能将失败当作“没有目标”结论。
 

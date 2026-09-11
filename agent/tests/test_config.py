@@ -91,17 +91,13 @@ def test_recording_evidence_requires_a_root_and_valid_window() -> None:
         AgentSourceConfig(id="camera-01", uri="rtsp://localhost:8554/stream")
     ]
     assert config.agent.recording_evidence == RecordingEvidenceConfig(enabled=True)
-    assert config.agent.recording_evidence.frame_offsets_ms == [-1000, 0, 1000]
 
     for recording_evidence in (
         {"enabled": True, "clip_before_ms": 0},
         {"enabled": True, "clip_after_ms": 0},
         {"enabled": True, "clip_after_ms": -1},
-        {"enabled": True, "frame_offsets_ms": [-1000, 0]},
-        {"enabled": True, "frame_offsets_ms": [-1000, 0, 1000, 1500]},
-        {"enabled": True, "frame_offsets_ms": [-1000, 0, 0]},
-        {"enabled": True, "frame_offsets_ms": [-900, 0, 1000]},
-        {"enabled": True, "frame_offsets_ms": [-1000, 0, 3000]},
+        {"enabled": True, "clip_before_ms": 999},
+        {"enabled": True, "clip_after_ms": 999},
         {"enabled": True, "unknown": True},
     ):
         with pytest.raises(ValidationError):
@@ -113,6 +109,38 @@ def test_recording_evidence_requires_a_root_and_valid_window() -> None:
                     }
                 }
             )
+
+
+@pytest.mark.parametrize(
+    "removed_key, removed_value",
+    [
+        ("frame_offsets_ms", [-1000, 0, 1000]),
+        ("poll_interval_ms", 1000),
+        ("lease_ms", 30_000),
+        ("max_retries", 3),
+        ("retry_delay_ms", 2000),
+    ],
+)
+def test_recording_evidence_rejects_removed_keys(
+    removed_key: str, removed_value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        SsvConfig.model_validate(
+            {
+                "agent": {
+                    "evidence_roots": ["/var/lib/ssv/evidence"],
+                    "recording_evidence": {"enabled": True, removed_key: removed_value},
+                }
+            }
+        )
+
+
+def test_recording_evidence_defaults_are_constant() -> None:
+    defaults = RecordingEvidenceConfig()
+
+    assert defaults.enabled is False
+    assert defaults.clip_before_ms == 2500
+    assert defaults.clip_after_ms == 2500
 
 
 @pytest.mark.parametrize(
@@ -331,11 +359,6 @@ def test_deployment_recording_evidence_defaults_can_be_enabled() -> None:
                     "enabled": True,
                     "clip_before_ms": 2500,
                     "clip_after_ms": 2500,
-                    "frame_offsets_ms": [-1000, 0, 1000],
-                    "poll_interval_ms": 1000,
-                    "lease_ms": 30000,
-                    "max_retries": 3,
-                    "retry_delay_ms": 2000,
                 },
             }
         }
@@ -345,11 +368,6 @@ def test_deployment_recording_evidence_defaults_can_be_enabled() -> None:
     assert recording_evidence.enabled is True
     assert recording_evidence.clip_before_ms == 2500
     assert recording_evidence.clip_after_ms == 2500
-    assert recording_evidence.frame_offsets_ms == [-1000, 0, 1000]
-    assert recording_evidence.poll_interval_ms == 1000
-    assert recording_evidence.lease_ms == 30000
-    assert recording_evidence.max_retries == 3
-    assert recording_evidence.retry_delay_ms == 2000
 
 
 def test_example_recording_evidence_defaults(
@@ -362,11 +380,6 @@ def test_example_recording_evidence_defaults(
     assert example.agent.recording_evidence.enabled is False
     assert example.agent.recording_evidence.clip_before_ms == 2500
     assert example.agent.recording_evidence.clip_after_ms == 2500
-    assert example.agent.recording_evidence.frame_offsets_ms == [-1000, 0, 1000]
-    assert example.agent.recording_evidence.poll_interval_ms == 1000
-    assert example.agent.recording_evidence.lease_ms == 30000
-    assert example.agent.recording_evidence.max_retries == 3
-    assert example.agent.recording_evidence.retry_delay_ms == 2000
 
 
 def test_load_config_missing_explicit_path_raises(tmp_path: Path) -> None:

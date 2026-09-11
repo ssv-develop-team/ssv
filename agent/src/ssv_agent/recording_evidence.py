@@ -21,6 +21,8 @@ from ssv_agent.event_store import EventCase
 
 _SEGMENT_NAME = re.compile(r"^(?P<seconds>[0-9]+)-(?P<microseconds>[0-9]{1,6})\.mp4$")
 _COMMAND_TIMEOUT_SECONDS = 30
+# 帧相对事件时间点的偏移；三帧依次为 T-1000ms、T、T+1000ms。
+_FRAME_OFFSETS_MS: tuple[int, ...] = (-1000, 0, 1000)
 
 
 @dataclass(frozen=True)
@@ -388,7 +390,7 @@ class RecordingEvidenceExtractor:
         )
         _fsync_file(clip_path)
         artifacts = [_artifact("clip", clip_path, "video/mp4")]
-        for index, offset_ms in enumerate(self._config.frame_offsets_ms, start=1):
+        for index, offset_ms in enumerate(_FRAME_OFFSETS_MS, start=1):
             frame_path = temporary_dir / f"frame-{index:02d}.jpg"
             relative_frame_s = (event_timestamp_ms + offset_ms - segments[0].start_ms) / 1000
             self._run_ffmpeg(
