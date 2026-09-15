@@ -13,9 +13,12 @@ def test_local_markdown_returns_helmet_clause_first() -> None:
 
     assert result.success is True
     assert len(result.chunks) == 2
-    assert result.chunks[0].metadata["source"] == "GB+26860-2011 (1).md"
-    assert result.chunks[0].metadata["section"] == "9.2.11"
-    assert "绝缘安全帽" in result.chunks[0].content
+    assert result.chunks[0].metadata["source"] == "作业现场安全帽佩戴要求.md"
+    assert result.chunks[0].metadata["section"] == "1.1"
+    assert "未佩戴安全帽" in result.chunks[0].content
+    assert result.chunks[1].metadata["source"] == "GB+26860-2011 (1).md"
+    assert result.chunks[1].metadata["section"] == "9.2.11"
+    assert "绝缘安全帽" in result.chunks[1].content
 
 
 def test_clause_splitter_ignores_pdf_page_noise_and_parses_markdown_numbers() -> None:
