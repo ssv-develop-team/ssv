@@ -26,14 +26,22 @@ struct PipelineBranchTopology {
 };
 
 struct PipelineTopology {
-    std::vector<PipelineStage> prefix;
+    // The RTSP source has a dynamic pad, so this path starts at the first
+    // statically linkable element and ends at the encoded parser.
+    std::vector<PipelineStage> source_path;
+    std::optional<PipelineStage> encoded_tee;
+    std::vector<PipelineStage> decode_path;
     std::optional<PipelineBranchTopology> display;
     std::optional<PipelineBranchTopology> analysis;
+    std::optional<PipelineBranchTopology> evidence_cache;
+    std::vector<std::string> required_factories;
     std::vector<SsvPipelineContractExpectation> contracts;
     std::string decode_caps;
     std::string display_upload_caps;
     std::string display_download_caps;
     std::string display_sink_caps;
+    std::string display_overlay_caps;
+    std::string display_encode_caps;
     std::string analysis_host_caps;
     bool depay_wait_for_keyframe = true;
     bool depay_request_keyframe = true;

@@ -106,8 +106,14 @@ ssv_pub_build_event_payload(
         {"source", frame.source_id},
         {"timestamp_ms", timestamp_ms},
         {"frame_id", frame.frame_id},
+        {"stream_generation", frame.timing.generation},
         {"detections", detections_arr}
     };
+
+    if (frame.timing.pts == GST_CLOCK_TIME_NONE)
+        msg["source_pts"] = nullptr;
+    else
+        msg["source_pts"] = frame.timing.pts;
 
     if (!event_rule.event_type.empty()) {
         msg["event_type"] = event_rule.event_type;

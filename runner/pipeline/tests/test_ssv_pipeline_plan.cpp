@@ -218,6 +218,100 @@ void test_explicit_gtk_gl_requires_decoder_dmabuf()
         "capability.display");
 }
 
+void test_explicit_rtsp_backend_resolves_encoder_and_caps()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_capabilities({
+            "avdec_h264",
+        "rtspclientsink",
+        "rtph264pay",
+        "openh264enc",
+        }));
+
+    assert(plan.display_backend
+        == ssv::SsvResolvedDisplayBackend::RtspClientSink);
+    assert(plan.display_encoder_factory == "openh264enc");
+    assert((plan.expected_caps.display_encode_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::I420,
+            ssv::SsvMemoryKind::SystemMemory,
+        }));
+    assert(plan.expected_caps.display_overlay_input == std::nullopt);
+    assert(!ssv::ssv_display_backend_requires_window(
+        *plan.display_backend));
+}
+
+void test_rtsp_overlay_requires_and_resolves_overlay_contract()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.burn_in_overlay = true;
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_capabilities({
+            "avdec_h264",
+            "rtspclientsink",
+            "rtph264pay",
+            "openh264enc",
+            "ssvoverlay",
+        }));
+
+    assert((plan.expected_caps.display_overlay_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::Bgrx,
+            ssv::SsvMemoryKind::SystemMemory,
+        }));
+}
+
+void test_rtsp_overlay_requires_ssvoverlay()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.burn_in_overlay = true;
+
+    expect_plan_error(
+        config,
+        make_capabilities({
+            "avdec_h264",
+            "rtspclientsink",
+            "rtph264pay",
+            "openh264enc",
+        }),
+        ssv::SsvExitCode::CapabilityUnavailable,
+        "capability.display");
+}
+
+void test_rtsp_backend_requires_publish_elements()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+
+    expect_plan_error(
+        config,
+        make_capabilities({"avdec_h264", "openh264enc"}),
+        ssv::SsvExitCode::CapabilityUnavailable,
+        "capability.display");
+
+    expect_plan_error(
+        config,
+        make_capabilities({"avdec_h264", "rtspclientsink", "rtph264pay"}),
+        ssv::SsvExitCode::CapabilityUnavailable,
+        "capability.display");
+}
+
 void test_disabled_branches_do_not_require_capabilities()
 {
     auto config = make_config();
@@ -230,6 +324,8 @@ void test_disabled_branches_do_not_require_capabilities()
     assert(plan.inference_backend == std::nullopt);
     assert(plan.expected_caps.display_upload_input == std::nullopt);
     assert(plan.expected_caps.display_sink_input == std::nullopt);
+    assert(plan.expected_caps.display_overlay_input == std::nullopt);
+    assert(plan.expected_caps.display_encode_input == std::nullopt);
     assert(plan.expected_caps.analysis_gpu_input == std::nullopt);
     assert(plan.expected_caps.analysis_host_input == std::nullopt);
 }
@@ -466,6 +562,10 @@ int main()
     test_auto_resolution_falls_back_in_declared_order();
     test_auto_display_uses_gtksink_without_decoder_dmabuf();
     test_explicit_gtk_gl_requires_decoder_dmabuf();
+    test_explicit_rtsp_backend_resolves_encoder_and_caps();
+    test_rtsp_overlay_requires_and_resolves_overlay_contract();
+    test_rtsp_overlay_requires_ssvoverlay();
+    test_rtsp_backend_requires_publish_elements();
     test_disabled_branches_do_not_require_capabilities();
     test_explicit_backends_are_strict();
     test_decode_device_selector_must_match_the_requested_backend();

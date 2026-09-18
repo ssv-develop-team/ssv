@@ -92,6 +92,7 @@ enum class SsvDisplayBackend {
     Auto,
     GtkGlSink,
     GtkSink,
+    RtspClientSink,
 };
 
 enum class SsvGlBackend {
@@ -116,12 +117,18 @@ struct SsvOverlayConfig {
     SsvMotionPredictionConfig motion_prediction;
 };
 
+struct SsvRtspOutputConfig {
+    std::string location;
+    bool burn_in_overlay = false;
+};
+
 struct SsvDisplayConfig {
     bool enabled = true;
     SsvDisplayBackend backend = SsvDisplayBackend::Auto;
     int fps = 30;
     SsvGlBackend gl_backend = SsvGlBackend::Auto;
     SsvOverlayConfig overlay;
+    SsvRtspOutputConfig rtsp;
 };
 
 enum class SsvProviderMode {
@@ -235,6 +242,14 @@ struct SsvTrackingConfig {
     SsvGmcConfig gmc;
 };
 
+struct SsvEvidenceCacheConfig {
+    bool enabled = false;
+    std::string directory = "/var/lib/ssv/evidence-cache";
+    int segment_duration_ms = 10000;
+    int retention_ms = 120000;
+    int max_bytes_mb = 512;
+};
+
 struct SsvLoggingConfig {
     std::string cpp_debug_level = "ssv*:4";
     std::string python_log_level = "INFO";
@@ -265,6 +280,7 @@ struct SsvConfig {
     SsvDisplayConfig display;
     SsvInferenceConfig inference;
     SsvTrackingConfig tracking;
+    SsvEvidenceCacheConfig evidence_cache;
     SsvAgentConfig agent;
 };
 

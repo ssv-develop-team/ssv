@@ -59,6 +59,45 @@ void test_disabled_runtime_is_snapshotted_without_runtime_handles()
     assert(payload.cache_status == "disabled");
 }
 
+void test_rtsp_runtime_reports_rtsp_client_sink()
+{
+    ssv::SsvConfig config;
+    ssv::SsvSourceConfig source;
+    source.id = "camera-01";
+    source.uri = "rtsp://127.0.0.1/test";
+    config.sources.push_back(std::move(source));
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.inference.enabled = false;
+
+    ssv::SsvPipelinePlan plan;
+    plan.source_id = "camera-01";
+    plan.decode = {
+        .backend = ssv::SsvDecodeBackend::Software,
+        .device = {},
+        .decoder_factory = "avdec_h264",
+        .va_postproc_factory = {},
+        .software_fallback_allowed = false,
+    };
+    plan.display_backend = ssv::SsvResolvedDisplayBackend::RtspClientSink;
+    plan.expected_caps.decode_output = {
+        ssv::SsvPixelFormat::Nv12,
+        ssv::SsvMemoryKind::SystemMemory,
+    };
+
+    const auto event = ssv::ssv_runtime_resolved_event(
+        {.source_id = "camera-01", .run_attempt_id = 3},
+        config,
+        plan,
+        std::nullopt);
+    const auto &payload = std::get<ssv::SsvRuntimeResolvedEvent>(
+        event.payload);
+
+    assert(payload.display_backend == "rtspclientsink");
+    assert(payload.egl_renderer == "not-applicable");
+}
+
 void test_tensorrt_runtime_uses_source_model_identity_and_device_capability()
 {
     ssv::SsvConfig config;
@@ -284,6 +323,7 @@ void test_inference_stats_converts_microseconds_to_owning_durations()
 int main()
 {
     test_disabled_runtime_is_snapshotted_without_runtime_handles();
+    test_rtsp_runtime_reports_rtsp_client_sink();
     test_tensorrt_runtime_uses_source_model_identity_and_device_capability();
     test_runtime_snapshot_presence_must_match_inference_config();
     test_provider_fallbacks_copy_snapshot_values_in_order();

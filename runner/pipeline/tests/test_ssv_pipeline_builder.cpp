@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
+#include <filesystem>
 #include <initializer_list>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -73,7 +75,44 @@ ssv::SsvHardwareCapabilities make_registry()
         "glcolorconvert",
         "gtksink",
         "videoconvert",
+        "videoscale",
+        "avdec_h264",
+        "openh264enc",
+        "rtph264pay",
+        "rtspclientsink",
+        "splitmuxsink",
+        "mp4mux",
     }, true, false};
+}
+
+bool register_test_rtsp_sink_alias()
+{
+    auto *existing = gst_registry_lookup_feature(
+        gst_registry_get(), "rtspclientsink");
+    if (existing != nullptr) {
+        gst_object_unref(existing);
+        return false;
+    }
+
+    auto *fakesink = gst_element_factory_make("fakesink", nullptr);
+    assert(fakesink != nullptr);
+    const auto element_type = G_OBJECT_TYPE(fakesink);
+    const gboolean registered = gst_element_register(
+        nullptr, "rtspclientsink", GST_RANK_NONE, element_type);
+    gst_object_unref(fakesink);
+    assert(registered);
+    return true;
+}
+
+void unregister_test_rtsp_sink_alias(bool registered)
+{
+    if (!registered)
+        return;
+    auto *feature = gst_registry_lookup_feature(
+        gst_registry_get(), "rtspclientsink");
+    assert(feature != nullptr);
+    gst_registry_remove_feature(gst_registry_get(), feature);
+    gst_object_unref(feature);
 }
 
 std::vector<std::string> factories(
@@ -109,11 +148,14 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
     const auto topology = ssv::pipeline_internal::resolve_topology(
         config, plan, registry, model);
 
-    assert(factories(topology.prefix) == std::vector<std::string>({
+    assert(factories(topology.source_path) == std::vector<std::string>({
         "rtspsrc",
         "capsfilter",
         "rtph264depay",
         "h264parse",
+    }));
+    assert(!topology.encoded_tee);
+    assert(factories(topology.decode_path) == std::vector<std::string>({
         "varenderD129h264dec",
         "capsfilter",
         "clocksync",
@@ -163,7 +205,7 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
             "fakesink",
         }));
     assert(std::ranges::none_of(
-        topology.prefix,
+        topology.source_path,
         [](const auto &stage) { return stage.factory == "videoconvert"; }));
     assert(topology.analysis_host_caps
         == "video/x-raw,format=RGBA,width=640,height=640,pixel-aspect-ratio=1/1");
@@ -188,6 +230,264 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
     assert(analysis_host_contract.allowed_memories
         == std::vector<ssv::SsvMemoryKind> {
             ssv::SsvMemoryKind::SystemMemory});
+}
+
+void test_evidence_cache_topology_is_optional()
+{
+    auto config = make_config();
+    config.evidence_cache.enabled = true;
+    const auto registry = make_registry();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    const ssv::infer::SsvModelContract model {
+        640, 640, ssv::SsvResizeMode::Letterbox};
+
+    const auto topology = ssv::pipeline_internal::resolve_topology(
+        config, plan, registry, model);
+    assert(factories(topology.source_path) == std::vector<std::string>({
+        "rtspsrc",
+        "capsfilter",
+        "rtph264depay",
+        "h264parse",
+    }));
+    assert(topology.encoded_tee);
+    assert(topology.encoded_tee->factory == "tee");
+    assert(topology.encoded_tee->name == "encoded-tee");
+    assert(factories(topology.decode_path) == std::vector<std::string>({
+        "varenderD129h264dec",
+        "capsfilter",
+        "clocksync",
+        "tee",
+    }));
+    assert(topology.evidence_cache.has_value());
+    assert(topology.evidence_cache->queue_capacity == 32);
+    assert(topology.evidence_cache->leaky_downstream);
+    assert(!topology.evidence_cache->drop_only);
+    assert(factories(topology.evidence_cache->stages)
+        == std::vector<std::string>({"queue", "splitmuxsink"}));
+    assert(topology.required_factories
+        == std::vector<std::string>({"mp4mux"}));
+}
+
+void test_rtsp_topology_uses_encoded_gstreamer_output()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+
+    const auto registry = make_registry();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    const ssv::infer::SsvModelContract model {
+        640, 640, ssv::SsvResizeMode::Letterbox};
+    const auto topology = ssv::pipeline_internal::resolve_topology(
+        config, plan, registry, model);
+
+    assert(plan.display_backend
+        == ssv::SsvResolvedDisplayBackend::RtspClientSink);
+    assert(!ssv::ssv_display_backend_requires_window(
+        *plan.display_backend));
+    assert(topology.display_sink_caps.empty());
+    assert(topology.display_encode_caps == "video/x-raw,format=I420");
+    assert(factories(topology.display->stages)
+        == std::vector<std::string>({
+            "queue",
+            "videorate",
+            "videoconvert",
+            "capsfilter",
+            "openh264enc",
+            "h264parse",
+            "rtph264pay",
+            "rtspclientsink",
+        }));
+    const auto &encode_contract = contract_at(
+        topology, ssv::SsvPipelineBoundary::DisplayEncodeInput);
+    assert(encode_contract.format == ssv::SsvPixelFormat::I420);
+    assert(encode_contract.allowed_memories
+        == std::vector<ssv::SsvMemoryKind> {
+            ssv::SsvMemoryKind::SystemMemory});
+}
+
+void test_rtsp_overlay_topology_inserts_burn_in_stage()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.burn_in_overlay = true;
+    config.display.overlay.enabled = false;
+
+    auto registry = make_registry();
+    registry.gstreamer_elements.push_back("ssvoverlay");
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    const ssv::infer::SsvModelContract model {
+        640, 640, ssv::SsvResizeMode::Letterbox};
+    const auto topology = ssv::pipeline_internal::resolve_topology(
+        config, plan, registry, model);
+
+    assert(topology.display_overlay_caps == "video/x-raw,format=BGRx");
+    assert(topology.display_encode_caps == "video/x-raw,format=I420");
+    assert(factories(topology.display->stages)
+        == std::vector<std::string>({
+            "queue",
+            "videorate",
+            "videoconvert",
+            "capsfilter",
+            "ssvoverlay",
+            "videoconvert",
+            "capsfilter",
+            "openh264enc",
+            "h264parse",
+            "rtph264pay",
+            "rtspclientsink",
+        }));
+    const auto &overlay_contract = contract_at(
+        topology, ssv::SsvPipelineBoundary::DisplayOverlayInput);
+    assert(overlay_contract.format == ssv::SsvPixelFormat::Bgrx);
+    assert(overlay_contract.allowed_memories
+        == std::vector<ssv::SsvMemoryKind> {
+            ssv::SsvMemoryKind::SystemMemory});
+}
+
+void test_builder_configures_rtsp_overlay_properties()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.burn_in_overlay = true;
+    config.display.overlay.enabled = false;
+    config.display.overlay.font.face = "bold";
+    config.display.overlay.font.size = 18;
+    config.display.overlay.motion_prediction.enabled = false;
+    config.display.overlay.motion_prediction.max_horizon_ms = 123;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+
+    auto registry = make_registry();
+    registry.gstreamer_elements.push_back("ssvoverlay");
+    const bool registered_rtsp_sink = register_test_rtsp_sink_alias();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    auto instance = ssv::SsvPipelineBuilder::build(
+        config, plan, registry, nullptr);
+
+    auto *overlay = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "display-overlay");
+    auto *overlay_caps = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "display-overlay-caps");
+    auto *encode_caps = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "display-encode-caps");
+    assert(overlay != nullptr && overlay_caps != nullptr
+        && encode_caps != nullptr);
+
+    gboolean enabled = FALSE;
+    gboolean motion_prediction = TRUE;
+    guint max_horizon_ms = 0;
+    guint font_size = 0;
+    gchar *source_id = nullptr;
+    gchar *font_face = nullptr;
+    gpointer source_context = nullptr;
+    g_object_get(
+        overlay,
+        "enabled", &enabled,
+        "source-id", &source_id,
+        "source-context", &source_context,
+        "motion-prediction", &motion_prediction,
+        "max-horizon-ms", &max_horizon_ms,
+        "font-face", &font_face,
+        "font-size", &font_size,
+        nullptr);
+    assert(enabled);
+    assert(std::string(source_id) == "camera-01");
+    assert(source_context == instance.source_context().get());
+    assert(!motion_prediction);
+    assert(max_horizon_ms == 123);
+    assert(std::string(font_face) == "bold");
+    assert(font_size == 18);
+
+    GstCaps *caps = nullptr;
+    g_object_get(overlay_caps, "caps", &caps, nullptr);
+    assert(caps != nullptr);
+    gchar *caps_text = gst_caps_to_string(caps);
+    assert(std::string(caps_text).find("format=(string)BGRx")
+        != std::string::npos);
+    g_free(caps_text);
+    gst_caps_unref(caps);
+    caps = nullptr;
+    g_object_get(encode_caps, "caps", &caps, nullptr);
+    assert(caps != nullptr);
+    caps_text = gst_caps_to_string(caps);
+    assert(std::string(caps_text).find("format=(string)I420")
+        != std::string::npos);
+    g_free(caps_text);
+    gst_caps_unref(caps);
+
+    g_free(source_id);
+    g_free(font_face);
+    gst_object_unref(overlay);
+    gst_object_unref(overlay_caps);
+    gst_object_unref(encode_caps);
+    instance.reset();
+    unregister_test_rtsp_sink_alias(registered_rtsp_sink);
+}
+
+void test_builder_configures_evidence_cache_queue()
+{
+    namespace fs = std::filesystem;
+
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.enabled = false;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+    config.evidence_cache.enabled = true;
+    const auto cache_root = fs::temp_directory_path()
+        / ("ssv-pipeline-builder-cache-" + std::to_string(::getpid()));
+    std::error_code error;
+    fs::remove_all(cache_root, error);
+    assert(!error);
+    assert(fs::create_directories(cache_root, error));
+    assert(!error);
+    config.evidence_cache.directory = cache_root.string();
+
+    auto registry = make_registry();
+    registry.gstreamer_elements = {
+        "rtspsrc",
+        "capsfilter",
+        "rtph264depay",
+        "h264parse",
+        "avdec_h264",
+        "videoconvert",
+        "clocksync",
+        "tee",
+        "queue",
+        "splitmuxsink",
+        "mp4mux",
+        "fakesink",
+    };
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    auto instance = ssv::SsvPipelineBuilder::build(
+        config, plan, registry, nullptr);
+    GstElement *queue = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "evidence-cache-queue");
+    assert(queue != nullptr);
+    gint max_size_buffers = 0;
+    gint leaky = 0;
+    g_object_get(
+        queue,
+        "max-size-buffers", &max_size_buffers,
+        "leaky", &leaky,
+        nullptr);
+    assert(max_size_buffers == 32);
+    assert(leaky == 2);
+    gst_object_unref(queue);
+    instance.reset();
+
+    fs::remove_all(cache_root, error);
+    assert(!error);
 }
 
 void test_fake_registry_reports_the_exact_missing_element()
@@ -611,9 +911,9 @@ void test_pipeline_instance_classifies_message_origins()
 {
     GstElement *pipeline = gst_pipeline_new("message-origin-test");
     GstElement *display_element = gst_element_factory_make(
-        "identity", "display-transform");
+        "identity", "branch-transform");
     GstElement *timing_element = gst_element_factory_make(
-        "identity", "display-timing");
+        "identity", "timing-caps");
     GstElement *sink = gst_element_factory_make(
         "fakesink", "opaque-sink");
     GstElement *other = gst_element_factory_make(
@@ -629,8 +929,18 @@ void test_pipeline_instance_classifies_message_origins()
     assert(timing_pad != nullptr);
     ssv::SsvDisplayAttachment attachment(sink, timing_pad);
     gst_object_unref(timing_pad);
+    std::vector<GstElement *> display_elements {
+        display_element,
+        timing_element,
+        sink,
+    };
     ssv::SsvPipelineInstance instance(
-        ssv::SsvPipelinePtr(pipeline), std::move(attachment));
+        ssv::SsvPipelinePtr(pipeline),
+        std::move(attachment),
+        {},
+        {},
+        std::move(display_elements),
+        sink);
 
     const auto expect_origin = [&instance](
                                    GstObject *source,
@@ -659,6 +969,37 @@ void test_pipeline_instance_classifies_message_origins()
     expect_origin(
         GST_OBJECT(outsider), ssv::SsvPipelineMessageOrigin::Other);
     gst_object_unref(outsider);
+
+    GstElement *rtsp_pipeline = gst_pipeline_new("rtsp-message-origin-test");
+    GstElement *rtsp_branch = gst_element_factory_make(
+        "identity", "encoder");
+    GstElement *rtsp_sink = gst_element_factory_make(
+        "fakesink", "sink");
+    assert(rtsp_pipeline != nullptr && rtsp_branch != nullptr
+        && rtsp_sink != nullptr);
+    assert(gst_bin_add(GST_BIN(rtsp_pipeline), rtsp_branch));
+    assert(gst_bin_add(GST_BIN(rtsp_pipeline), rtsp_sink));
+    std::vector<GstElement *> rtsp_elements {rtsp_branch, rtsp_sink};
+    ssv::SsvPipelineInstance rtsp_instance {
+        ssv::SsvPipelinePtr(rtsp_pipeline),
+        {},
+        {},
+        {},
+        std::move(rtsp_elements),
+        rtsp_sink};
+    const auto expect_rtsp_origin = [&rtsp_instance](
+                                        GstObject *source,
+                                        ssv::SsvPipelineMessageOrigin expected) {
+        GstMessage *message = gst_message_new_application(
+            source, gst_structure_new_empty("ssv-test-message"));
+        assert(message != nullptr);
+        assert(rtsp_instance.message_origin(message) == expected);
+        gst_message_unref(message);
+    };
+    expect_rtsp_origin(
+        GST_OBJECT(rtsp_sink), ssv::SsvPipelineMessageOrigin::DisplaySink);
+    expect_rtsp_origin(
+        GST_OBJECT(rtsp_branch), ssv::SsvPipelineMessageOrigin::DisplayBranch);
 }
 
 void test_nvdec_decoder_disables_qos_and_discards_corrupted_frames()
@@ -723,6 +1064,11 @@ int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
     test_va_topology_freezes_order_backpressure_and_rate_contracts();
+    test_evidence_cache_topology_is_optional();
+    test_rtsp_topology_uses_encoded_gstreamer_output();
+    test_rtsp_overlay_topology_inserts_burn_in_stage();
+    test_builder_configures_rtsp_overlay_properties();
+    test_builder_configures_evidence_cache_queue();
     test_fake_registry_reports_the_exact_missing_element();
     test_gtksink_compatibility_does_not_require_dmabuf_export();
     test_display_branch_build_failure_is_classified_for_auto_fallback();

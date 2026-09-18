@@ -19,7 +19,15 @@ enum class SsvDecodeBackend {
 enum class SsvResolvedDisplayBackend {
     GtkGlSink,
     GtkSink,
+    RtspClientSink,
 };
+
+[[nodiscard]] constexpr bool ssv_display_backend_requires_window(
+    SsvResolvedDisplayBackend backend) noexcept
+{
+    return backend == SsvResolvedDisplayBackend::GtkGlSink
+        || backend == SsvResolvedDisplayBackend::GtkSink;
+}
 
 enum class SsvInferenceBackend {
     OnnxRuntime,
@@ -30,6 +38,7 @@ enum class SsvPixelFormat {
     Nv12,
     Rgba,
     Bgrx,
+    I420,
 };
 
 enum class SsvMemoryKind {
@@ -51,6 +60,8 @@ struct SsvPipelineExpectedCaps {
     SsvVideoCaps decode_output;
     std::optional<SsvVideoCaps> display_upload_input;
     std::optional<SsvVideoCaps> display_sink_input;
+    std::optional<SsvVideoCaps> display_overlay_input;
+    std::optional<SsvVideoCaps> display_encode_input;
     std::optional<SsvVideoCaps> analysis_gpu_input;
     std::optional<SsvVideoCaps> analysis_host_input;
 };
@@ -93,6 +104,7 @@ struct SsvPipelinePlan {
     SsvDecodePlan decode;
     std::vector<SsvDecodeFallbackDecision> decode_fallbacks;
     std::optional<SsvResolvedDisplayBackend> display_backend;
+    std::string display_encoder_factory;
     bool display_fallback_allowed = false;
     std::vector<std::string> display_fallback_reasons;
     std::optional<SsvInferenceBackend> inference_backend;

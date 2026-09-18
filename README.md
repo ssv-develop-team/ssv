@@ -116,7 +116,7 @@ Agent 是独立进程，需要时另开终端执行：
 | `./ssv model manifest ...` | 从原始 ONNX 和 TensorRT engine 生成 schema v2 manifest |
 | `./ssv model verify ...` | 验证安全帽 `.pt` 模型 |
 
-`run` 的 `--display`、`--headless`、`--overlay` 和 `--display-backend` 参数只覆盖本次进程的显示设置，不会改写 YAML。
+`run` 的 `--display`、`--headless`、`--overlay` 和 `--display-backend` 参数只覆盖本次进程的输出设置，不会改写 YAML。`--display-backend` 支持 `gtkglsink`、`gtksink` 和 `rtsp`；RTSP 发布地址仍从 `display.rtsp.location` 读取。若接收端需要直接看到检测框，设置 `display.rtsp.burn_in_overlay: true`，框会在编码前写入视频像素。
 
 `./ssv cache status` 查看当前配置 Stream 的 entries、consumer group pending、Agent 去重 key，以及 EventLedger SQLite 的事件和 durable job 数量。`./ssv cache clear` 直接清空 Redis Stream、`ssv:agent:dedup:*` 去重 key 和 EventLedger SQLite 运行时表；`--dry-run` 只统计、不删除。清理前应先停止 `./ssv run` 和 `./ssv agent`，否则新事件可能立即重新写入。该命令不会删除 `agent/outputs`、Qdrant、DeerFlow checkpointer、其他 Redis key 或 Docker 容器。
 

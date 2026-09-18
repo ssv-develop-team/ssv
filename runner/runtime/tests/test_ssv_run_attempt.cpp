@@ -119,6 +119,27 @@ ssv::SsvPipelinePlan make_enabled_plan(const ssv::SsvConfig &config)
     return ssv::SsvPipelinePlan::resolve(config, capabilities);
 }
 
+ssv::SsvConfig make_rtsp_config()
+{
+    auto config = make_headless_config();
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    return config;
+}
+
+ssv::SsvPipelinePlan make_rtsp_plan(const ssv::SsvConfig &config)
+{
+    ssv::SsvHardwareCapabilities capabilities;
+    capabilities.gstreamer_elements = {
+        "avdec_h264",
+        "openh264enc",
+        "rtph264pay",
+        "rtspclientsink",
+    };
+    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+}
+
 void post_fake_bus_error(GstElement *pipeline)
 {
     GError *error = g_error_new_literal(
@@ -159,7 +180,8 @@ void post_resource_not_found_bus_error(
 
 ssv::SsvPipelineInstance adopt_pipeline(
     GstElement *pipeline,
-    bool with_display_attachment = false)
+    bool with_display_attachment = false,
+    const char *display_branch_name = "display-gl-upload")
 {
     ssv::SsvPipelinePtr owned_pipeline(pipeline);
     if (!with_display_attachment)
@@ -167,17 +189,34 @@ ssv::SsvPipelineInstance adopt_pipeline(
 
     GstElement *sink = gst_bin_get_by_name(
         GST_BIN(pipeline), "display-sink");
+    GstElement *display_branch = gst_bin_get_by_name(
+        GST_BIN(pipeline), display_branch_name);
     GstElement *timing_element = gst_bin_get_by_name(
         GST_BIN(pipeline), "display-sink-caps");
     assert(sink != nullptr && timing_element != nullptr);
+    if (display_branch == nullptr)
+        display_branch = GST_ELEMENT(gst_object_ref(timing_element));
+    assert(display_branch != nullptr);
     GstPad *timing_pad = gst_element_get_static_pad(timing_element, "src");
     assert(timing_pad != nullptr);
     ssv::SsvDisplayAttachment attachment(sink, timing_pad);
     gst_object_unref(timing_pad);
+    std::vector<GstElement *> display_elements {display_branch};
+    if (display_branch != timing_element)
+        display_elements.push_back(timing_element);
+    if (sink != timing_element && sink != display_branch)
+        display_elements.push_back(sink);
+    auto instance = ssv::SsvPipelineInstance(
+        std::move(owned_pipeline),
+        std::move(attachment),
+        {},
+        {},
+        std::move(display_elements),
+        sink);
+    gst_object_unref(display_branch);
     gst_object_unref(timing_element);
     gst_object_unref(sink);
-    return ssv::SsvPipelineInstance(
-        std::move(owned_pipeline), std::move(attachment));
+    return instance;
 }
 
 ssv::SsvPipelineInstance make_display_live_pipeline()
@@ -319,7 +358,7 @@ ssv::SsvPipelineInstance make_non_sink_display_start_failure_pipeline()
         &error);
     assert(error == nullptr);
     assert(pipeline != nullptr);
-    return adopt_pipeline(pipeline, true);
+    return adopt_pipeline(pipeline, true, "display-va-export");
 }
 
 class RecordingWindow final : public ssv::SsvWindowLifecycle {
@@ -440,6 +479,62 @@ void test_runtime_resolved_waits_for_all_contract_boundaries()
         {},
         incomplete_options);
 
+    assert(incomplete_runner.run().exit_code == ssv::SsvExitCode::Success);
+    assert(incomplete_output.find("event=runtime_resolved ")
+        == std::string::npos);
+}
+
+void test_rtsp_runner_needs_no_window_or_attachment()
+{
+    const auto config = make_rtsp_config();
+    const auto plan = make_rtsp_plan(config);
+    ssv::SsvRunAttempt runner(
+        config, plan, make_finite_pipeline());
+
+    assert(runner.state() == ssv::SsvRunAttemptState::Ready);
+    const auto result = runner.run();
+
+    assert(result.exit_code == ssv::SsvExitCode::Success);
+    assert(result.stop_reason == ssv::SsvRunAttemptStopReason::EndOfStream);
+    assert(result.reached_playing);
+}
+
+void test_rtsp_runtime_resolved_waits_for_encode_contract()
+{
+    const auto config = make_rtsp_config();
+    const auto plan = make_rtsp_plan(config);
+
+    std::string complete_output;
+    auto complete_log = make_event_log(complete_output);
+    auto complete_pipeline = make_finite_pipeline();
+    post_contract_ready(
+        complete_pipeline.pipeline(), ssv::SsvPipelineBoundary::DecodeTee);
+    post_contract_ready(
+        complete_pipeline.pipeline(),
+        ssv::SsvPipelineBoundary::DisplayEncodeInput);
+    ssv::SsvRunAttemptOptions complete_options;
+    complete_options.event_log = complete_log.get();
+    ssv::SsvRunAttempt complete_runner(
+        config,
+        plan,
+        std::move(complete_pipeline),
+        {},
+        complete_options);
+    assert(complete_runner.run().exit_code == ssv::SsvExitCode::Success);
+    assert(count_occurrences(
+               complete_output, "event=runtime_resolved ")
+        == 1);
+
+    std::string incomplete_output;
+    auto incomplete_log = make_event_log(incomplete_output);
+    ssv::SsvRunAttemptOptions incomplete_options;
+    incomplete_options.event_log = incomplete_log.get();
+    ssv::SsvRunAttempt incomplete_runner(
+        config,
+        plan,
+        make_finite_pipeline(),
+        {},
+        incomplete_options);
     assert(incomplete_runner.run().exit_code == ssv::SsvExitCode::Success);
     assert(incomplete_output.find("event=runtime_resolved ")
         == std::string::npos);
@@ -933,6 +1028,25 @@ void test_headless_runner_rejects_window_ownership()
     }
 }
 
+void test_runner_rejects_display_config_without_resolved_backend()
+{
+    auto config = make_headless_config();
+    const auto plan = make_headless_plan(config);
+    config.display.enabled = true;
+
+    try {
+        ssv::SsvRunAttempt runner(
+            config,
+            plan,
+            make_display_finite_pipeline());
+        assert(false && "runner accepted a display config without a backend");
+    } catch (const std::invalid_argument &error) {
+        assert(std::string_view(error.what()).find(
+                   "display configuration and pipeline plan")
+            != std::string_view::npos);
+    }
+}
+
 void test_display_runner_requires_window_ownership()
 {
     auto config = make_headless_config();
@@ -1091,6 +1205,8 @@ int main(int argc, char **argv)
     gst_init(&argc, &argv);
     test_finite_pipeline_reaches_playing_and_eos();
     test_runtime_resolved_waits_for_all_contract_boundaries();
+    test_rtsp_runner_needs_no_window_or_attachment();
+    test_rtsp_runtime_resolved_waits_for_encode_contract();
     test_fake_bus_error_returns_runtime_failure();
     test_bus_warning_emits_native_diagnostic_and_continues_to_eos();
     test_display_element_error_is_classified_for_backend_recovery();
@@ -1105,6 +1221,7 @@ int main(int argc, char **argv)
     test_controlled_signal_returns_success(SIGTERM);
     test_owned_resources_stop_before_window_destruction();
     test_headless_runner_rejects_window_ownership();
+    test_runner_rejects_display_config_without_resolved_backend();
     test_display_runner_requires_window_ownership();
     test_display_runner_requires_attachment_ownership();
     test_headless_runner_rejects_attachment_ownership();

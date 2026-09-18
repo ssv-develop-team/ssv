@@ -41,7 +41,11 @@ public:
 
         const SsvSystemHardwareCapabilitiesProbe probe;
         capabilities_ = probe.detect();
-        if (original_config.display.enabled)
+        // RTSP publishing is a headless output branch. GTK initialization is
+        // only needed when the resolved output will own a local window.
+        if (original_config.display.enabled
+            && original_config.display.backend
+                != SsvDisplayBackend::RtspClientSink)
             SsvDisplayWindow::initialize(
                 original_config.display.gl_backend);
         return capabilities_;
@@ -71,12 +75,9 @@ public:
             plan,
             capabilities_,
             resources.service.get());
-        if (effective_config.display.enabled) {
-            if (!plan.display_backend) {
-                throw SsvDisplayWindowError(
-                    "display.gtk.window",
-                    "display plan has no resolved backend");
-            }
+        if (effective_config.display.enabled
+            && plan.display_backend
+            && ssv_display_backend_requires_window(*plan.display_backend)) {
             resources.window = SsvDisplayWindow::create(
                 {
                     .source_id = plan.source_id,

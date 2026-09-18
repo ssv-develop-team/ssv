@@ -85,6 +85,18 @@ void test_window_rejects_missing_attachment()
     }
 }
 
+void test_window_rejects_rtsp_backend()
+{
+    auto spec = make_display_spec("rtsp-output");
+    spec.backend = ssv::SsvResolvedDisplayBackend::RtspClientSink;
+    try {
+        static_cast<void>(ssv::SsvDisplayWindow::create(spec, nullptr));
+        assert(false && "display window accepted an RTSP backend");
+    } catch (const ssv::SsvDisplayWindowError &error) {
+        assert(error.stage() == "display.gtk.window");
+    }
+}
+
 void test_window_rejects_mismatched_source_context()
 {
     auto spec = make_display_spec("display-source");
@@ -375,6 +387,7 @@ int main()
     test_display_spec_owns_source_and_overlay_values();
     test_auto_backend_selection();
     test_window_rejects_missing_attachment();
+    test_window_rejects_rtsp_backend();
     test_window_rejects_mismatched_source_context();
     test_window_falls_back_to_source_id_without_context();
     test_layout_maps_normalized_boxes_inside_letterboxed_video();

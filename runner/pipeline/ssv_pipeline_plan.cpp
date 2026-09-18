@@ -1,6 +1,7 @@
 #include "ssv_pipeline_plan.hpp"
 
 #include <cctype>
+#include <array>
 #include <string_view>
 #include <variant>
 
@@ -10,6 +11,12 @@ namespace {
 constexpr auto kGtkGlDmabufRequirement =
     "gtkglsink requires DMABuf input from the resolved decoder";
 
+constexpr std::array<std::string_view, 3> kRtspEncoderFactories {
+    "openh264enc",
+    "x264enc",
+    "avenc_h264",
+};
+
 bool is_blank(std::string_view value)
 {
     for (const unsigned char character : value) {
@@ -17,6 +24,13 @@ bool is_blank(std::string_view value)
             return false;
     }
     return true;
+}
+
+bool is_valid_rtsp_location(std::string_view value)
+{
+    return !is_blank(value)
+        && (value.starts_with("rtsp://") || value.starts_with("rtsps://"))
+        && !value.ends_with("://");
 }
 
 [[noreturn]] void fail_plan(
@@ -316,11 +330,54 @@ std::optional<SsvResolvedDisplayBackend> resolve_display_backend(
         if (gtk_available)
             return SsvResolvedDisplayBackend::GtkSink;
         break;
+    case SsvDisplayBackend::RtspClientSink:
+        if (!is_valid_rtsp_location(display.rtsp.location)) {
+            fail_plan(
+                SsvExitCode::InvalidConfiguration,
+                "display.rtsp.location",
+                "RTSP display backend requires a publish location");
+        }
+        if (!capabilities.has_gstreamer_element("rtspclientsink")) {
+            fail_plan(
+                SsvExitCode::CapabilityUnavailable,
+                "capability.display",
+                "RTSP display backend requires rtspclientsink");
+        }
+        if (!capabilities.has_gstreamer_element("rtph264pay")) {
+            fail_plan(
+                SsvExitCode::CapabilityUnavailable,
+                "capability.display",
+                "RTSP display backend requires rtph264pay");
+        }
+        if (display.rtsp.burn_in_overlay
+            && !capabilities.has_gstreamer_element("ssvoverlay")) {
+            fail_plan(
+                SsvExitCode::CapabilityUnavailable,
+                "capability.display",
+                "RTSP overlay requires ssvoverlay");
+        }
+        return SsvResolvedDisplayBackend::RtspClientSink;
     }
     fail_plan(
         SsvExitCode::CapabilityUnavailable,
         "capability.display",
         "required GTK display backend is unavailable");
+}
+
+std::string resolve_display_encoder_factory(
+    std::optional<SsvResolvedDisplayBackend> display_backend,
+    const SsvHardwareCapabilities &capabilities)
+{
+    if (display_backend != SsvResolvedDisplayBackend::RtspClientSink)
+        return {};
+    for (const auto factory : kRtspEncoderFactories) {
+        if (capabilities.has_gstreamer_element(factory))
+            return std::string(factory);
+    }
+    fail_plan(
+        SsvExitCode::CapabilityUnavailable,
+        "capability.display",
+        "RTSP display backend requires an H.264 encoder");
 }
 
 std::vector<std::string> resolve_display_fallback_reasons(
@@ -388,6 +445,7 @@ std::optional<SsvTrackingPlan> resolve_tracking_plan(
 SsvPipelineExpectedCaps resolve_expected_caps(
     SsvDecodeBackend decode_backend,
     std::optional<SsvResolvedDisplayBackend> display_backend,
+    bool burn_in_overlay,
     std::optional<SsvInferenceBackend> inference_backend)
 {
     const bool vaapi = decode_backend == SsvDecodeBackend::Vaapi;
@@ -399,6 +457,8 @@ SsvPipelineExpectedCaps resolve_expected_caps(
         },
         .display_upload_input = std::nullopt,
         .display_sink_input = std::nullopt,
+        .display_overlay_input = std::nullopt,
+        .display_encode_input = std::nullopt,
         .analysis_gpu_input = std::nullopt,
         .analysis_host_input = std::nullopt,
     };
@@ -415,6 +475,17 @@ SsvPipelineExpectedCaps resolve_expected_caps(
     } else if (display_backend == SsvResolvedDisplayBackend::GtkSink) {
         caps.display_sink_input = SsvVideoCaps {
             SsvPixelFormat::Bgrx,
+            SsvMemoryKind::SystemMemory,
+        };
+    } else if (display_backend == SsvResolvedDisplayBackend::RtspClientSink) {
+        if (burn_in_overlay) {
+            caps.display_overlay_input = SsvVideoCaps {
+                SsvPixelFormat::Bgrx,
+                SsvMemoryKind::SystemMemory,
+            };
+        }
+        caps.display_encode_input = SsvVideoCaps {
+            SsvPixelFormat::I420,
             SsvMemoryKind::SystemMemory,
         };
     }
@@ -473,6 +544,8 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
         config.sources.front().decode, capabilities);
     const auto display_backend =
         resolve_display_backend(config.display, capabilities, decode.backend);
+    const auto display_encoder_factory =
+        resolve_display_encoder_factory(display_backend, capabilities);
     const auto inference_backend =
         resolve_inference_backend(config.inference, capabilities);
 
@@ -482,6 +555,7 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
         .decode_fallbacks = resolve_decode_fallbacks(
             config.sources.front().decode, decode),
         .display_backend = display_backend,
+        .display_encoder_factory = display_encoder_factory,
         .display_fallback_allowed = config.display.enabled
             && config.display.backend == SsvDisplayBackend::Auto
             && display_backend == SsvResolvedDisplayBackend::GtkGlSink
@@ -491,7 +565,10 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
         .inference_backend = inference_backend,
         .tracking = resolve_tracking_plan(config),
         .expected_caps = resolve_expected_caps(
-            decode.backend, display_backend, inference_backend),
+            decode.backend,
+            display_backend,
+            config.display.rtsp.burn_in_overlay,
+            inference_backend),
     };
 }
 

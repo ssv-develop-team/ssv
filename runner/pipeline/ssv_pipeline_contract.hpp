@@ -15,8 +15,10 @@ enum class SsvPipelineBoundary {
     DecodeTee,
     DisplayUpload,
     DisplaySink,
+    DisplayEncodeInput,
     AnalysisGpuInput,
     AnalysisHost,
+    DisplayOverlayInput,
 };
 
 struct SsvPipelineContractExpectation {

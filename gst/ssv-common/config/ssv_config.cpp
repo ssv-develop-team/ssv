@@ -508,7 +508,8 @@ SsvPreprocessConfig parse_preprocess(const YAML::Node &node)
 
 void validate_worker_common(
     const YAML::Node &node,
-    std::string_view path)
+    std::string_view path,
+    int retry_delay_default_ms = 1000)
 {
     const auto poll_path = std::string(path) + ".poll_interval_ms";
     const auto poll_interval_ms = get_or<int>(
@@ -533,7 +534,7 @@ void validate_worker_common(
 
     const auto delay_path = std::string(path) + ".retry_delay_ms";
     const auto retry_delay_ms = get_or<int>(
-        node, "retry_delay_ms", 1000, delay_path);
+        node, "retry_delay_ms", retry_delay_default_ms, delay_path);
     if (retry_delay_ms < 0) {
         throw_invalid_value(
             delay_path, delay_path + " must not be negative");
@@ -604,6 +605,7 @@ void validate_knowledge_extension(const YAML::Node &node)
     require_map(node, path);
     reject_unknown_keys(node, path, {
         "backend",
+        "rules_dir",
         "qdrant_path",
         "qdrant_url",
         "min_score",
@@ -617,6 +619,14 @@ void validate_knowledge_extension(const YAML::Node &node)
         throw_invalid_value(
             "agent.knowledge.backend",
             "agent.knowledge.backend is not supported");
+    }
+
+    const auto rules_dir = get_or<std::string>(
+        node, "rules_dir", "knowledge/rules", "agent.knowledge.rules_dir");
+    if (is_blank(rules_dir)) {
+        throw_invalid_value(
+            "agent.knowledge.rules_dir",
+            "agent.knowledge.rules_dir must not be blank");
     }
 
     const auto qdrant_path = get_or<std::string>(
@@ -653,25 +663,193 @@ void validate_recording_evidence_extension(const YAML::Node &node)
     require_map(node, path);
     reject_unknown_keys(node, path, {
         "enabled",
+        "poll_interval_ms",
+        "lease_ms",
+        "max_retries",
+        "retry_delay_ms",
         "clip_before_ms",
         "clip_after_ms",
+        "merge_gap_ms",
+        "lost_grace_ms",
+        "silence_timeout_ms",
+        "max_episode_ms",
     });
 
-    static_cast<void>(get_or<bool>(
-        node, "enabled", false, "agent.recording_evidence.enabled"));
-    static_cast<void>(get_or<int>(
+    validate_worker_common(node, path, 2000);
+    const auto clip_before_ms = get_or<int>(
         node,
         "clip_before_ms",
         2500,
-        "agent.recording_evidence.clip_before_ms"));
-    static_cast<void>(get_or<int>(
+        "agent.recording_evidence.clip_before_ms");
+    if (clip_before_ms < 1000) {
+        throw_invalid_value(
+            "agent.recording_evidence.clip_before_ms",
+            "agent.recording_evidence.clip_before_ms must be at least 1000");
+    }
+
+    const auto clip_after_ms = get_or<int>(
         node,
         "clip_after_ms",
         2500,
-        "agent.recording_evidence.clip_after_ms"));
+        "agent.recording_evidence.clip_after_ms");
+    if (clip_after_ms < 1000) {
+        throw_invalid_value(
+            "agent.recording_evidence.clip_after_ms",
+            "agent.recording_evidence.clip_after_ms must be at least 1000");
+    }
+
+    const auto merge_gap_ms = get_or<int>(
+        node,
+        "merge_gap_ms",
+        3000,
+        "agent.recording_evidence.merge_gap_ms");
+    if (merge_gap_ms <= 0) {
+        throw_invalid_value(
+            "agent.recording_evidence.merge_gap_ms",
+            "agent.recording_evidence.merge_gap_ms must be positive");
+    }
+
+    const auto lost_grace_ms = get_or<int>(
+        node,
+        "lost_grace_ms",
+        3000,
+        "agent.recording_evidence.lost_grace_ms");
+    if (lost_grace_ms < 0) {
+        throw_invalid_value(
+            "agent.recording_evidence.lost_grace_ms",
+            "agent.recording_evidence.lost_grace_ms must not be negative");
+    }
+
+    const auto silence_timeout_ms = get_or<int>(
+        node,
+        "silence_timeout_ms",
+        30000,
+        "agent.recording_evidence.silence_timeout_ms");
+    if (silence_timeout_ms <= 0) {
+        throw_invalid_value(
+            "agent.recording_evidence.silence_timeout_ms",
+            "agent.recording_evidence.silence_timeout_ms must be positive");
+    }
+
+    const auto max_episode_ms = get_or<int>(
+        node,
+        "max_episode_ms",
+        30000,
+        "agent.recording_evidence.max_episode_ms");
+    if (max_episode_ms <= merge_gap_ms) {
+        throw_invalid_value(
+            "agent.recording_evidence.max_episode_ms",
+            "agent.recording_evidence.max_episode_ms must exceed merge_gap_ms");
+    }
 }
 
-void validate_agent_extensions(const YAML::Node &agent)
+SsvEvidenceCacheConfig parse_evidence_cache(const YAML::Node &node)
+{
+    SsvEvidenceCacheConfig cache;
+    if (!node)
+        return cache;
+
+    constexpr std::string_view path = "evidence_cache";
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "enabled",
+        "directory",
+        "segment_duration_ms",
+        "retention_ms",
+        "max_bytes_mb",
+    });
+
+    cache.enabled = get_or<bool>(
+        node, "enabled", cache.enabled, "evidence_cache.enabled");
+    cache.directory = get_or<std::string>(
+        node, "directory", cache.directory, "evidence_cache.directory");
+    if (is_blank(cache.directory)
+        || !std::filesystem::path(cache.directory).is_absolute()) {
+        throw_invalid_value(
+            "evidence_cache.directory",
+            "evidence_cache.directory must be a non-empty absolute path");
+    }
+    cache.segment_duration_ms = get_or<int>(
+        node,
+        "segment_duration_ms",
+        cache.segment_duration_ms,
+        "evidence_cache.segment_duration_ms");
+    if (cache.segment_duration_ms < 1000) {
+        throw_invalid_value(
+            "evidence_cache.segment_duration_ms",
+            "evidence_cache.segment_duration_ms must be at least 1000");
+    }
+    cache.retention_ms = get_or<int>(
+        node,
+        "retention_ms",
+        cache.retention_ms,
+        "evidence_cache.retention_ms");
+    if (cache.retention_ms < cache.segment_duration_ms) {
+        throw_invalid_value(
+            "evidence_cache.retention_ms",
+            "evidence_cache.retention_ms must not be shorter than segment_duration_ms");
+    }
+    cache.max_bytes_mb = get_or<int>(
+        node, "max_bytes_mb", cache.max_bytes_mb, "evidence_cache.max_bytes_mb");
+    if (cache.max_bytes_mb < 1) {
+        throw_invalid_value(
+            "evidence_cache.max_bytes_mb",
+            "evidence_cache.max_bytes_mb must be positive");
+    }
+    return cache;
+}
+
+bool path_is_within(
+    const std::filesystem::path &candidate,
+    const std::filesystem::path &parent)
+{
+    const auto relative = candidate.lexically_normal().lexically_relative(
+        parent.lexically_normal());
+    if (relative.empty())
+        return candidate.lexically_normal() == parent.lexically_normal();
+    return relative.begin() == relative.end() || *relative.begin() != "..";
+}
+
+void validate_recording_evidence_cache(
+    const YAML::Node &agent,
+    const SsvEvidenceCacheConfig &cache)
+{
+    const auto recording = agent["recording_evidence"];
+    if (!recording
+        || !get_or<bool>(
+            recording, "enabled", false, "agent.recording_evidence.enabled")) {
+        return;
+    }
+
+    if (!cache.enabled) {
+        throw_invalid_value(
+            "evidence_cache.enabled",
+            "recording_evidence requires evidence_cache.enabled");
+    }
+
+    const auto evidence_roots = agent["evidence_roots"];
+    if (!evidence_roots || evidence_roots.size() == 0) {
+        throw_invalid_value(
+            "agent.evidence_roots",
+            "recording_evidence requires non-empty evidence_roots");
+    }
+
+    const auto cache_path = std::filesystem::path(cache.directory);
+    for (std::size_t index = 0; index < evidence_roots.size(); ++index) {
+        const auto item_path =
+            std::string("agent.evidence_roots[") + std::to_string(index) + "]";
+        const auto root = node_as<std::string>(evidence_roots[index], item_path);
+        if (path_is_within(cache_path, std::filesystem::path(root)))
+            return;
+    }
+    throw_invalid_value(
+        "evidence_cache.directory",
+        "recording_evidence requires evidence_cache.directory inside evidence_roots");
+}
+
+void validate_agent_extensions(
+    const YAML::Node &agent,
+    const SsvEvidenceCacheConfig &cache)
 {
     const auto event_db_path = get_or<std::string>(
         agent, "event_db_path", "data/events.db", "agent.event_db_path");
@@ -700,6 +878,7 @@ void validate_agent_extensions(const YAML::Node &agent)
         validate_indexing_extension(indexing);
     if (const auto recording_evidence = agent["recording_evidence"])
         validate_recording_evidence_extension(recording_evidence);
+    validate_recording_evidence_cache(agent, cache);
     if (const auto knowledge = agent["knowledge"])
         validate_knowledge_extension(knowledge);
 }
@@ -804,6 +983,8 @@ SsvDisplayBackend parse_display_backend(const std::string &value)
         return SsvDisplayBackend::GtkGlSink;
     if (value == "gtksink")
         return SsvDisplayBackend::GtkSink;
+    if (value == "rtsp")
+        return SsvDisplayBackend::RtspClientSink;
     throw SsvConfigError(
         SsvConfigErrorKind::InvalidValue,
         "display.backend",
@@ -965,6 +1146,7 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
         "fps",
         "gl_backend",
         "overlay",
+        "rtsp",
     });
 
     display.enabled = get_or<bool>(
@@ -979,6 +1161,27 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
     display.gl_backend = parse_gl_backend(
         get_or<std::string>(
             node, "gl_backend", "auto", "display.gl_backend"));
+
+    if (const auto rtsp = node["rtsp"]) {
+        require_map(rtsp, "display.rtsp");
+        reject_unknown_keys(
+            rtsp, "display.rtsp", {"location", "burn_in_overlay"});
+        display.rtsp.location = get_or<std::string>(
+            rtsp, "location", display.rtsp.location, "display.rtsp.location");
+        display.rtsp.burn_in_overlay = get_or<bool>(
+            rtsp,
+            "burn_in_overlay",
+            display.rtsp.burn_in_overlay,
+            "display.rtsp.burn_in_overlay");
+    }
+    if (display.backend == SsvDisplayBackend::RtspClientSink) {
+        if (is_blank(display.rtsp.location)) {
+            throw_invalid_value(
+                "display.rtsp.location",
+                "display.rtsp.location must be an RTSP URL");
+        }
+        validate_rtsp_uri(display.rtsp.location, "display.rtsp.location");
+    }
 
     if (const auto overlay = node["overlay"]) {
         require_map(overlay, "display.overlay");
@@ -1441,6 +1644,7 @@ SsvConfig parse_and_validate(const YAML::Node &root)
         "display",
         "inference",
         "tracking",
+        "evidence_cache",
         "agent",
     });
 
@@ -1560,6 +1764,7 @@ SsvConfig parse_and_validate(const YAML::Node &root)
     config.display = parse_display(root["display"]);
     config.inference = parse_inference(root["inference"]);
     config.tracking = parse_tracking(root["tracking"]);
+    config.evidence_cache = parse_evidence_cache(root["evidence_cache"]);
     if (const auto agent = root["agent"]) {
         require_map(agent, "agent");
         reject_unknown_keys(
@@ -1620,27 +1825,9 @@ SsvConfig parse_and_validate(const YAML::Node &root)
                 "agent.dedup_cooldown_seconds",
                 "agent.dedup_cooldown_seconds must be positive");
         }
-        validate_agent_extensions(agent);
+        validate_agent_extensions(agent, config.evidence_cache);
     }
     return config;
-}
-
-void validate_event_rules(const SsvConfig &config)
-{
-    for (std::size_t index = 0; index < config.sources.size(); ++index) {
-        const auto &rule = config.sources[index].event_rule;
-        if (rule.event_type.empty()
-            && rule.severity.empty()
-            && rule.rule_id.empty()
-            && rule.rule_version.empty()) {
-            const auto path = "sources[" + std::to_string(index)
-                + "].event_rule";
-            throw SsvConfigError(
-                SsvConfigErrorKind::MissingRequired,
-                path,
-                path + " is required");
-        }
-    }
 }
 
 } // namespace
@@ -1650,7 +1837,6 @@ SsvConfig ssv_config_load(const std::string &path)
     const auto resolved = resolve_config_path(path);
     auto config = parse_and_validate(read_yaml(resolved));
     apply_deployment_overrides(config);
-    validate_event_rules(config);
     return config;
 }
 
@@ -1721,7 +1907,7 @@ SsvRunOptions ssv_run_options_parse(
                 throw SsvConfigError(
                     SsvConfigErrorKind::MissingRequired,
                     "cli.display_backend",
-                    "--display-backend requires gtkglsink or gtksink");
+                    "--display-backend requires gtkglsink, gtksink, or rtsp");
             }
             if (arguments[index] == "gtkglsink") {
                 options.overrides.display_backend =
@@ -1729,11 +1915,14 @@ SsvRunOptions ssv_run_options_parse(
             } else if (arguments[index] == "gtksink") {
                 options.overrides.display_backend =
                     SsvDisplayBackend::GtkSink;
+            } else if (arguments[index] == "rtsp") {
+                options.overrides.display_backend =
+                    SsvDisplayBackend::RtspClientSink;
             } else {
                 throw SsvConfigError(
                     SsvConfigErrorKind::InvalidValue,
                     "cli.display_backend",
-                    "--display-backend must be gtkglsink or gtksink");
+                    "--display-backend must be gtkglsink, gtksink, or rtsp");
             }
         } else {
             throw SsvConfigError(
@@ -1753,8 +1942,14 @@ void ssv_config_apply_overrides(
         config.display.enabled = *overrides.display_enabled;
     if (overrides.overlay_enabled)
         config.display.overlay.enabled = *overrides.overlay_enabled;
-    if (overrides.display_backend)
+    if (overrides.display_backend) {
         config.display.backend = *overrides.display_backend;
+        if (config.display.backend == SsvDisplayBackend::RtspClientSink) {
+            validate_rtsp_uri(
+                config.display.rtsp.location,
+                "display.rtsp.location");
+        }
+    }
 }
 
 SsvFatalError ssv_make_fatal_error(

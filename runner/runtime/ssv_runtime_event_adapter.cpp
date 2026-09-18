@@ -28,9 +28,13 @@ std::string_view display_name(
 {
     if (!backend)
         return "disabled";
-    return *backend == SsvResolvedDisplayBackend::GtkGlSink
-        ? "gtkglsink"
-        : "gtksink";
+    switch (*backend) {
+    case SsvResolvedDisplayBackend::GtkGlSink: return "gtkglsink";
+    case SsvResolvedDisplayBackend::GtkSink: return "gtksink";
+    case SsvResolvedDisplayBackend::RtspClientSink:
+        return "rtspclientsink";
+    }
+    return "unknown";
 }
 
 } // namespace

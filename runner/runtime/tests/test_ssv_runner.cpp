@@ -649,6 +649,24 @@ void test_system_factory_prepares_and_creates_headless_attempt()
     assert(log_state->records.empty());
 }
 
+void test_system_factory_prepares_rtsp_without_gtk()
+{
+    auto log_state = std::make_shared<RecordedLogState>();
+    auto event_log = ssv::SsvEventLog::create(
+        {}, std::make_unique<RecordingLogSink>(log_state));
+    auto factory = ssv::ssv_system_run_attempt_factory(*event_log);
+    auto config = make_config();
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+
+    const auto capabilities = factory->prepare_run(config);
+
+    assert(!capabilities.gstreamer_elements.empty());
+    assert(log_state->records.empty());
+}
+
 void test_factory_creation_events_are_emitted_for_the_attempt()
 {
     auto state = std::make_shared<FakeFactoryState>();
@@ -901,5 +919,6 @@ int main()
     test_plan_display_fallback_reasons_are_emitted_once();
     test_prepare_display_error_is_classified();
     test_unexpected_prepare_error_keeps_pipeline_start_classification();
+    test_system_factory_prepares_rtsp_without_gtk();
     return 0;
 }

@@ -1,5 +1,6 @@
 #include "ssv_config.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
@@ -193,6 +194,12 @@ tracking:
   gmc:
     method: "sparse-opt-flow"
     downscale: 3
+evidence_cache:
+  enabled: true
+  directory: "/var/lib/ssv/evidence-cache"
+  segment_duration_ms: 5000
+  retention_ms: 60000
+  max_bytes_mb: 256
 agent:
   state_machine_timeout: 240
   max_retries: 5
@@ -255,11 +262,47 @@ agent:
     assert(config.tracking.gmc.method ==
         ssv::SsvGmcMethod::SparseOpticalFlow);
     assert(config.tracking.publish_cooldown_ms == 12000);
+    assert(config.evidence_cache.enabled);
+    assert(config.evidence_cache.directory == "/var/lib/ssv/evidence-cache");
+    assert(config.evidence_cache.segment_duration_ms == 5000);
+    assert(config.evidence_cache.retention_ms == 60000);
+    assert(config.evidence_cache.max_bytes_mb == 256);
     assert(config.agent.max_retries == 5);
     assert(config.agent.model_name == "gpt-test");
     assert(config.agent.output_dir == "outputs-test");
     assert(!config.agent.dedup_enabled);
     assert(config.agent.dedup_cooldown_seconds == 12.5F);
+}
+
+void test_loads_rtsp_display_config()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("rtsp-display.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
+display:
+  backend: "rtsp"
+  rtsp:
+    location: "rtsps://publisher.example/live/camera-01"
+    burn_in_overlay: true
+inference:
+  enabled: false
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+
+    assert(config.display.backend == ssv::SsvDisplayBackend::RtspClientSink);
+    assert(config.display.rtsp.location
+        == "rtsps://publisher.example/live/camera-01");
+    assert(config.display.rtsp.burn_in_overlay);
 }
 
 void test_loads_example_config(std::string_view path)
@@ -348,6 +391,47 @@ agent:
     enabled: false
 )yaml");
     static_cast<void>(ssv::ssv_config_load(omitted_path.string()));
+}
+
+void test_evidence_cache_rejects_invalid_values()
+{
+    const std::string prefix = R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
+evidence_cache:
+)yaml";
+    expect_config_error(
+        prefix + "  directory: relative\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.directory");
+    expect_config_error(
+        prefix + "  segment_duration_ms: 999\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.segment_duration_ms");
+    expect_config_error(
+        prefix + "  retention_ms: 999\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.retention_ms");
+    expect_config_error(
+        prefix + "  segment_duration_ms: 5000\n  retention_ms: 1000\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.retention_ms");
+    expect_config_error(
+        prefix + "  max_bytes_mb: 0\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.max_bytes_mb");
+    expect_config_error(
+        prefix + "  unknown: true\n",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "evidence_cache.unknown");
 }
 
 void test_rejects_invalid_event_db_path()
@@ -891,16 +975,20 @@ sources:
         "sources[0].id");
 }
 
-void test_requires_event_rule()
+void test_allows_missing_event_rule()
 {
-    expect_config_error(R"yaml(
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("valid.yaml", R"yaml(
 version: "2.0"
 sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
-)yaml",
-        ssv::SsvConfigErrorKind::MissingRequired,
-        "sources[0].event_rule");
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+    assert(config.sources.size() == 1);
+    assert(config.sources.front().event_rule.event_type.empty());
+    assert(config.sources.front().event_rule.rule_id.empty());
 }
 
 void test_rejects_invalid_event_rule()
@@ -1170,11 +1258,23 @@ sources:
       rule_facts: {}
 inference:
   enabled: false
+evidence_cache:
+  enabled: true
+  directory: "/var/lib/ssv/evidence"
 agent:
+  evidence_roots: ["/var/lib/ssv"]
   recording_evidence:
     enabled: true
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 2000
     clip_before_ms: 2500
     clip_after_ms: 2500
+    merge_gap_ms: 3000
+    lost_grace_ms: 3000
+    silence_timeout_ms: 30000
+    max_episode_ms: 30000
 )yaml");
 
     static_cast<void>(ssv::ssv_config_load(path.string()));
@@ -1191,10 +1291,72 @@ inference:
   enabled: false
 agent:
   recording_evidence:
-    unknown: true
+    provider: "ssv_cache"
 )yaml",
         ssv::SsvConfigErrorKind::UnknownKey,
-        "agent.recording_evidence.unknown");
+        "agent.recording_evidence.provider");
+}
+
+void test_rejects_recording_evidence_without_cache()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  evidence_roots: ["/var/lib/ssv"]
+  recording_evidence:
+    enabled: true
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.enabled");
+}
+
+void test_rejects_recording_evidence_cache_outside_root()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+evidence_cache:
+  enabled: true
+  directory: "/tmp/ssv-evidence-cache"
+agent:
+  evidence_roots: ["/var/lib/ssv"]
+  recording_evidence:
+    enabled: true
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.directory");
+}
+
+void test_rejects_invalid_recording_evidence_episode_settings()
+{
+    const std::string_view common = R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  enabled: false
+agent:
+  recording_evidence:
+    enabled: false
+)yaml";
+
+    for (const auto &invalid : std::array {
+             std::pair {"merge_gap_ms: 0", "agent.recording_evidence.merge_gap_ms"},
+             std::pair {"lost_grace_ms: -1", "agent.recording_evidence.lost_grace_ms"},
+             std::pair {"silence_timeout_ms: 0", "agent.recording_evidence.silence_timeout_ms"},
+             std::pair {"max_episode_ms: 3000\n    merge_gap_ms: 3000", "agent.recording_evidence.max_episode_ms"},
+         }) {
+        expect_config_error(
+            std::string(common) + "    " + invalid.first + "\n",
+            ssv::SsvConfigErrorKind::InvalidValue,
+            invalid.second);
+    }
 }
 
 void test_rejects_recording_evidence_wrong_type()
@@ -1212,6 +1374,33 @@ agent:
 )yaml",
         ssv::SsvConfigErrorKind::InvalidType,
         "agent.recording_evidence.clip_before_ms");
+}
+
+void test_rejects_invalid_recording_evidence_worker_settings()
+{
+    const std::string_view common = R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+inference:
+  enabled: false
+agent:
+  recording_evidence:
+    enabled: true
+)yaml";
+
+    for (const auto &invalid : std::array {
+             std::pair {"poll_interval_ms: 0", "agent.recording_evidence.poll_interval_ms"},
+             std::pair {"lease_ms: 0", "agent.recording_evidence.lease_ms"},
+             std::pair {"max_retries: 0", "agent.recording_evidence.max_retries"},
+             std::pair {"retry_delay_ms: -1", "agent.recording_evidence.retry_delay_ms"},
+         }) {
+        expect_config_error(
+            std::string(common) + "    " + invalid.first + "\n",
+            ssv::SsvConfigErrorKind::InvalidValue,
+            invalid.second);
+    }
 }
 
 void test_rejects_unknown_keys_in_every_section()
@@ -1235,14 +1424,6 @@ void test_rejects_unknown_keys_in_every_section()
             "agent.knowledge.extra"},
         {"agent:\n  recording_evidence:\n    frame_offsets_ms: [-1000, 0, 1000]",
             "agent.recording_evidence.frame_offsets_ms"},
-        {"agent:\n  recording_evidence:\n    poll_interval_ms: 1000",
-            "agent.recording_evidence.poll_interval_ms"},
-        {"agent:\n  recording_evidence:\n    lease_ms: 30000",
-            "agent.recording_evidence.lease_ms"},
-        {"agent:\n  recording_evidence:\n    max_retries: 3",
-            "agent.recording_evidence.max_retries"},
-        {"agent:\n  recording_evidence:\n    retry_delay_ms: 2000",
-            "agent.recording_evidence.retry_delay_ms"},
     };
 
     for (const auto &test_case : cases) {
@@ -1376,6 +1557,45 @@ sources:
     }
 }
 
+void test_rejects_invalid_rtsp_display_location()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
+display:
+  backend: "rtsp"
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "display.rtsp.location");
+
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
+display:
+  backend: "rtsp"
+  rtsp:
+    location: "http://127.0.0.1/live"
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "display.rtsp.location");
+}
+
 void test_reports_scalar_type_errors_with_paths()
 {
     struct Case {
@@ -1486,6 +1706,16 @@ agent:
     qdrant_url: 6333
 )yaml",
             "agent.knowledge.qdrant_url"},
+        {R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  knowledge:
+    rules_dir: []
+)yaml",
+            "agent.knowledge.rules_dir"},
     };
 
     for (const auto &test_case : cases) {
@@ -1554,6 +1784,8 @@ void test_rejects_out_of_range_values()
             "agent.knowledge.qdrant_url"},
         {"agent:\n  knowledge:\n    qdrant_url: \"  \"",
             "agent.knowledge.qdrant_url"},
+        {"agent:\n  knowledge:\n    rules_dir: \"  \"",
+            "agent.knowledge.rules_dir"},
         {"agent:\n  knowledge:\n    min_score: 1.1",
             "agent.knowledge.min_score"},
         {"tracking:\n  track_buffer: 0", "tracking.track_buffer"},
@@ -1673,6 +1905,31 @@ display:
     assert(persisted == yaml);
 }
 
+void test_cli_accepts_rtsp_display_backend()
+{
+    const std::vector<std::string_view> arguments = {
+        "--display-backend", "rtsp"};
+    const auto options = ssv::ssv_run_options_parse(arguments);
+    assert(options.overrides.display_backend
+        == ssv::SsvDisplayBackend::RtspClientSink);
+}
+
+void test_cli_rtsp_backend_validates_publish_location()
+{
+    ssv::SsvConfig config;
+    config.display.rtsp.location = "rtsp://";
+    ssv::SsvConfigOverrides overrides;
+    overrides.display_backend = ssv::SsvDisplayBackend::RtspClientSink;
+
+    try {
+        ssv::ssv_config_apply_overrides(config, overrides);
+        assert(false && "CLI RTSP override accepted an invalid location");
+    } catch (const ssv::SsvConfigError &error) {
+        assert(error.kind() == ssv::SsvConfigErrorKind::InvalidValue);
+        assert(error.path() == "display.rtsp.location");
+    }
+}
+
 void test_cli_rejects_invalid_and_conflicting_arguments()
 {
     expect_cli_error(
@@ -1750,8 +2007,10 @@ int main(int argc, char **argv)
         return 1;
 
     test_loads_complete_config();
+    test_loads_rtsp_display_config();
     test_loads_example_config(argv[1]);
     test_accepts_shared_agent_config_fields();
+    test_evidence_cache_rejects_invalid_values();
     test_rejects_invalid_event_db_path();
     test_rejects_invalid_indexing_string_fields();
     test_parses_explicit_preprocess_semantics();
@@ -1774,7 +2033,7 @@ int main(int argc, char **argv)
     test_rejects_invalid_decode_mode();
     test_requires_exactly_one_source();
     test_requires_non_empty_source_id();
-    test_requires_event_rule();
+    test_allows_missing_event_rule();
     test_rejects_invalid_event_rule();
     test_enforces_provider_mode_and_order();
     test_enforces_runtime_discriminator();
@@ -1783,16 +2042,23 @@ int main(int argc, char **argv)
     test_rejects_deep_unknown_key();
     test_accepts_recording_evidence_extension();
     test_rejects_recording_evidence_unknown_key();
+    test_rejects_recording_evidence_without_cache();
+    test_rejects_recording_evidence_cache_outside_root();
+    test_rejects_invalid_recording_evidence_episode_settings();
     test_rejects_recording_evidence_wrong_type();
+    test_rejects_invalid_recording_evidence_worker_settings();
     test_rejects_unknown_keys_in_every_section();
     test_reports_non_string_mapping_keys();
     test_reports_structural_type_errors();
     test_requires_version_and_sources();
     test_rejects_invalid_enum_values();
+    test_rejects_invalid_rtsp_display_location();
     test_reports_scalar_type_errors_with_paths();
     test_rejects_out_of_range_values();
     test_reports_file_and_yaml_errors();
     test_cli_overrides_are_in_memory_only();
+    test_cli_accepts_rtsp_display_backend();
+    test_cli_rtsp_backend_validates_publish_location();
     test_cli_rejects_invalid_and_conflicting_arguments();
     test_exit_codes_and_fatal_error_contract();
     return 0;

@@ -517,9 +517,12 @@ void destroy_display_probe(gpointer data)
 
 std::string_view expected_sink_factory(SsvResolvedDisplayBackend backend)
 {
-    return backend == SsvResolvedDisplayBackend::GtkGlSink
-        ? "gtkglsink"
-        : "gtksink";
+    switch (backend) {
+    case SsvResolvedDisplayBackend::GtkGlSink: return "gtkglsink";
+    case SsvResolvedDisplayBackend::GtkSink: return "gtksink";
+    case SsvResolvedDisplayBackend::RtspClientSink: return {};
+    }
+    return {};
 }
 
 } // namespace
@@ -672,6 +675,11 @@ std::unique_ptr<SsvDisplayWindow> SsvDisplayWindow::create(
     SsvDisplayWindowSpec spec,
     const SsvDisplayAttachment *attachment)
 {
+    if (!ssv_display_backend_requires_window(spec.backend)) {
+        throw SsvDisplayWindowError(
+            "display.gtk.window",
+            "a GTK display window cannot be created for this backend");
+    }
     if (spec.source_context != nullptr
         && spec.source_context->source_id() != spec.source_id) {
         throw SsvDisplayWindowError(

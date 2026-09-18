@@ -23,6 +23,7 @@ std::string_view format_name(SsvPixelFormat format)
     case SsvPixelFormat::Nv12: return "NV12";
     case SsvPixelFormat::Rgba: return "RGBA";
     case SsvPixelFormat::Bgrx: return "BGRx";
+    case SsvPixelFormat::I420: return "I420";
     }
     return "unknown";
 }
@@ -134,6 +135,7 @@ std::optional<SsvPixelFormat> pixel_format(GstVideoFormat format)
     case GST_VIDEO_FORMAT_NV12: return SsvPixelFormat::Nv12;
     case GST_VIDEO_FORMAT_RGBA: return SsvPixelFormat::Rgba;
     case GST_VIDEO_FORMAT_BGRx: return SsvPixelFormat::Bgrx;
+    case GST_VIDEO_FORMAT_I420: return SsvPixelFormat::I420;
     default: return std::nullopt;
     }
 }
@@ -496,7 +498,7 @@ ssv_pipeline_contract_violation_from_message(const GstMessage *message)
     gint boundary = 0;
     if (!gst_structure_get_int(details, "boundary", &boundary)
         || boundary < static_cast<int>(SsvPipelineBoundary::DecodeTee)
-        || boundary > static_cast<int>(SsvPipelineBoundary::AnalysisHost)) {
+        || boundary > static_cast<int>(SsvPipelineBoundary::DisplayOverlayInput)) {
         return std::nullopt;
     }
     const auto required = [&](const char *field) -> const char * {
@@ -541,7 +543,7 @@ ssv_pipeline_contract_ready_from_message(const GstMessage *message) noexcept
     gint boundary = 0;
     if (!gst_structure_get_int(details, "boundary", &boundary)
         || boundary < static_cast<int>(SsvPipelineBoundary::DecodeTee)
-        || boundary > static_cast<int>(SsvPipelineBoundary::AnalysisHost)) {
+        || boundary > static_cast<int>(SsvPipelineBoundary::DisplayOverlayInput)) {
         return std::nullopt;
     }
     return static_cast<SsvPipelineBoundary>(boundary);

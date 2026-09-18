@@ -16,6 +16,12 @@ ssv_pipeline_builder_test = executable('ssv-pipeline-builder-test',
   dependencies : [ssv_runner_pipeline_dep, ssv_inference_test_support_dep],
 )
 
+ssv_evidence_cache_test = executable('ssv-evidence-cache-test',
+  'test_ssv_evidence_cache.cpp',
+  include_directories : runner_inc,
+  dependencies : [gst_app_dep, ssv_runner_pipeline_dep],
+)
+
 test('ssv-pipeline-plan', ssv_pipeline_plan_test,
   suite : 'pipeline',
 )
@@ -33,4 +39,7 @@ test('ssv-pipeline-builder', ssv_pipeline_builder_test,
     'LD_LIBRARY_PATH' : ssv_gst_test_runtime_library_path,
     'SSV_TEST_LABEL_MAP_PATH' : ssv_inference_test_label_map_path,
   },
+)
+test('ssv-evidence-cache', ssv_evidence_cache_test,
+  suite : 'pipeline',
 )

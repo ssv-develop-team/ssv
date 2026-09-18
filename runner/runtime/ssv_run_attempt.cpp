@@ -92,6 +92,10 @@ std::set<SsvPipelineBoundary> required_contract_boundaries(
         boundaries.insert(SsvPipelineBoundary::DisplayUpload);
     if (plan.expected_caps.display_sink_input)
         boundaries.insert(SsvPipelineBoundary::DisplaySink);
+    if (plan.expected_caps.display_overlay_input)
+        boundaries.insert(SsvPipelineBoundary::DisplayOverlayInput);
+    if (plan.expected_caps.display_encode_input)
+        boundaries.insert(SsvPipelineBoundary::DisplayEncodeInput);
     if (plan.expected_caps.analysis_gpu_input)
         boundaries.insert(SsvPipelineBoundary::AnalysisGpuInput);
     if (plan.expected_caps.analysis_host_input)
@@ -131,20 +135,27 @@ public:
             throw std::invalid_argument(
                 "SsvRunAttempt config and pipeline plan source must match");
         }
-        if (!plan_.display_backend && window_ != nullptr) {
+        if (config_.display.enabled
+            != plan_.display_backend.has_value()) {
+            throw std::invalid_argument(
+                "SsvRunAttempt display configuration and pipeline plan must match");
+        }
+        const bool requires_display_window = plan_.display_backend
+            && ssv_display_backend_requires_window(*plan_.display_backend);
+        if (!requires_display_window && window_ != nullptr) {
             throw std::invalid_argument(
                 "headless SsvRunAttempt must not own a display window");
         }
-        if (plan_.display_backend && window_ == nullptr) {
+        if (requires_display_window && window_ == nullptr) {
             throw std::invalid_argument(
                 "display-enabled SsvRunAttempt requires a display window");
         }
-        if (!plan_.display_backend
+        if (!requires_display_window
             && pipeline_instance_.display_attachment() != nullptr) {
             throw std::invalid_argument(
                 "headless SsvRunAttempt must not own a display attachment");
         }
-        if (plan_.display_backend
+        if (requires_display_window
             && pipeline_instance_.display_attachment() == nullptr) {
             throw std::invalid_argument(
                 "display-enabled SsvRunAttempt requires a display attachment");
@@ -373,6 +384,7 @@ private:
 
     void handle_element(GstMessage *message)
     {
+        pipeline_instance_.handle_cache_message(message);
         const auto ready =
             ssv_pipeline_contract_ready_from_message(message);
         if (!ready)
