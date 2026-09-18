@@ -12,6 +12,7 @@ import yaml
 
 from ssv_agent import service
 from ssv_agent.config import SsvConfig
+from ssv_agent.review_runtime import validate_review_view_image_tool
 
 
 def test_run_owns_agent_service_lifecycle(monkeypatch) -> None:
@@ -270,7 +271,7 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
 def test_review_view_image_rejects_same_name_non_builtin(monkeypatch) -> None:
     from deerflow.tools import builtins as builtin_registry
 
-    service._validate_review_view_image_tool(builtin_registry.view_image_tool)
+    validate_review_view_image_tool(builtin_registry.view_image_tool)
 
     class FakeTool:
         name = "view_image"
@@ -280,7 +281,7 @@ def test_review_view_image_rejects_same_name_non_builtin(monkeypatch) -> None:
             return None
 
     with pytest.raises(ValueError, match="canonical builtin"):
-        service._validate_review_view_image_tool(FakeTool())
+        validate_review_view_image_tool(FakeTool())
 
     def reject_builtin() -> None:
         raise ValueError("DeerFlow view_image registry entry is not canonical")

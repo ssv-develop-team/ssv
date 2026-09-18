@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
@@ -12,32 +11,17 @@ from typing import Any
 
 from ssv_agent.knowledge.catalog import (
     DEFAULT_RULES_DIR,
-    RuleDocument,
     discover_rule_documents,
 )
 from ssv_agent.knowledge.ingester import Ingester
 from ssv_agent.knowledge.registry import register_backend
+from ssv_agent.knowledge.rule_chunks import (
+    RulePassage,
+    rule_chunk_id,
+    split_rule_clauses,
+)
 from ssv_agent.knowledge.retriever import Retriever
 from ssv_agent.knowledge.schema import Chunk, IngestResult, RetrievalResult
-
-
-MAX_SECTION_LENGTH = 1200
-CLAUSE_HEADING = re.compile(
-    r"^(?:(?:#{1,6}\s*)?(?P<section>\d+(?:\.\d+){0,5})(?=\s|$)"
-    r"|(?P<heading>#{1,6})\s+(?P<title>\S.*))"
-)
-_LAYOUT_NOISE = re.compile(
-    r"^(?:#{1,6}\s+\?\s*\d+\s*\?|\d+|GB26860[—-]2011)$"
-)
-@dataclass(frozen=True)
-class _Passage:
-    source: str
-    section: str
-    content: str
-    rule_id: str = ""
-    rule_version: str = ""
-    event_types: tuple[str, ...] = ()
-    content_hash: str = ""
 
 
 def _tokens(text: str) -> list[str]:
@@ -49,80 +33,6 @@ def _tokens(text: str) -> list[str]:
         else:
             tokens.append(unit)
     return tokens
-
-
-def _split_large_section(section: str) -> list[str]:
-    if len(section) <= MAX_SECTION_LENGTH:
-        return [section]
-
-    chunks: list[str] = []
-    buffer = ""
-    for sentence in re.split(r"(?<=[\u3002\uff01\uff1f\uff1b!?;])", section):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if buffer and len(buffer) + len(sentence) + 1 > MAX_SECTION_LENGTH:
-            chunks.append(buffer.strip())
-            buffer = ""
-        buffer += sentence + "\n"
-    if buffer.strip():
-        chunks.append(buffer.strip())
-    return chunks
-
-
-def _split_clauses(
-    source: str,
-    text: str,
-    *,
-    rule: RuleDocument | None = None,
-) -> list[_Passage]:
-    passages: list[_Passage] = []
-
-    def make_passage(section: str, content: str) -> _Passage:
-        return _Passage(
-            source=source,
-            section=section,
-            content=content,
-            rule_id=rule.rule_id if rule else "",
-            rule_version=rule.version if rule else "",
-            event_types=rule.event_types if rule else (),
-            content_hash=rule.content_hash if rule else "",
-        )
-
-    section = "未编号"
-    section_lines: list[str] = []
-    for raw_line in text.replace("\r\n", "\n").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if _LAYOUT_NOISE.fullmatch(line):
-            continue
-        match = CLAUSE_HEADING.match(line)
-        if match and section_lines:
-            passages.extend(
-                make_passage(section, content)
-                for content in _split_large_section("\n".join(section_lines))
-            )
-            section_lines = []
-        if match and match.group("section"):
-            section = match.group("section")
-        elif match and match.group("title"):
-            section = match.group("title")
-        section_lines.append(line)
-    if section_lines:
-        passages.extend(
-            make_passage(section, content)
-            for content in _split_large_section("\n".join(section_lines))
-        )
-    return passages
-
-
-def _chunk_id(passage: _Passage) -> str:
-    digest = passage.content_hash.removeprefix("sha256:")[:12]
-    return (
-        f"{passage.source}:{passage.rule_id}:{passage.rule_version}:"
-        f"{passage.section}:{digest}"
-    )
 
 
 class LocalMarkdownRetriever(Retriever):
@@ -138,7 +48,7 @@ class LocalMarkdownRetriever(Retriever):
             else Path(configured_dir) if configured_dir else DEFAULT_RULES_DIR
         )
         self._fingerprint: tuple[tuple[str, str], ...] = ()
-        self._passages: list[_Passage] = []
+        self._passages: list[RulePassage] = []
         self._term_frequencies: list[Counter[str]] = []
         self._document_frequencies: Counter[str] = Counter()
         self._average_length = 0.0
@@ -205,7 +115,7 @@ class LocalMarkdownRetriever(Retriever):
         ranked = sorted(scores, key=lambda item: (-item[0], item[1]))[:top_k]
         chunks = [
             Chunk(
-                chunk_id=_chunk_id(self._passages[index]),
+                chunk_id=rule_chunk_id(self._passages[index]),
                 content=self._passages[index].content,
                 score=round(score, 4),
                 metadata={
@@ -231,7 +141,7 @@ class LocalMarkdownRetriever(Retriever):
         passages = [
             passage
             for document in documents
-            for passage in _split_clauses(document.source_path, document.content, rule=document)
+            for passage in split_rule_clauses(document.source_path, document.content, rule=document)
         ]
         frequencies = [Counter(_tokens(passage.content)) for passage in passages]
         self._passages = passages

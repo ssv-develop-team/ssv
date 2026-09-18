@@ -142,8 +142,11 @@ def test_deterministic_result_requires_rule_citation() -> None:
             "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
         },
     ))
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(rule_citations=[]), context)
+    result = validate_rule_citations(_rule_result(rule_citations=[]), context)
+    assert result.verdict == "uncertain"
+    assert result.confidence == 0.0
+    assert result.rule_citations == []
+    assert "缺少规则引用" in result.explanation
 
 
 def test_rule_citation_must_match_retrieved_chunk_metadata() -> None:
@@ -153,11 +156,12 @@ def test_rule_citation_must_match_retrieved_chunk_metadata() -> None:
             "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
         },
     ))
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(rule_citations=[{
-            "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1",
-            "rule_version": "v1", "section": "5.2"
-        }]), context)
+    result = validate_rule_citations(_rule_result(rule_citations=[{
+        "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1",
+        "rule_version": "v1", "section": "5.2"
+    }]), context)
+    assert result.verdict == "uncertain"
+    assert result.rule_citations == []
 
 
 def test_rule_citation_must_match_retrieved_rule_version() -> None:
@@ -167,17 +171,20 @@ def test_rule_citation_must_match_retrieved_rule_version() -> None:
             "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
         },
     ))
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(rule_citations=[{
-            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
-            "rule_version": "v2", "section": "5.2"
-        }]), context)
+    result = validate_rule_citations(_rule_result(rule_citations=[{
+        "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
+        "rule_version": "v2", "section": "5.2"
+    }]), context)
+    assert result.verdict == "uncertain"
+    assert result.rule_citations == []
 
 
 def test_unavailable_rules_only_allow_uncertain() -> None:
     context = _context(available=False)
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(), context)
+    downgraded = validate_rule_citations(_rule_result(), context)
+    assert downgraded.verdict == "uncertain"
+    assert downgraded.confidence == 0.0
+    assert downgraded.rule_citations == []
     uncertain = _rule_result(
         verdict="uncertain", confidence=0.4, rule_citations=[], explanation="没有可用规则依据"
     )

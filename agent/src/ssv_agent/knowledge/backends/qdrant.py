@@ -14,12 +14,9 @@ from ssv_agent.knowledge.catalog import (
     DEFAULT_RULES_DIR,
     discover_rule_documents,
 )
-from ssv_agent.knowledge.backends.local_markdown import (
-    _chunk_id as _local_chunk_id,
-    _split_clauses,
-)
 from ssv_agent.knowledge.ingester import Ingester
 from ssv_agent.knowledge.registry import register_backend
+from ssv_agent.knowledge.rule_chunks import rule_chunk_id, split_rule_clauses
 from ssv_agent.knowledge.retriever import Retriever
 from ssv_agent.knowledge.schema import Chunk, IngestResult, RetrievalResult
 
@@ -51,6 +48,16 @@ def _expand_rule_query(query: str) -> str:
     if "安全帽" in query and "绝缘安全帽" not in query:
         return f"{query} 绝缘安全帽"
     return query
+
+
+def _normalize_rule_filters(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """把规则公开过滤键映射为规则 payload 的字段名。"""
+    if filters is None:
+        return None
+    normalized = dict(filters)
+    if "event_type" in normalized:
+        normalized["event_types"] = normalized.pop("event_type")
+    return normalized
 
 
 async def _embed_passages(passages: Sequence[_Embeddable]) -> list[list[float]]:
@@ -101,7 +108,7 @@ async def ingest_rules(knowledge_dir: Path | None = None) -> IngestResult:
     raw_passages = [
         passage
         for document in documents
-        for passage in _split_clauses(
+        for passage in split_rule_clauses(
             document.source_path,
             document.content,
             rule=document,
@@ -110,7 +117,7 @@ async def ingest_rules(knowledge_dir: Path | None = None) -> IngestResult:
     passages = []
     seen_chunk_ids: set[str] = set()
     for passage in raw_passages:
-        chunk_id = _local_chunk_id(passage)
+        chunk_id = rule_chunk_id(passage)
         if chunk_id in seen_chunk_ids:
             continue
         seen_chunk_ids.add(chunk_id)
@@ -119,7 +126,7 @@ async def ingest_rules(knowledge_dir: Path | None = None) -> IngestResult:
         vectors = await _embed_passages(passages)
         points = []
         for passage, vector in zip(passages, vectors, strict=True):
-            identifier = _local_chunk_id(passage)
+            identifier = rule_chunk_id(passage)
             points.append(
                 (
                     identifier,
@@ -193,7 +200,7 @@ class QdrantRuleRetriever(Retriever):
             hits = store.search_rules(
                 vector,
                 top_k=min(MAX_RULE_TOP_K, max(top_k, top_k * 4)),
-                filters=filters,
+                filters=_normalize_rule_filters(filters),
             )
         hits = [hit for hit in hits if float(hit.get("score", -1.0)) >= min_score]
         if "安全帽" in query:

@@ -315,6 +315,64 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
     }
 
 
+def test_review_worker_downgrades_invalid_rule_citation_to_uncertain(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    evidence_id = _record_case(
+        db_path,
+        tmp_path / "frame.jpg",
+        event_type="person_without_helmet",
+        rule_id="r1",
+        rule_version="v1",
+    )
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+
+    class Retriever:
+        async def retrieve(self, query, *, top_k=5, filters=None):
+            return RetrievalResult(
+                query=query,
+                backend="fake",
+                chunks=[Chunk(
+                    chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
+                )],
+            )
+
+    def runner(context, rule_context):
+        assert rule_context is not None and rule_context.available
+        return json.dumps({
+            "verdict": "violation", "confidence": 0.9,
+            "evidence_status": "available", "evidence_ids": [evidence_id],
+            "claims": [], "explanation": "模型给出了确定性结论",
+            "rule_citations": [{
+                "chunk_id": "chunk-1", "source": "wrong-rules.md",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
+            }],
+        })
+
+    worker = ReviewWorker(
+        ledger_factory=lambda: EventLedger(db_path), runner=runner,
+        rule_retriever=Retriever(), worker_id="review-test", lease_ms=1_000,
+        max_retries=2, retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        case = ledger.get_case("case-1")
+        remaining = ledger.claim_job(JobKind.REVIEW, "another-worker", lease_ms=1_000)
+
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == "uncertain"
+    assert case.review["confidence"] == 0.0
+    assert remaining is None
+
+
 def test_review_worker_refreshes_evidence_before_constructing_context(
     tmp_path: Path,
     monkeypatch,

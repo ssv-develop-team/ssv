@@ -30,7 +30,6 @@ from ssv_agent.review_runtime import (
     create_review_config,
     load_review_view_image_tool as _load_review_view_image_tool,
     reset_deerflow_runtime_caches,
-    validate_review_view_image_tool,
 )
 from ssv_agent.runner import run_review
 from ssv_agent.runtime import (
@@ -68,11 +67,6 @@ def _close_resource(resource: object | None) -> None:
     result = close()
     if inspect.isawaitable(result):
         asyncio.run(result)
-
-
-def _validate_review_view_image_tool(tool: object) -> None:
-    """保留旧的 service 私有测试入口，实际校验位于 review_runtime。"""
-    validate_review_view_image_tool(tool)
 
 
 class AgentService:

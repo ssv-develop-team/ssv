@@ -117,13 +117,13 @@ def validate_rule_citations(
     result: ReviewResult,
     rule_context: RuleRetrievalContext,
 ) -> ReviewResult:
-    """校验确定性结论只引用本次检索得到且元数据一致的规则片段。"""
+    """校验规则引用，并在规则依据不可验证时保守降级。"""
     if result.verdict == "uncertain":
         return result
     if not rule_context.available:
-        raise ResultParseError("规则不可用时结论必须为 uncertain")
+        return _downgrade_rule_result(result, "规则检索不可用")
     if not result.rule_citations:
-        raise ResultParseError("确定性结论必须引用规则")
+        return _downgrade_rule_result(result, "确定性结论缺少规则引用")
 
     candidates = {
         chunk.chunk_id: chunk
@@ -132,7 +132,10 @@ def validate_rule_citations(
     for citation in result.rule_citations:
         chunk = candidates.get(citation.chunk_id)
         if chunk is None:
-            raise ResultParseError("规则引用的 chunk 不在本次检索结果中")
+            return _downgrade_rule_result(
+                result,
+                "规则引用的 chunk 不在本次检索结果中",
+            )
         metadata = chunk.metadata
         if (
             citation.source != metadata.get("source")
@@ -140,8 +143,20 @@ def validate_rule_citations(
             or citation.rule_version != metadata.get("rule_version")
             or citation.section != metadata.get("section")
         ):
-            raise ResultParseError("规则引用元数据与检索结果不一致")
+            return _downgrade_rule_result(result, "规则引用元数据与检索结果不一致")
     return result
+
+
+def _downgrade_rule_result(result: ReviewResult, reason: str) -> ReviewResult:
+    """移除不可验证的规则引用，并返回可持久化的保守结果。"""
+    return result.model_copy(
+        update={
+            "verdict": "uncertain",
+            "confidence": 0.0,
+            "rule_citations": [],
+            "explanation": f"规则依据不可验证，结论降级为 uncertain：{reason}",
+        }
+    )
 
 
 def parse_result_markdown(text: str) -> ReviewResult:

@@ -117,7 +117,7 @@ def test_evidence_rules_review_then_index_job_form_one_traceable_chain(
     assert review_job is None
 
 
-def test_missing_rules_reject_deterministic_review_without_rolling_back_evidence(
+def test_missing_rules_downgrade_deterministic_review_without_rolling_back_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "events.db"
@@ -144,8 +144,10 @@ def test_missing_rules_reject_deterministic_review_without_rolling_back_evidence
 
     with EventLedger(db_path, evidence_roots=[str(tmp_path)]) as ledger:
         case = ledger.get_case("evt-1")
-        retry = ledger.claim_job(JobKind.REVIEW, "retry", 1000)
+        review_job = ledger.claim_job(JobKind.REVIEW, "retry", 1000)
 
     assert case is not None and len(case.evidence) == 4
-    assert case.review is None
-    assert retry is not None
+    assert case.review is not None
+    assert case.review["verdict"] == "uncertain"
+    assert case.review["confidence"] == 0.0
+    assert review_job is None
