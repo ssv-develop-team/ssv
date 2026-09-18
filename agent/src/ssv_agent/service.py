@@ -15,42 +15,40 @@ from time import monotonic
 from typing import Any
 
 import structlog
-import yaml
 
 from deerflow.client import DeerFlowClient
 
 from ssv_agent.config import SsvConfig
 from ssv_agent.embedding.registry import create_provider
+from ssv_agent.evidence_provider import EvidenceExtractor
 from ssv_agent.event_consumer import EventConsumer
 from ssv_agent.event_store import EventLedger
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
-from ssv_agent.recording_evidence import RecordingEvidenceExtractor
+from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
 from ssv_agent.knowledge.registry import get_retriever
+from ssv_agent.review_runtime import (
+    create_review_config,
+    load_review_view_image_tool as _load_review_view_image_tool,
+    reset_deerflow_runtime_caches,
+    validate_review_view_image_tool,
+)
 from ssv_agent.runner import run_review
+from ssv_agent.runtime import (
+    agent_root as _agent_root,
+    runtime_environment as _runtime_environment,
+    embedding_settings as _embedding_settings,
+)
 from ssv_agent.workers import IndexWorker, RecordingEvidenceWorker, ReviewWorker
 
 logger = structlog.get_logger()
 
-_REVIEW_TOOL_NAMES = frozenset(
-    {"get_event", "evidence_reader", "rule_retriever", "search_events", "view_image"}
-)
-_REVIEW_CONFIGURED_TOOL_NAMES = _REVIEW_TOOL_NAMES - {"view_image"}
-_REVIEW_VIEW_IMAGE_MODULE = "deerflow.tools.builtins.view_image_tool"
 _ENV_UNSET = object()
-_EVIDENCE_WORKER_POLL_SECONDS = 1.0
-_EVIDENCE_WORKER_LEASE_MS = 30_000
-_EVIDENCE_WORKER_MAX_RETRIES = 3
-_EVIDENCE_WORKER_RETRY_DELAY_MS = 2_000
 _DEERFLOW_ENV_KEYS = (
     "DEER_FLOW_CONFIG_PATH",
     "DEER_FLOW_PROJECT_ROOT",
     "DEER_FLOW_HOME",
     "SSV_AGENT_MODEL",
 )
-
-
-def _agent_root() -> Path:
-    return Path(__file__).resolve().parents[2]
 
 
 def _set_deerflow_env(config: SsvConfig) -> None:
@@ -63,18 +61,6 @@ def _set_deerflow_env(config: SsvConfig) -> None:
         os.environ.setdefault("SSV_AGENT_MODEL", config.agent.model_name)
 
 
-def _embedding_settings(config: SsvConfig) -> tuple[str, str | None]:
-    """Return the single embedding seam shared with the search tool."""
-    indexing = config.agent.indexing
-    return indexing.embedding_backend, indexing.embedding_model
-
-
-def _resolve_agent_path(value: str) -> Path:
-    """把 Agent 配置中的路径解析到稳定的 Agent 项目目录。"""
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else _agent_root() / path
-
-
 def _close_resource(resource: object | None) -> None:
     close = getattr(resource, "close", None)
     if not callable(close):
@@ -85,35 +71,8 @@ def _close_resource(resource: object | None) -> None:
 
 
 def _validate_review_view_image_tool(tool: object) -> None:
-    """拒绝被同名配置/MCP 工具替换的视觉 builtin。"""
-    implementation = getattr(tool, "func", None)
-    if not callable(implementation):
-        implementation = getattr(tool, "coroutine", None)
-    if (
-        getattr(tool, "name", None) != "view_image"
-        or not callable(implementation)
-        or getattr(implementation, "__module__", None) != _REVIEW_VIEW_IMAGE_MODULE
-        or getattr(implementation, "__name__", None) != "view_image_tool"
-    ):
-        raise ValueError(
-            "review view_image must be DeerFlow's canonical builtin implementation"
-        )
-
-
-def _load_review_view_image_tool() -> object:
-    """从 DeerFlow builtin registry 加载并验证 view_image。"""
-    try:
-        from deerflow.tools import builtins as builtin_registry
-        from deerflow.tools.builtins.view_image_tool import (
-            view_image_tool as canonical_tool,
-        )
-    except (ImportError, AttributeError) as exc:
-        raise ValueError("DeerFlow builtin view_image is unavailable") from exc
-
-    if getattr(builtin_registry, "view_image_tool", None) is not canonical_tool:
-        raise ValueError("DeerFlow view_image registry entry is not canonical")
-    _validate_review_view_image_tool(canonical_tool)
-    return canonical_tool
+    """保留旧的 service 私有测试入口，实际校验位于 review_runtime。"""
+    validate_review_view_image_tool(tool)
 
 
 class AgentService:
@@ -127,7 +86,7 @@ class AgentService:
         review_worker_factory: Callable[..., ReviewWorker] = ReviewWorker,
         index_worker_factory: Callable[..., IndexWorker] = IndexWorker,
         recording_evidence_worker_factory: Callable[..., RecordingEvidenceWorker] = RecordingEvidenceWorker,
-        recording_evidence_extractor_factory: Callable[..., RecordingEvidenceExtractor] = RecordingEvidenceExtractor,
+        evidence_extractor_factory: Callable[..., EvidenceExtractor] = SsvCacheEvidenceExtractor,
         client_factory: Callable[[], Any] = DeerFlowClient,
         embedding_factory: Callable[..., Any] = create_provider,
         qdrant_factory: Callable[[], SsvQdrantStore] = SsvQdrantStore,
@@ -137,7 +96,7 @@ class AgentService:
         self._review_worker_factory = review_worker_factory
         self._index_worker_factory = index_worker_factory
         self._recording_evidence_worker_factory = recording_evidence_worker_factory
-        self._recording_evidence_extractor_factory = recording_evidence_extractor_factory
+        self._evidence_extractor_factory = evidence_extractor_factory
         self._client_factory = client_factory
         self._embedding_factory = embedding_factory
         self._qdrant_factory = qdrant_factory
@@ -316,26 +275,29 @@ class AgentService:
         worker_config = self._config.agent.recording_evidence
         if not worker_config.enabled or self._stopping.is_set():
             return
-        sources = {source.id: source for source in self._config.sources}
-        extractor = self._recording_evidence_extractor_factory(
-            sources=sources,
-            config=worker_config,
-            evidence_roots=self._config.agent.evidence_roots,
-        )
+        extractor = self._create_evidence_extractor()
         if self._stopping.is_set():
             return
         worker = self._recording_evidence_worker_factory(
             ledger_factory=self._ledger_factory,
             extractor=extractor,
             worker_id="ssv-recording-evidence-0",
-            lease_ms=_EVIDENCE_WORKER_LEASE_MS,
-            max_retries=_EVIDENCE_WORKER_MAX_RETRIES,
-            retry_delay_ms=_EVIDENCE_WORKER_RETRY_DELAY_MS,
-            poll_interval_seconds=_EVIDENCE_WORKER_POLL_SECONDS,
+            lease_ms=worker_config.lease_ms,
+            max_retries=worker_config.max_retries,
+            retry_delay_ms=worker_config.retry_delay_ms,
+            poll_interval_seconds=worker_config.poll_interval_ms / 1000,
         )
         if self._stopping.is_set():
             return
         self._start_worker_thread("ssv-agent-recording-evidence", worker.run)
+
+    def _create_evidence_extractor(self) -> EvidenceExtractor:
+        """创建唯一的 SSV cache 取证实现。"""
+        return self._evidence_extractor_factory(
+            config=self._config.agent.recording_evidence,
+            evidence_cache=self._config.evidence_cache,
+            evidence_roots=self._config.agent.evidence_roots,
+        )
 
     def _create_consumer(self) -> EventConsumer:
         """让内置 consumer 使用包含 recording 策略的独立账本连接。"""
@@ -392,37 +354,8 @@ class AgentService:
                 if os.environ.get(name, _ENV_UNSET) != value:
                     self._environment.setdefault(name, value)
 
-        backend, model = _embedding_settings(self._config)
-        self._set_owned_environment("SSV_EMBEDDING_BACKEND", backend)
-        self._set_owned_environment("SSV_EMBEDDING_MODEL", model)
-        self._set_owned_environment(
-            "SSV_EMBEDDING_BASE_URL",
-            self._config.agent.indexing.embedding_base_url,
-        )
-        self._set_owned_environment(
-            "SSV_EMBEDDING_QUERY_TEXT_TYPE",
-            self._config.agent.indexing.query_text_type,
-        )
-        self._set_owned_environment(
-            "SSV_EVENT_DB_PATH",
-            str(_resolve_agent_path(self._config.agent.event_db_path).resolve()),
-        )
-        self._set_owned_environment(
-            "SSV_OUTPUTS_DIR",
-            str(_resolve_agent_path(self._config.agent.output_dir).resolve()),
-        )
-        knowledge = self._config.agent.knowledge
-        self._set_owned_environment("SSV_KNOWLEDGE_BACKEND", knowledge.backend)
-        self._set_owned_environment(
-            "SSV_QDRANT_PATH",
-            str(_resolve_agent_path(knowledge.qdrant_path).resolve()),
-        )
-        self._set_owned_environment("SSV_QDRANT_URL", knowledge.qdrant_url)
-        self._set_owned_environment("SSV_KNOWLEDGE_MIN_SCORE", str(knowledge.min_score))
-        self._set_owned_environment(
-            "SSV_EVIDENCE_ROOTS",
-            json.dumps(self._config.agent.evidence_roots),
-        )
+        for name, value in _runtime_environment(self._config).items():
+            self._set_owned_environment(name, value)
 
     def _set_owned_environment(self, name: str, value: str | None) -> None:
         self._environment.setdefault(name, os.environ.get(name, _ENV_UNSET))
@@ -461,66 +394,17 @@ class AgentService:
     @staticmethod
     def _reset_deerflow_runtime_caches(errors: list[BaseException]) -> None:
         try:
-            from deerflow.config.app_config import reset_app_config
-            from deerflow.config.extensions_config import reset_extensions_config
-
-            reset_extensions_config()
-            reset_app_config()
+            reset_deerflow_runtime_caches()
         except BaseException as exc:
             errors.append(exc)
 
     def _create_review_config(self) -> Path:
         """为复核 client 创建配置工具和 RBAC 均受限的临时 DeerFlow 配置。"""
-        _load_review_view_image_tool()
-        agent_root = _agent_root()
-        source_config = agent_root / "config.yaml"
-        if not source_config.is_file():
-            source_config = agent_root / "config.example.yaml"
-        with open(source_config, encoding="utf-8") as handle:
-            config = yaml.safe_load(handle) or {}
-        if not isinstance(config, dict):
-            raise ValueError("invalid DeerFlow configuration")
-        configured_names = {
-            item.get("name")
-            for item in config.get("tools", [])
-            if isinstance(item, dict)
-        }
-        if "view_image" in configured_names:
-            raise ValueError("review config cannot shadow DeerFlow builtin view_image")
-        tools = [
-            item
-            for item in config.get("tools", [])
-            if isinstance(item, dict)
-            and item.get("name") in _REVIEW_CONFIGURED_TOOL_NAMES
-        ]
-        if {item.get("name") for item in tools} != _REVIEW_CONFIGURED_TOOL_NAMES:
-            raise ValueError("review tool configuration is incomplete")
-        groups = {item.get("group") for item in tools}
-        config["tools"] = tools
-        config["tool_groups"] = [
-            item
-            for item in config.get("tool_groups", [])
-            if isinstance(item, dict) and item.get("name") in groups
-        ]
-        config["authorization"] = {
-            "enabled": True,
-            "fail_closed": True,
-            "default_role": "ssv_review",
-            "provider": {
-                "use": "deerflow.authz.rbac:RbacAuthorizationProvider",
-                "config": {
-                    "roles": {
-                        "ssv_review": {
-                            "tools": {"allow": sorted(_REVIEW_TOOL_NAMES)},
-                        }
-                    }
-                },
-            },
-        }
-        path = self._ensure_review_config_dir() / "config.yaml"
-        with open(path, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
-        return path
+        return create_review_config(
+            self._ensure_review_config_dir(),
+            _agent_root(),
+            load_view_image_tool=_load_review_view_image_tool,
+        )
 
     def _start_worker_thread(self, name: str, run: Callable[[Event], None]) -> None:
         if self._stopping.is_set():

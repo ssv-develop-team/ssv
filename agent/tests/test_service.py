@@ -112,12 +112,12 @@ def test_agent_service_starts_recording_worker_before_review_worker() -> None:
     recording = FakeWorker("recording")
     review = FakeWorker("review")
     index = FakeWorker("index")
-    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True}, "review": {"enabled": True}, "indexing": {"enabled": True}}})
+    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "evidence_cache": {"enabled": True, "directory": "/tmp"}, "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True}, "review": {"enabled": True}, "indexing": {"enabled": True}}})
     runtime = service.AgentService(
         cfg,
         consumer_factory=lambda _: FakeConsumer(),
         recording_evidence_worker_factory=lambda **_: recording,
-        recording_evidence_extractor_factory=lambda **_: object(),
+        evidence_extractor_factory=lambda **_: object(),
         review_worker_factory=lambda **_: review,
         index_worker_factory=lambda **_: index,
     )
@@ -138,22 +138,58 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
             return None
         def stop(self):
             return None
-    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True}}})
+    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "evidence_cache": {"enabled": True, "directory": "/tmp"}, "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True, "poll_interval_ms": 250, "lease_ms": 5000, "max_retries": 4, "retry_delay_ms": 2000}}})
     def extractor_factory(**kwargs):
         observed["extractor"] = kwargs
         return object()
     def worker_factory(**kwargs):
         observed["worker"] = kwargs
         return FakeWorker()
-    runtime = service.AgentService(cfg, recording_evidence_worker_factory=worker_factory, recording_evidence_extractor_factory=extractor_factory, consumer_factory=SpyConsumer)
+    runtime = service.AgentService(cfg, recording_evidence_worker_factory=worker_factory, evidence_extractor_factory=extractor_factory, consumer_factory=SpyConsumer)
     runtime.start()
     runtime.stop(join_timeout_seconds=1)
-    assert observed["extractor"] == {"sources": {"camera-1": cfg.sources[0]}, "config": cfg.agent.recording_evidence, "evidence_roots": ["/tmp"]}
+    assert observed["extractor"] == {"config": cfg.agent.recording_evidence, "evidence_cache": cfg.evidence_cache, "evidence_roots": ["/tmp"]}
     worker_args = observed["worker"]
-    assert worker_args["lease_ms"] == service._EVIDENCE_WORKER_LEASE_MS == 30_000
-    assert worker_args["max_retries"] == service._EVIDENCE_WORKER_MAX_RETRIES == 3
-    assert worker_args["retry_delay_ms"] == service._EVIDENCE_WORKER_RETRY_DELAY_MS == 2000
-    assert worker_args["poll_interval_seconds"] == service._EVIDENCE_WORKER_POLL_SECONDS == 1.0
+    assert worker_args["lease_ms"] == cfg.agent.recording_evidence.lease_ms == 5_000
+    assert worker_args["max_retries"] == cfg.agent.recording_evidence.max_retries == 4
+    assert worker_args["retry_delay_ms"] == cfg.agent.recording_evidence.retry_delay_ms == 2_000
+    assert worker_args["poll_interval_seconds"] == 0.25
+
+
+def test_evidence_extractor_factory_receives_shared_cache_config(tmp_path: Path) -> None:
+    observed: dict[str, object] = {}
+    cfg = SsvConfig.model_validate(
+        {
+            "evidence_cache": {
+                "enabled": True,
+                "directory": str(tmp_path / "cache"),
+            },
+            "agent": {
+                "evidence_roots": [str(tmp_path)],
+                "recording_evidence": {
+                    "enabled": True,
+                },
+            },
+        }
+    )
+
+    def extractor_factory(**kwargs: object) -> object:
+        observed.update(kwargs)
+        return object()
+
+    runtime = service.AgentService(
+        cfg,
+        evidence_extractor_factory=extractor_factory,
+    )
+
+    extractor = runtime._create_evidence_extractor()
+
+    assert extractor is not None
+    assert observed == {
+        "config": cfg.agent.recording_evidence,
+        "evidence_cache": cfg.evidence_cache,
+        "evidence_roots": [str(tmp_path)],
+    }
 
 
 def test_builtin_consumer_factory_receives_recording_ledger(monkeypatch) -> None:
@@ -391,6 +427,7 @@ def test_indexing_uses_same_embedding_settings_as_search_environment(monkeypatch
     monkeypatch.setenv("SSV_EMBEDDING_MODEL", "operator-model")
     monkeypatch.setenv("SSV_EVIDENCE_ROOTS", '["/operator/evidence"]')
     monkeypatch.delenv("SSV_KNOWLEDGE_BACKEND", raising=False)
+    monkeypatch.delenv("SSV_KNOWLEDGE_RULES_DIR", raising=False)
     monkeypatch.delenv("SSV_QDRANT_PATH", raising=False)
     monkeypatch.delenv("SSV_KNOWLEDGE_MIN_SCORE", raising=False)
     cfg = SsvConfig.model_validate(
@@ -424,6 +461,7 @@ def test_indexing_uses_same_embedding_settings_as_search_environment(monkeypatch
                     os.environ["SSV_EMBEDDING_MODEL"],
                     os.environ["SSV_EVIDENCE_ROOTS"],
                     os.environ["SSV_KNOWLEDGE_BACKEND"],
+                    os.environ["SSV_KNOWLEDGE_RULES_DIR"],
                     os.environ["SSV_QDRANT_PATH"],
                     os.environ["SSV_KNOWLEDGE_MIN_SCORE"],
                 )
@@ -441,6 +479,7 @@ def test_indexing_uses_same_embedding_settings_as_search_environment(monkeypatch
         "/models/bge-m3",
         '["/configured/evidence"]',
         "qdrant",
+        str(service._agent_root() / "knowledge/rules"),
         str(service._agent_root() / "custom/qdrant"),
         "0.65",
     )

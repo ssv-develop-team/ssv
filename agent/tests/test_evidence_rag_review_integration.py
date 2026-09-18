@@ -10,7 +10,7 @@ from ssv_agent.config import RecordingEvidenceConfig
 from ssv_agent.event_store import EventLedger, JobKind
 from ssv_agent.knowledge.schema import Chunk, RetrievalResult
 from ssv_agent.review_context import ReviewContext
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact
+from ssv_agent.evidence_provider import EvidenceArtifact
 from ssv_agent.workers import RecordingEvidenceWorker, ReviewWorker
 
 
@@ -25,7 +25,7 @@ def _record_event(db_path: Path, root: Path) -> None:
         ))
 
 
-def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
+def _artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:
     directory = root / "derived" / "evt-1"
     directory.mkdir(parents=True)
     values = [
@@ -38,7 +38,7 @@ def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
     for kind, name, mime_type in values:
         path = directory / name
         path.write_bytes(name.encode())
-        result.append(RecordingEvidenceArtifact(
+        result.append(EvidenceArtifact(
             kind=kind, path=path,
             sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             mime_type=mime_type, size=path.stat().st_size, mtime=path.stat().st_mtime,
@@ -78,7 +78,10 @@ def test_evidence_rules_review_then_index_job_form_one_traceable_chain(
             return RetrievalResult(
                 query=query, backend="fake", chunks=[Chunk(
                     chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
-                    metadata={"source": "rules.md", "rule_id": "r1", "section": "5.2"},
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
                 )],
             )
 
@@ -91,7 +94,7 @@ def test_evidence_rules_review_then_index_job_form_one_traceable_chain(
             "claims": [], "explanation": "证据和规则均可追溯",
             "rule_citations": [{
                 "chunk_id": "chunk-1", "source": "rules.md",
-                "rule_id": "r1", "section": "5.2",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
             }],
         })
 

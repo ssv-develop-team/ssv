@@ -9,7 +9,7 @@ import pytest
 import ssv_agent.event_store.ledger as ledger_module
 from ssv_agent.event_store import EventLedger, JobKind, LeaseLostError
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact
+from ssv_agent.evidence_provider import EvidenceArtifact
 from ssv_agent.result import ReviewResult
 from ssv_agent.review_context import ReviewContext
 
@@ -40,7 +40,7 @@ def _enabled_config() -> RecordingEvidenceConfig:
     return RecordingEvidenceConfig(enabled=True, clip_after_ms=2500)
 
 
-def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
+def _artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:
     derived = root / "derived" / "evt-1"
     derived.mkdir(parents=True)
     values = [("clip", "context.mp4", "video/mp4"), ("frame", "frame-01.jpg", "image/jpeg"),
@@ -49,10 +49,39 @@ def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
     for kind, name, mime in values:
         path = derived / name
         path.write_bytes(name.encode())
-        result.append(RecordingEvidenceArtifact(kind=kind, path=path,
+        result.append(EvidenceArtifact(kind=kind, path=path,
             sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
             mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
     return tuple(result)
+
+
+def test_record_keeps_ingress_evidence_interval_unknown_with_event_anchor(
+    tmp_path: Path,
+) -> None:
+    frame = tmp_path / "frame.jpg"
+    clip = tmp_path / "clip.mp4"
+    frame.write_bytes(b"frame")
+    clip.write_bytes(b"clip")
+    context = _context().model_copy(
+        update={
+            "frame_path": str(frame),
+            "clip_path": str(clip),
+            "source_pts": 10_000_000_000,
+            "stream_generation": 7,
+        }
+    )
+
+    with EventLedger(tmp_path / "events.db", evidence_roots=[str(tmp_path)]) as ledger:
+        ledger.record(context)
+        case = ledger.get_case("evt-1")
+
+    assert case is not None
+    assert case.source_pts == 10_000_000_000
+    assert case.stream_generation == 7
+    assert len(case.evidence) == 2
+    assert all(item.source_pts_start is None for item in case.evidence)
+    assert all(item.source_pts_end is None for item in case.evidence)
+    assert all(item.stream_generation is None for item in case.evidence)
 
 
 def test_enabled_recording_evidence_creates_only_delayed_extract_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,6 +130,43 @@ def test_complete_evidence_extract_registers_four_refs_and_one_review(tmp_path: 
     assert review is not None
 
 
+def test_complete_evidence_extract_persists_artifact_timing(tmp_path: Path) -> None:
+    artifacts = list(_artifacts(tmp_path))
+    for index, artifact in enumerate(artifacts):
+        artifacts[index] = EvidenceArtifact(
+            kind=artifact.kind,
+            path=artifact.path,
+            sha256=artifact.sha256,
+            mime_type=artifact.mime_type,
+            size=artifact.size,
+            mtime=artifact.mtime,
+            source_pts_start=7_500_000_000,
+            source_pts_end=12_500_000_000,
+            stream_generation=7,
+        )
+
+    with EventLedger(
+        tmp_path / "events.db",
+        evidence_roots=[str(tmp_path)],
+        recording_evidence=_enabled_config(),
+    ) as ledger:
+        ledger.record(_context())
+        job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "extractor", 1000)
+        assert job is not None
+        ledger.complete_evidence_extract_job(job, "extractor", tuple(artifacts))
+        case = ledger.get_case("evt-1")
+
+    assert case is not None
+    assert {
+        (
+            item.source_pts_start,
+            item.source_pts_end,
+            item.stream_generation,
+        )
+        for item in case.evidence
+    } == {(7_500_000_000, 12_500_000_000, 7)}
+
+
 def test_complete_evidence_extract_is_idempotent(tmp_path: Path) -> None:
     artifacts = _artifacts(tmp_path)
     with EventLedger(tmp_path / "events.db", evidence_roots=[str(tmp_path)], recording_evidence=_enabled_config()) as ledger:
@@ -138,7 +204,7 @@ def test_complete_evidence_extract_rejects_path_outside_root(tmp_path: Path) -> 
     artifacts = list(_artifacts(tmp_path))
     outside = tmp_path.parent / "outside.mp4"
     outside.write_bytes(b"outside")
-    artifacts[0] = RecordingEvidenceArtifact(kind="clip", path=outside,
+    artifacts[0] = EvidenceArtifact(kind="clip", path=outside,
         sha256="x", mime_type="video/mp4", size=7, mtime=outside.stat().st_mtime)
     with EventLedger(tmp_path / "events.db", evidence_roots=[str(tmp_path)], recording_evidence=_enabled_config()) as ledger:
         ledger.record(_context())
@@ -151,7 +217,7 @@ def test_complete_evidence_extract_rejects_path_outside_root(tmp_path: Path) -> 
 def test_complete_evidence_extract_rejects_artifact_with_wrong_mime_type(tmp_path: Path) -> None:
     artifacts = list(_artifacts(tmp_path))
     clip = artifacts[0]
-    artifacts[0] = RecordingEvidenceArtifact(
+    artifacts[0] = EvidenceArtifact(
         kind=clip.kind,
         path=clip.path,
         sha256=clip.sha256,

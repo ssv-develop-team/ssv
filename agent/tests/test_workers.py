@@ -13,7 +13,7 @@ from ssv_agent.review_context import ReviewContext
 from ssv_agent.prompt import build_review_prompt
 from ssv_agent.result import ReviewResult
 from ssv_agent.knowledge.schema import Chunk, RetrievalResult
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact, RecordingEvidenceError
+from ssv_agent.evidence_provider import EvidenceArtifact, EvidenceExtractionError
 from ssv_agent.config import RecordingEvidenceConfig
 from ssv_agent.workers import _LeaseHeartbeat, IndexWorker, ReviewWorker, RecordingEvidenceWorker
 
@@ -24,7 +24,14 @@ def _allow_test_evidence_roots(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SSV_EVIDENCE_ROOTS", json.dumps([str(tmp_path)]))
 
 
-def _record_case(db_path: Path, evidence_path: Path) -> str:
+def _record_case(
+    db_path: Path,
+    evidence_path: Path,
+    *,
+    event_type: str | None = None,
+    rule_id: str | None = None,
+    rule_version: str | None = None,
+) -> str:
     evidence_path.write_bytes(b"frame")
     with EventLedger(db_path) as ledger:
         ledger.record(
@@ -34,6 +41,9 @@ def _record_case(db_path: Path, evidence_path: Path) -> str:
                 source="camera-1",
                 timestamp_ms=1000,
                 frame_id=4,
+                event_type=event_type,
+                rule_id=rule_id,
+                rule_version=rule_version,
                 frame_path=str(evidence_path),
             )
         )
@@ -73,14 +83,14 @@ def _record_recording_case(db_path: Path, root: Path) -> None:
         )
 
 
-def _recording_artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
+def _recording_artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:
     derived = root / "derived" / "case-1"
     derived.mkdir(parents=True)
     artifacts = []
     for kind, name, mime in [("clip", "context.mp4", "video/mp4"), ("frame", "frame-01.jpg", "image/jpeg"), ("frame", "frame-02.jpg", "image/jpeg"), ("frame", "frame-03.jpg", "image/jpeg")]:
         path = derived / name
         path.write_bytes(name.encode())
-        artifacts.append(RecordingEvidenceArtifact(kind=kind, path=path, sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(), mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
+        artifacts.append(EvidenceArtifact(kind=kind, path=path, sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(), mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
     return tuple(artifacts)
 
 
@@ -113,7 +123,7 @@ def test_recording_worker_marks_retryable_failure_and_does_not_extract_after_lim
         def extract(self, case):
             nonlocal calls
             calls += 1
-            raise RecordingEvidenceError("window unavailable", retryable=True)
+            raise EvidenceExtractionError("window unavailable", retryable=True)
 
     worker = RecordingEvidenceWorker(
         ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
@@ -129,7 +139,7 @@ def test_recording_worker_nonretryable_failure_marks_event_manual_review(tmp_pat
 
     class Extractor:
         def extract(self, case):
-            raise RecordingEvidenceError("unsafe recording input", retryable=False)
+            raise EvidenceExtractionError("unsafe recording input", retryable=False)
 
     worker = RecordingEvidenceWorker(
         ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
@@ -250,19 +260,30 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "events.db"
-    evidence_id = _record_case(db_path, tmp_path / "frame.jpg")
+    evidence_id = _record_case(
+        db_path,
+        tmp_path / "frame.jpg",
+        event_type="person_without_helmet",
+        rule_id="r1",
+        rule_version="v1",
+    )
     monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
     calls: list[str] = []
+    observed_filters: dict[str, str] = {}
 
     class Retriever:
         async def retrieve(self, query, *, top_k=5, filters=None):
             calls.append("retriever")
+            observed_filters.update(filters or {})
             return RetrievalResult(
                 query=query,
                 backend="fake",
                 chunks=[Chunk(
                     chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
-                    metadata={"source": "rules.md", "rule_id": "r1", "section": "5.2"},
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
                 )],
             )
 
@@ -275,7 +296,7 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
             "claims": [], "explanation": "规则和证据支持结论",
             "rule_citations": [{
                 "chunk_id": "chunk-1", "source": "rules.md",
-                "rule_id": "r1", "section": "5.2",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
             }],
         })
 
@@ -287,6 +308,11 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
 
     assert worker.run_once() is True
     assert calls == ["retriever", "runner"]
+    assert observed_filters == {
+        "event_type": "person_without_helmet",
+        "rule_id": "r1",
+        "rule_version": "v1",
+    }
 
 
 def test_review_worker_refreshes_evidence_before_constructing_context(

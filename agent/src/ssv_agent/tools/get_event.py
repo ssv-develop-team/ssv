@@ -47,6 +47,20 @@ def event_case_payload(case: EventCase) -> dict[str, Any]:
         "rule_id": case.rule_id,
         "rule_version": case.rule_version,
         "rule_facts": case.rule_facts,
+        "episode_id": case.episode_id,
+        "episode_state": (
+            case.episode_state.value if case.episode_state is not None else None
+        ),
+        "episode_close_reason": (
+            case.episode_close_reason.value
+            if case.episode_close_reason is not None
+            else None
+        ),
+        "episode_start_pts": case.episode_start_pts,
+        "episode_last_seen_pts": case.episode_last_seen_pts,
+        "episode_end_pts": case.episode_end_pts,
+        "evidence_window_start": case.evidence_window_start,
+        "evidence_window_end": case.evidence_window_end,
         "revision": case.revision,
         "status": case.status,
         "detections": detections,

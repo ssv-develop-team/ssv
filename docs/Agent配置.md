@@ -89,42 +89,57 @@ agent:
 
 ## 录像上下文证据
 
-启用 `agent.recording_evidence` 后，Agent 会在事件墙钟附近生成一个 clip 和三张帧，取证完成后才创建视觉复核任务。录像功能由仓库外的 MediaMTX 配置管理，配置文件路径固定为：
+启用 `agent.recording_evidence` 后，Agent 只从 SSV GStreamer pipeline 的短时 cache 读取事件上下文，生成一个 clip 和三张帧，取证完成后才创建视觉复核任务。这里不再配置取证 provider，也不读取外部录像服务的目录。
 
-```text
-/mnt/work/ai-video-analysis/mediamtx/mediamtx.yml
-```
+### SSV cache 取证
 
-MediaMTX 的 `/stream` path 应保持 `source: publisher`，并将原始 fMP4 分段写入证据根目录：
-
-```text
-artifacts/evidence/
-  recordings/stream/       # MediaMTX 原始分段，按 1 天保留
-  derived/<event_id>/      # Agent 派生证据，长期保留
-    context.mp4
-    frame-01.jpg
-    frame-02.jpg
-    frame-03.jpg
-    manifest.json
-```
-
-生产环境应将 `agent.evidence_roots[0]` 配置为上述 `artifacts/evidence` 的绝对路径，并确保 MediaMTX 与 Agent 对该目录具有相应读写权限。只有 SQLite `EventLedger` 已登记的文件会被 `evidence_reader` 复制给模型；模型收到的是 DeerFlow 虚拟输出路径，不会获得 `recordings` 或宿主机绝对路径。
-
-配置示例：
+先在 runner 配置中启用 `evidence_cache`，再启用 Agent 取证 worker：
 
 ```yaml
+evidence_cache:
+  enabled: true
+  directory: "/var/lib/ssv/evidence-cache"
+  segment_duration_ms: 10000
+  retention_ms: 120000
+  max_bytes_mb: 512
+
 agent:
   evidence_roots:
-    - "/mnt/work/ai-video-analysis/ssv/artifacts/evidence"
+    - "/var/lib/ssv/evidence-cache"
   recording_evidence:
     enabled: true
     clip_before_ms: 2500
     clip_after_ms: 2500
+    merge_gap_ms: 3000
+    lost_grace_ms: 3000
+    silence_timeout_ms: 30000
+    max_episode_ms: 30000
 ```
 
-默认窗口为事件时间点前后各 2.5 秒，共 5 秒；三帧分别位于 `T-1000ms`、`T` 和 `T+1000ms`。`clip_before_ms` 与 `clip_after_ms` 都不得小于 1000：三帧偏移固定为 `-1000`/`0`/`+1000` 毫秒，窗口更小会让帧落到窗口之外。`timestamp_ms` 来自发布端墙钟，只能标记为 `wall_clock_approximate`，因此 clip/帧是墙钟附近的上下文，不应被描述为检测同帧证据。
+`evidence_cache.directory` 必须是绝对路径，并且在 `agent.evidence_roots` 的某个根目录内；否则 Agent 拒绝启动。启用 `recording_evidence` 时，`evidence_cache.enabled` 也必须为 true。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
 
-原始 `recordings/` 分段由 MediaMTX 按 `recordDeleteAfter: 1d` 自动清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。窗口缺段、录像尚未就绪或达到重试上限时，事件状态进入 `manual_review`，不创建无图 review job；人工复核应据此判断证据不可用，不能将失败当作“没有目标”结论。
+缓存只保留 `retention_ms` 内的分段，并受 `max_bytes_mb` 限制；它不是长期录像。缓存运行中的分段收尾或 sidecar 写入失败时，runner 的解码、检测、跟踪和 Redis 发布仍继续；Agent 会按 worker 重试策略等待窗口，最终失败则进入 `manual_review`。首次启动时若缓存目录无法创建或 GStreamer 能力缺失，runner 会报告 capability failure 并拒绝启动，避免启用后静默丢失全部证据。
+
+`recording_evidence` 与 `review`、`indexing` 共用持久 Worker 的运行参数接口。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，默认重试间隔为 2 秒；这些值可以在 `recording_evidence` 下单独调整。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
+
+Agent 不再为每一条重复检测单独取证。相同 source、事件规则和 `stream_generation` 内，
+相邻 `source_pts` 观测会合并为一个 episode；`merge_gap_ms` 控制可合并间隔，
+`lost_grace_ms` 让 `LOST` 先等待 tracker 恢复，`silence_timeout_ms` 处理没有显式终态的
+静默事件，`max_episode_ms` 防止异常事件无限延长。episode 收到 `DEAD`、静默超时、
+代际变化或最大时长时关闭，并只生成一个 evidence extract job。
+
+生产 `EventConsumer` 在取证开启时使用 Episode 聚合入口；`EventLedger.record()` 仍是
+历史调用方和测试使用的兼容入口，直接调用不会进行 Episode 聚合。Episode 后续观测的
+`event_id` 只属于 `episode_observations`，复核、取证和索引都使用首次观测的
+`canonical_event_id`。Consumer 停止时只 flush 已到期 Episode，不强制截断仍开放的
+Episode；明确结束事件或后续超时会冻结窗口。
+
+关闭 episode 后，精确窗口为 episode 首次观测前 `clip_before_ms` 加上最后观测后
+`clip_after_ms`，使用半开区间 `[source_pts_start, source_pts_end)`。三帧仍位于 canonical
+事件时间点的 `T-1000ms`、`T`、`T+1000ms`；episode 元数据和冻结窗口会随 `get_event` 的
+可读投影返回。`timestamp_ms` 只用于等待 post-roll，不替代媒体 PTS。
+
+SSV cache 分段由 `retention_ms` 和 `max_bytes_mb` 控制清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。WVP、NVR 或 MediaMTX 可以继续承担长期录像和历史回放，但 Agent 不再适配它们的录像目录。窗口缺段、缓存尚未就绪或达到重试上限时，事件状态进入 `manual_review`，不创建无图 review job；人工复核应据此判断证据不可用，不能将失败当作“没有目标”结论。Episode 只收敛事件生命周期和取证窗口，不控制 GStreamer cache 的连续写盘。
 
 ## DeerFlow 复核 worker
 
@@ -148,7 +163,7 @@ SSV_AGENT_BASE_URL=https://api.example.com/v1
 agent:
   model_name: "your-vision-model"
   evidence_roots:
-    - "/var/lib/ssv/evidence"
+    - "/var/lib/ssv/evidence-cache"
   review:
     enabled: true
     poll_interval_ms: 1000
@@ -205,6 +220,7 @@ Agent 的持久化默认位置和配置字段：
 | 默认位置 | YAML 字段 | 内容 |
 | --- | --- | --- |
 | `data/events.db` | `agent.event_db_path` | SQLite EventLedger |
+| `knowledge/rules` | `agent.knowledge.rules_dir` | Agent 管理的版本化规则目录 |
 | `agent/data/qdrant` | `agent.knowledge.qdrant_path` | 本地 Qdrant |
 | `outputs` | `agent.output_dir` | 复核 JSON 结果 |
 | `http://localhost:6333` | `agent.knowledge.qdrant_url` | Docker Qdrant 服务 |
@@ -218,12 +234,40 @@ Qdrant 只保存可重建的语义索引。embedding backend、model 或 schema 
 
 ## 规则知识检索
 
-`rule_retriever` 默认使用 `local_markdown` 后端，读取 `agent/knowledge/` 下的 `.md`、`.txt`
-规章文件。后端按编号条款切分内容，在内存中检索并最多返回两条带来源的规则片段；规章
-文件修改后会在下一次检索自动重建索引。
+`rule_retriever` 默认使用 `local_markdown` 后端，递归读取 `agent.knowledge.rules_dir`
+（默认 `agent/knowledge/rules`）下的 `.md`、`.txt` 规则文件。目录由
+`discover_rule_documents()` 统一解析：跳过 `_templates` 和隐藏目录，只接收带
+`kind: rule` front matter 的文件，按编号条款切分正文，并在文件变化后自动重建内存索引。
 
-当前已放入 `作业现场安全帽佩戴要求.md` 和 `GB+26860-2011 (1).md`。如需临时使用原有固定样例，将
-`agent.knowledge.backend` 设置为 `"mock"`。
+规则文件的身份由 `rule_id` 和 `version` 共同决定，不能从文件名猜测；同一身份重复出现会使
+发现失败。模板和示例位于：
+
+```text
+agent/knowledge/rules/_templates/rule.md
+agent/knowledge/rules/gb26860-helmet/v1/rule.md
+agent/knowledge/rules/gb26860-helmet/v2/rule.md
+```
+
+每个规则文件的正文前使用 YAML front matter：
+
+```yaml
+---
+kind: rule
+rule_id: gb26860-helmet
+version: v1
+event_type: person_without_helmet
+severity: high
+aliases: [安全帽]
+---
+```
+
+检索 chunk 会携带相对于 `rules_dir` 的 `source`、`rule_id`、`rule_version`、`section` 和
+`content_hash`；front matter 不会被当作规则正文。`rule_retriever` 支持 `source`、`rule_id`、
+`rule_version` 和 `event_type` 过滤。事件同时带有完整 `rule_id + rule_version` 时，复核链路
+进行精确版本过滤；没有规则引用时只根据检测事实召回候选，不把传输层 `type: detection`
+伪装成业务事件类型。
+
+如需临时使用固定测试样例，将 `agent.knowledge.backend` 设置为 `"mock"`。
 
 本地规章检索不依赖 Qdrant、embedding 或 index worker。
 
@@ -236,6 +280,7 @@ agent:
     embedding_model: "/opt/models/bge-m3"
   knowledge:
     backend: "qdrant"
+    rules_dir: "knowledge/rules"
     qdrant_path: "data/qdrant"
     qdrant_url: "http://localhost:6333"
     min_score: 0.5
@@ -250,13 +295,15 @@ uv sync --extra dev --extra bge-m3
 uv run --extra bge-m3 python -m ssv_agent.knowledge_ingest --config ../config/ssv.yaml
 ```
 
-入库命令会按最多 20 条文本调用 embedding，成功后只保留当前规章对应的 chunk；规章目录
-为空会清空当前规则索引，目录不存在或 embedding 失败会返回错误。未创建或为空的 Qdrant
+入库命令会按最多 20 条文本调用 embedding，成功后只保留当前规则目录对应的 chunk，并保留
+`rule_version`、`content_hash` 和事件类型 metadata。规则目录没有有效版本化文档、目录不存在
+或 embedding 失败会返回错误；不会把旧顶层 `agent/knowledge/` 文件静默混入索引。未创建或为空的 Qdrant
 索引会显式报告为不可用，不会返回随机条款。`min_score` 用于过滤低相似度结果，没有达到
 阈值时返回“无知识依据”。
 
 复核结果 JSON 的确定性结论还会写入 `rule_citations`，每项包含 `chunk_id`、`source`、
-`rule_id` 和 `section`。这些字段必须与本次预检索实际返回的规则片段一致；没有可用规则时，
+`rule_id`、`rule_version` 和 `section`。这些字段必须与本次预检索实际返回的规则片段一致；
+prompt 同时展示 `content_hash` 供人工核对。没有可用规则、规则检索失败或引用版本不一致时，
 结果只能是 `uncertain`。
 
 ## 运行时缓存与 Redis 运维

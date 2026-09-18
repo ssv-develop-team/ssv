@@ -17,10 +17,12 @@ CREATE TABLE IF NOT EXISTS events (
     stream_generation INTEGER,
     source_pts INTEGER,
     event_type TEXT,
+    event_phase TEXT,
     severity TEXT,
     rule_id TEXT,
     rule_version TEXT,
     rule_facts_json TEXT NOT NULL DEFAULT '{}',
+    episode_id TEXT,
     revision INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     verdict TEXT,
@@ -110,6 +112,48 @@ CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_detections_event ON detections(event_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_event ON evidence(event_id);
+
+CREATE TABLE IF NOT EXISTS episodes (
+    episode_id TEXT PRIMARY KEY,
+    canonical_event_id TEXT NOT NULL REFERENCES events(event_id),
+    source TEXT NOT NULL,
+    event_type TEXT,
+    rule_id TEXT,
+    rule_version TEXT,
+    stream_generation INTEGER NOT NULL,
+    start_pts INTEGER NOT NULL,
+    last_seen_pts INTEGER NOT NULL,
+    last_seen_timestamp_ms INTEGER NOT NULL,
+    end_pts INTEGER,
+    state TEXT NOT NULL CHECK (state IN ('open', 'lost_grace', 'closed')),
+    close_reason TEXT,
+    evidence_window_start INTEGER,
+    evidence_window_end INTEGER,
+    event_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_active_key
+    ON episodes(source, event_type, rule_id, rule_version, stream_generation, state, last_seen_pts);
+CREATE INDEX IF NOT EXISTS idx_episodes_canonical_event ON episodes(canonical_event_id);
+
+CREATE TABLE IF NOT EXISTS episode_observations (
+    observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
+    event_id TEXT NOT NULL UNIQUE,
+    ingress_id TEXT NOT NULL UNIQUE,
+    source_pts INTEGER,
+    timestamp_ms INTEGER NOT NULL,
+    event_phase TEXT,
+    track_states_json TEXT NOT NULL DEFAULT '[]',
+    dedup_decision TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    UNIQUE (episode_id, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_episode_observations_episode
+    ON episode_observations(episode_id, observation_id);
 """
 
 
@@ -118,6 +162,8 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "ingress_id": "TEXT",
         "stream_generation": "INTEGER",
         "source_pts": "INTEGER",
+        "event_phase": "TEXT",
+        "episode_id": "TEXT",
         "rule_id": "TEXT",
         "rule_version": "TEXT",
         "rule_facts_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -211,6 +257,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_events_ingress_id ON events(ingress_id)
             WHERE ingress_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_events_episode ON events(episode_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_event_evidence_id
             ON evidence(event_id, evidence_id) WHERE evidence_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_reviews_event ON reviews(event_id, revision DESC);

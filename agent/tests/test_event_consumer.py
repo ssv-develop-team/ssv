@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,10 @@ def test_default_ledger_factory_propagates_recording_evidence_config(monkeypatch
     monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kwargs: FakeRedis())
     config = SsvConfig.model_validate(
         {
+            "evidence_cache": {
+                "enabled": True,
+                "directory": str(tmp_path),
+            },
             "agent": {
                 "evidence_roots": [str(tmp_path)],
                 "recording_evidence": {"enabled": True},
@@ -252,6 +257,79 @@ def test_handle_event_acks_deterministic_duplicate_without_recording(
         assert ledger.get_case("123-0") is None
 
 
+def test_dedup_skip_updates_episode_and_terminal_event_creates_one_extract_job(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    db_path = tmp_path / "events.db"
+    monkeypatch.setenv("SSV_EVENT_DB_PATH", str(db_path))
+    fake = FakeRedis()
+    monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kwargs: fake)
+    fake.keys[_track_key("ssv:agent:dedup", "camera-1", 5)] = 30_000
+    config = SsvConfig.model_validate(
+        {
+            "evidence_cache": {"enabled": True, "directory": str(root)},
+            "agent": {
+                "evidence_roots": [str(root)],
+                "recording_evidence": {"enabled": True},
+            },
+        }
+    )
+    consumer = EventConsumer(config)
+    base_timestamp_ms = int(time.time() * 1000)
+
+    def publish(msg_id: str, pts: int, state: int, timestamp_ms: int) -> None:
+        consumer.handle_event(
+            msg_id,
+            {
+                "event": json.dumps(
+                    {
+                        "source": "camera-1",
+                            "timestamp_ms": timestamp_ms,
+                        "frame_id": state,
+                        "stream_generation": 7,
+                        "source_pts": pts,
+                        "event_type": "person_without_helmet",
+                        "detections": [
+                            {
+                                "class": "person",
+                                "class_id": 0,
+                                "confidence": 0.9,
+                                "track_id": 5,
+                                "track_state": state,
+                            }
+                        ],
+                    }
+                )
+            },
+        )
+
+    publish("1-0", 1_000_000_000, 0, base_timestamp_ms)
+    publish("2-0", 2_000_000_000, 1, base_timestamp_ms + 1_000)
+    publish("3-0", 2_100_000_000, 3, base_timestamp_ms + 1_100)
+
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(root)],
+        recording_evidence=config.agent.recording_evidence,
+    ) as ledger:
+        episode = ledger.get_episode("1-0")
+        jobs = [
+            job
+            for job in ledger.jobs_for_event("1-0")
+            if job.kind is JobKind.EVIDENCE_EXTRACT
+        ]
+
+    assert fake.acked == [("ssv:events", "ssv-agent", "1-0"),
+                          ("ssv:events", "ssv-agent", "2-0"),
+                          ("ssv:events", "ssv-agent", "3-0")]
+    assert episode is not None
+    assert episode.event_ids == ("1-0", "2-0", "3-0")
+    assert len(jobs) == 1
+
+
 def test_handle_event_acks_malformed_json(monkeypatch: Any) -> None:
     consumer, fake = make_consumer(monkeypatch)
 
@@ -342,7 +420,7 @@ def test_same_event_redelivery_after_ledger_failure_is_recorded_before_ack(
     assert fake.acked == [("ssv:events", "ssv-agent", "123-0")]
 
 
-def test_consumer_uses_payload_type_only_when_event_type_is_absent(monkeypatch: Any) -> None:
+def test_consumer_does_not_promote_transport_type_to_event_type(monkeypatch: Any) -> None:
     fake_ledger = RecordingLedger()
     fake = FakeRedis()
     monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kwargs: fake)
@@ -379,10 +457,7 @@ def test_consumer_uses_payload_type_only_when_event_type_is_absent(monkeypatch: 
         },
     )
 
-    assert [context.event_type for context in fake_ledger.records] == [
-        "legacy-alarm",
-        "new-alarm",
-    ]
+    assert [context.event_type for context in fake_ledger.records] == [None, "new-alarm"]
 
 
 def test_start_reclaims_pending_entries_and_processes_them_through_handle_event(

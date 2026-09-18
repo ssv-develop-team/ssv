@@ -16,10 +16,13 @@ _CONFIG_KEYS = frozenset(
         "display",
         "inference",
         "tracking",
+        "evidence_cache",
         "agent",
     }
 )
-_AGENT_CONFIG_KEYS = frozenset({"version", "logging", "redis", "sources", "agent"})
+_AGENT_CONFIG_KEYS = frozenset(
+    {"version", "logging", "redis", "sources", "evidence_cache", "agent"}
+)
 
 
 class _StrictConfigModel(BaseModel):
@@ -71,21 +74,64 @@ class AgentSourceConfig(_StrictConfigModel):
     uri: str = Field(min_length=1)
 
 
-class RecordingEvidenceConfig(_StrictConfigModel):
-    """由 Agent 持久 worker 生成录像上下文证据的配置。"""
+class RecordingEvidenceConfig(WorkerConfig):
+    """由 Agent 持久 worker 读取 SSV cache 并生成上下文证据的配置。"""
 
-    enabled: bool = False
+    retry_delay_ms: int = Field(default=2_000, ge=0)
     clip_before_ms: int = Field(default=2500, ge=1000)
     clip_after_ms: int = Field(default=2500, ge=1000)
+    merge_gap_ms: int = Field(default=3_000, gt=0)
+    lost_grace_ms: int = Field(default=3_000, ge=0)
+    silence_timeout_ms: int = Field(default=30_000, gt=0)
+    max_episode_ms: int = Field(default=30_000, gt=0)
+
+    @model_validator(mode="after")
+    def validate_episode_window(self) -> Self:
+        if self.max_episode_ms <= self.merge_gap_ms:
+            raise ValueError("recording_evidence.max_episode_ms must exceed merge_gap_ms")
+        return self
 
 
 class KnowledgeConfig(_StrictConfigModel):
     """规则知识检索与 Qdrant 投影配置。"""
 
     backend: Literal["local_markdown", "qdrant", "mock"] = "local_markdown"
+    rules_dir: str = Field(default="knowledge/rules", min_length=1)
     qdrant_path: str = Field(default="data/qdrant", min_length=1)
     qdrant_url: str | None = Field(default=None, min_length=1)
     min_score: float = Field(default=0.5, ge=-1.0, le=1.0)
+
+    @field_validator("rules_dir")
+    @classmethod
+    def validate_rules_dir(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("agent.knowledge.rules_dir must not be blank")
+        return value
+
+
+class EvidenceCacheConfig(_StrictConfigModel):
+    """由 GStreamer 生成、供 Agent 取证的短时循环缓存配置。"""
+
+    enabled: bool = False
+    directory: str = "/var/lib/ssv/evidence-cache"
+    segment_duration_ms: int = Field(default=10_000, ge=1_000)
+    retention_ms: int = Field(default=120_000, ge=1_000)
+    max_bytes_mb: int = Field(default=512, ge=1)
+
+    @field_validator("directory")
+    @classmethod
+    def validate_directory(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("evidence_cache.directory must be an absolute path")
+        return value
+
+    @model_validator(mode="after")
+    def validate_retention(self) -> Self:
+        if self.retention_ms < self.segment_duration_ms:
+            raise ValueError(
+                "evidence_cache.retention_ms must not be shorter than segment_duration_ms"
+            )
+        return self
 
 
 class AgentConfig(_StrictConfigModel):
@@ -123,6 +169,7 @@ class SsvConfig(_StrictConfigModel):
     logging: LoggingConfig = LoggingConfig()
     redis: RedisConfig = RedisConfig()
     sources: list[AgentSourceConfig] = Field(default_factory=list)
+    evidence_cache: EvidenceCacheConfig = Field(default_factory=EvidenceCacheConfig)
     agent: AgentConfig = AgentConfig()
 
     @model_validator(mode="before")
@@ -148,6 +195,26 @@ class SsvConfig(_StrictConfigModel):
                 for source in sources
             ]
         return agent_config
+
+    @model_validator(mode="after")
+    def validate_recording_evidence_cache(self) -> Self:
+        recording = self.agent.recording_evidence
+        if not recording.enabled:
+            return self
+        if not self.evidence_cache.enabled:
+            raise ValueError(
+                "recording_evidence requires evidence_cache.enabled"
+            )
+        cache_directory = Path(self.evidence_cache.directory).resolve(strict=False)
+        allowed = any(
+            cache_directory == root or root in cache_directory.parents
+            for root in (Path(item).resolve(strict=False) for item in self.agent.evidence_roots)
+        )
+        if not allowed:
+            raise ValueError(
+                "recording_evidence requires evidence_cache.directory inside evidence_roots"
+            )
+        return self
 
 
 def _validate_loaded_config(data: object) -> SsvConfig:

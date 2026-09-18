@@ -14,6 +14,7 @@ from redis import Redis
 
 from ssv_agent.config import SsvConfig
 from ssv_agent.dedup import DedupDecision, EventDeduper
+from ssv_agent.event_episode import EventEpisodeAggregator
 from ssv_agent.event_store import EventLedger
 from ssv_agent.review_context import ReviewContext
 
@@ -28,6 +29,7 @@ class EventConsumer:
         config: SsvConfig,
         ledger_factory: Callable[[], EventLedger] | None = None,
         deduper: EventDeduper | None = None,
+        episode_aggregator: EventEpisodeAggregator | None = None,
     ) -> None:
         self._stream = config.redis.stream_key
         self._group = config.redis.consumer_group
@@ -57,6 +59,15 @@ class EventConsumer:
             )
         else:
             self._deduper = None
+        self._episode_aggregator = (
+            episode_aggregator
+            if episode_aggregator is not None
+            else (
+                EventEpisodeAggregator(config.agent.recording_evidence)
+                if config.agent.recording_evidence.enabled
+                else None
+            )
+        )
 
     def _ensure_group(self) -> None:
         """Create the consumer group if it does not exist."""
@@ -90,6 +101,7 @@ class EventConsumer:
                 logger.warning("redis pending reclaim error", error=str(exc))
             else:
                 self._handle_messages(reclaimed)
+            self._flush_episode_timeouts()
 
             if self._stop_requested.is_set():
                 break
@@ -108,6 +120,7 @@ class EventConsumer:
 
             for _stream_name, messages in entries:
                 self._handle_messages(messages)
+            self._flush_episode_timeouts()
 
     def stop(self) -> None:
         self._stop_requested.set()
@@ -198,9 +211,6 @@ class EventConsumer:
             self._redis.xack(self._stream, self._group, msg_id)
             return
 
-        if "event_type" not in event and "type" in event:
-            event = {**event, "event_type": event["type"]}
-
         try:
             context = ReviewContext.from_event(msg_id, event)
         except Exception as exc:
@@ -213,7 +223,7 @@ class EventConsumer:
             if self._deduper is not None
             else DedupDecision.RUN
         )
-        if decision is DedupDecision.SKIP:
+        if decision is DedupDecision.SKIP and self._episode_aggregator is None:
             logger.info(
                 "duplicate event skipped",
                 event_id=context.event_id,
@@ -225,7 +235,22 @@ class EventConsumer:
 
         try:
             with self._ledger_factory() as ledger:
-                ledger.record(context)
+                if self._episode_aggregator is not None:
+                    outcome = self._episode_aggregator.ingest(
+                        ledger,
+                        context,
+                        decision,
+                    )
+                    if decision is DedupDecision.SKIP:
+                        logger.info(
+                            "duplicate event merged into episode",
+                            event_id=context.event_id,
+                            episode_id=(
+                                outcome.episode.episode_id if outcome.episode else None
+                            ),
+                        )
+                else:
+                    ledger.record(context)
         except Exception as exc:
             logger.error(
                 "event ledger record failed; leaving Redis entry pending",
@@ -239,6 +264,29 @@ class EventConsumer:
             ingress_id=msg_id,
         )
         self._redis.xack(self._stream, self._group, msg_id)
+
+    def _flush_episode_timeouts(self) -> None:
+        """在 Consumer 空闲时关闭已到期 episode，触发唯一取证任务。"""
+        if self._episode_aggregator is None:
+            return
+        try:
+            with self._ledger_factory() as ledger:
+                closed = self._episode_aggregator.flush(ledger)
+        except Exception as exc:
+            logger.warning("episode timeout flush failed", error=str(exc))
+            return
+        for episode in closed:
+            logger.info(
+                "event episode closed",
+                episode_id=episode.episode_id,
+                event_id=episode.canonical_event_id,
+                close_reason=(episode.close_reason.value if episode.close_reason else None),
+                evidence_window=(
+                    [episode.evidence_window_start, episode.evidence_window_end]
+                    if episode.evidence_window_start is not None
+                    else None
+                ),
+            )
 
     def _handle_event(self, msg_id: str, fields: dict[str, str]) -> None:
         """兼容旧调用方；新代码应使用公开的 ``handle_event`` seam。"""

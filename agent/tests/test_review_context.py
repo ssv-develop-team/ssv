@@ -42,7 +42,7 @@ def test_from_event_maps_publish_fields() -> None:
     assert context.rule_facts == {"zone": "north"}
 
 
-def test_from_event_prefers_explicit_event_type_then_publisher_type() -> None:
+def test_from_event_does_not_treat_transport_type_as_business_event_type() -> None:
     legacy = ReviewContext.from_event(
         "1-0",
         {"source": "camera-1", "type": "legacy-alarm"},
@@ -56,7 +56,7 @@ def test_from_event_prefers_explicit_event_type_then_publisher_type() -> None:
         },
     )
 
-    assert legacy.event_type == "legacy-alarm"
+    assert legacy.event_type is None
     assert explicit.event_type == "new-alarm"
 
 
