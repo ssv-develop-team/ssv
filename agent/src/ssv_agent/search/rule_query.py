@@ -6,6 +6,19 @@ import json
 from typing import Any
 
 
+def build_rule_filters(case: Any) -> dict[str, str]:
+    """Return only explicit rule identity/type constraints from the case."""
+    context = case.to_review_context() if hasattr(case, "to_review_context") else case
+    filters: dict[str, str] = {}
+    if context.rule_id:
+        filters["rule_id"] = context.rule_id
+    if context.rule_version:
+        filters["rule_version"] = context.rule_version
+    if context.event_type:
+        filters["event_type"] = context.event_type
+    return filters
+
+
 def build_rule_query(case: Any) -> str:
     """按事件事实生成不依赖模型输出的规则查询。"""
     context = case.to_review_context() if hasattr(case, "to_review_context") else case

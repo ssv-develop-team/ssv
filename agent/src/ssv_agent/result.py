@@ -78,6 +78,7 @@ class RuleCitation(BaseModel):
     chunk_id: str = Field(min_length=1)
     source: str = Field(min_length=1)
     rule_id: str = Field(min_length=1)
+    rule_version: str = Field(min_length=1)
     section: str = Field(min_length=1)
 
 
@@ -136,6 +137,7 @@ def validate_rule_citations(
         if (
             citation.source != metadata.get("source")
             or citation.rule_id != metadata.get("rule_id")
+            or citation.rule_version != metadata.get("rule_version")
             or citation.section != metadata.get("section")
         ):
             raise ResultParseError("规则引用元数据与检索结果不一致")

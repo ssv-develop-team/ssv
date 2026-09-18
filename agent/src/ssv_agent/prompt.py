@@ -31,7 +31,9 @@ def build_review_prompt(
                     "content": chunk.content,
                     "source": chunk.metadata.get("source"),
                     "rule_id": chunk.metadata.get("rule_id"),
+                    "rule_version": chunk.metadata.get("rule_version"),
                     "section": chunk.metadata.get("section"),
+                    "content_hash": chunk.metadata.get("content_hash"),
                     "score": chunk.score,
                 }
                 for chunk in rule_context.chunks
@@ -86,7 +88,7 @@ Ingress ID：{context.ingress_id or '未知'}
   "evidence_status": "available|missing",
   "evidence_ids": ["登记的证据 ID"],
   "claims": [{{"text": "可核查陈述", "evidence_ids": ["登记的证据 ID"]}}],
-  "rule_citations": [{{"chunk_id": "规则 chunk ID", "source": "规则来源", "rule_id": "规则标识", "section": "条款号"}}],
+  "rule_citations": [{{"chunk_id": "规则 chunk ID", "source": "规则来源", "rule_id": "规则标识", "rule_version": "规则版本", "section": "条款号"}}],
   "explanation": "复核依据说明"
 }}
 """

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from collections.abc import Sequence
@@ -11,9 +10,12 @@ from typing import Any, Protocol
 
 from ssv_agent.embedding.registry import get_configured_provider
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
+from ssv_agent.knowledge.catalog import (
+    DEFAULT_RULES_DIR,
+    discover_rule_documents,
+)
 from ssv_agent.knowledge.backends.local_markdown import (
-    DEFAULT_KNOWLEDGE_DIR,
-    _read_text,
+    _chunk_id as _local_chunk_id,
     _split_clauses,
 )
 from ssv_agent.knowledge.ingester import Ingester
@@ -42,11 +44,6 @@ def _embedding_provider():
             "configure bge_m3 or openai_compatible"
         )
     return provider
-
-
-def _chunk_id(source: str, section: str, content: str) -> str:
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
-    return f"{source}:{section}:{digest}"
 
 
 def _expand_rule_query(query: str) -> str:
@@ -81,26 +78,39 @@ async def _embed_passages(passages: Sequence[_Embeddable]) -> list[list[float]]:
     return vectors
 
 
-async def ingest_rules(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> IngestResult:
+async def ingest_rules(knowledge_dir: Path | None = None) -> IngestResult:
     """切分本地规则文件、生成向量并写入可重建的规则 collection。"""
+    if knowledge_dir is None:
+        configured_dir = os.getenv("SSV_KNOWLEDGE_RULES_DIR")
+        knowledge_dir = Path(configured_dir) if configured_dir else DEFAULT_RULES_DIR
     if not knowledge_dir.is_dir():
         return IngestResult(
             success=False,
             error_message=f"rule knowledge directory not found: {knowledge_dir}",
         )
-    paths = sorted(
-        path for path in knowledge_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in {".md", ".txt"}
-    )
+    try:
+        documents = discover_rule_documents(knowledge_dir)
+    except ValueError as exc:
+        return IngestResult(document_id=str(knowledge_dir), success=False, error_message=str(exc))
+    if not documents:
+        return IngestResult(
+            document_id=str(knowledge_dir),
+            success=False,
+            error_message=f"no versioned rule documents found: {knowledge_dir}",
+        )
     raw_passages = [
         passage
-        for path in paths
-        for passage in _split_clauses(path.name, _read_text(path))
+        for document in documents
+        for passage in _split_clauses(
+            document.source_path,
+            document.content,
+            rule=document,
+        )
     ]
     passages = []
     seen_chunk_ids: set[str] = set()
     for passage in raw_passages:
-        chunk_id = _chunk_id(passage.source, passage.section, passage.content)
+        chunk_id = _local_chunk_id(passage)
         if chunk_id in seen_chunk_ids:
             continue
         seen_chunk_ids.add(chunk_id)
@@ -109,15 +119,19 @@ async def ingest_rules(knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> IngestRes
         vectors = await _embed_passages(passages)
         points = []
         for passage, vector in zip(passages, vectors, strict=True):
-            identifier = _chunk_id(passage.source, passage.section, passage.content)
+            identifier = _local_chunk_id(passage)
             points.append(
                 (
                     identifier,
                     vector,
                     {
                         "source": passage.source,
-                        "rule_id": passage.section,
+                        "rule_id": passage.rule_id,
+                        "rule_version": passage.rule_version,
+                        "event_type": passage.event_types[0] if passage.event_types else None,
                         "section": passage.section,
+                        "event_types": list(passage.event_types),
+                        "content_hash": passage.content_hash,
                         "content": passage.content,
                     },
                 )
@@ -191,8 +205,10 @@ class QdrantRuleRetriever(Retriever):
                 score=round(float(hit["score"]), 4),
                 metadata={
                     "source": hit["source"],
-                    "rule_id": hit["rule_id"],
-                    "section": hit["section"],
+                    "rule_id": hit.get("rule_id", ""),
+                    "rule_version": hit.get("rule_version", ""),
+                    "section": hit.get("section", ""),
+                    "content_hash": hit.get("content_hash", ""),
                 },
             )
             for hit in hits
@@ -212,7 +228,7 @@ class QdrantRuleIngester(Ingester):
     backend_name = "qdrant"
 
     async def ingest(self, document: Any) -> IngestResult:
-        return await ingest_rules(Path(document) if document else DEFAULT_KNOWLEDGE_DIR)
+        return await ingest_rules(Path(document) if document else None)
 
 
 register_backend("qdrant", QdrantRuleRetriever, QdrantRuleIngester)

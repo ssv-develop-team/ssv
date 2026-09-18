@@ -127,7 +127,8 @@ def _rule_result(**updates: object) -> ReviewResult:
         "verdict": "violation", "confidence": 0.9, "evidence_status": "available",
         "evidence_ids": ["evidence-1"], "claims": [], "explanation": "规则和证据支持结论",
         "rule_citations": [{
-            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1", "section": "5.2"
+            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
+            "rule_version": "v1", "section": "5.2"
         }],
     }
     values.update(updates)
@@ -137,7 +138,9 @@ def _rule_result(**updates: object) -> ReviewResult:
 def test_deterministic_result_requires_rule_citation() -> None:
     context = _context(Chunk(
         chunk_id="chunk-1", content="rule", score=0.9,
-        metadata={"source": "rules.md", "rule_id": "rule-1", "section": "5.2"},
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
     ))
     with pytest.raises(ResultParseError):
         validate_rule_citations(_rule_result(rule_citations=[]), context)
@@ -146,11 +149,28 @@ def test_deterministic_result_requires_rule_citation() -> None:
 def test_rule_citation_must_match_retrieved_chunk_metadata() -> None:
     context = _context(Chunk(
         chunk_id="chunk-1", content="rule", score=0.9,
-        metadata={"source": "rules.md", "rule_id": "rule-1", "section": "5.2"},
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
     ))
     with pytest.raises(ResultParseError):
         validate_rule_citations(_rule_result(rule_citations=[{
-            "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1", "section": "5.2"
+            "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1",
+            "rule_version": "v1", "section": "5.2"
+        }]), context)
+
+
+def test_rule_citation_must_match_retrieved_rule_version() -> None:
+    context = _context(Chunk(
+        chunk_id="chunk-1", content="rule", score=0.9,
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
+    ))
+    with pytest.raises(ResultParseError):
+        validate_rule_citations(_rule_result(rule_citations=[{
+            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
+            "rule_version": "v2", "section": "5.2"
         }]), context)
 
 

@@ -55,9 +55,13 @@ def _configure_test_qdrant(monkeypatch, tmp_path: Path) -> _SemanticTestEmbeddin
 def test_qdrant_rule_ingest_retrieve_filter_and_rebuild(tmp_path: Path, monkeypatch) -> None:
     _configure_test_qdrant(monkeypatch, tmp_path)
     knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
-    document = knowledge / "rules.md"
-    document.write_text("1 目标安全帽条款。\n2 其他条款。\n", encoding="utf-8")
+    document = knowledge / "standard" / "v1" / "rule.md"
+    document.parent.mkdir(parents=True)
+    document.write_text(
+        "---\nkind: rule\nrule_id: standard\nversion: v1\n"
+        "event_type: event-a\n---\n\n1 目标安全帽条款。\n2 其他条款。\n",
+        encoding="utf-8",
+    )
 
     first = asyncio.run(qdrant_backend.ingest_rules(knowledge))
     assert first.success is True
@@ -68,11 +72,20 @@ def test_qdrant_rule_ingest_retrieve_filter_and_rebuild(tmp_path: Path, monkeypa
     assert [chunk.metadata["section"] for chunk in result.chunks] == ["1"]
 
     filtered = asyncio.run(
-        retriever.retrieve("目标", top_k=5, filters={"source": "rules.md"})
+        retriever.retrieve(
+            "目标",
+            top_k=5,
+            filters={"source": "standard/v1/rule.md", "rule_id": "standard", "rule_version": "v1"},
+        )
     )
-    assert [chunk.metadata["source"] for chunk in filtered.chunks] == ["rules.md"]
+    assert [chunk.metadata["source"] for chunk in filtered.chunks] == ["standard/v1/rule.md"]
+    assert filtered.chunks[0].metadata["content_hash"].startswith("sha256:")
 
-    document.write_text("1 目标安全帽条款的新版本。\n", encoding="utf-8")
+    document.write_text(
+        "---\nkind: rule\nrule_id: standard\nversion: v1\n"
+        "event_type: event-a\n---\n\n1 目标安全帽条款的新版本。\n",
+        encoding="utf-8",
+    )
     second = asyncio.run(qdrant_backend.ingest_rules(knowledge))
     assert second.chunks_count == 1
     with SsvQdrantStore() as store:
@@ -91,8 +104,12 @@ def test_qdrant_rule_retriever_reports_missing_empty_and_below_threshold(
     assert "knowledge_ingest" in (missing.error_message or "")
 
     knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
-    (knowledge / "rules.md").write_text("1 目标安全帽条款。\n", encoding="utf-8")
+    document = knowledge / "standard" / "v1" / "rule.md"
+    document.parent.mkdir(parents=True)
+    document.write_text(
+        "---\nkind: rule\nrule_id: standard\nversion: v1\n---\n\n1 目标安全帽条款。\n",
+        encoding="utf-8",
+    )
     asyncio.run(qdrant_backend.ingest_rules(knowledge))
 
     unrelated = asyncio.run(retriever.retrieve("完全无关的问题"))

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import importlib
+import os
 
 from ssv_agent.knowledge.ingester import Ingester
 from ssv_agent.knowledge.retriever import Retriever
 
 
 _registry: dict[str, tuple[type[Retriever], type[Ingester]]] = {}
-_retriever_instances: dict[str, Retriever] = {}
+_retriever_instances: dict[tuple[str, str], Retriever] = {}
 _ingester_instances: dict[str, Ingester] = {}
 _LAZY_BACKENDS = {
     "local_markdown": "ssv_agent.knowledge.backends.local_markdown",
@@ -39,10 +40,11 @@ def _ensure_loaded(name: str) -> None:
 def get_retriever(name: str) -> Retriever:
     """按名称返回单例 retriever。"""
     _ensure_loaded(name)
-    if name not in _retriever_instances:
+    cache_key = (name, os.getenv("SSV_KNOWLEDGE_RULES_DIR", ""))
+    if cache_key not in _retriever_instances:
         retriever_cls, _ = _registry[name]
-        _retriever_instances[name] = retriever_cls()
-    return _retriever_instances[name]
+        _retriever_instances[cache_key] = retriever_cls()
+    return _retriever_instances[cache_key]
 
 
 def get_ingester(name: str) -> Ingester:
