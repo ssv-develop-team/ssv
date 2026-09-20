@@ -132,7 +132,9 @@ std::string option_value(
     return {};
 }
 
-std::vector<ssv::SsvProvider> available_providers()
+} // namespace
+
+std::vector<ssv::SsvProvider> ssv_onnxruntime_available_providers()
 {
     std::vector<ssv::SsvProvider> result;
     for (const auto &runtime_name : Ort::GetAvailableProviders()) {
@@ -151,6 +153,8 @@ std::vector<ssv::SsvProvider> available_providers()
     }
     return result;
 }
+
+namespace {
 
 bool supports_native_cache(const SsvProviderAttempt &attempt)
 {
@@ -386,7 +390,11 @@ ModelMetadata OnnxRuntimeBackend::load(
     request.device_id = config.device_id;
     request.cpu_threads = config.cpu_threads;
     request.logical_cpu_count = std::thread::hardware_concurrency();
-    request.available_providers = available_providers();
+    // The Runner path supplies the once-per-run snapshot. Direct inference
+    // callers retain the local probe for standalone use and tests.
+    request.available_providers = config.available_providers
+        ? *config.available_providers
+        : ssv_onnxruntime_available_providers();
 
     std::shared_ptr<SsvOrtSessionState> selected_session;
     SsvSessionKey selected_key;

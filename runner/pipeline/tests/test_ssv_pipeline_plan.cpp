@@ -36,7 +36,7 @@ ssv::SsvConfig make_config()
     return config;
 }
 
-ssv::SsvHardwareCapabilities make_capabilities(
+ssv::SsvHardwareCapabilities make_detected_capabilities(
     std::initializer_list<const char *> elements,
     bool onnxruntime_available = true,
     bool tensorrt_engine_available = false)
@@ -49,9 +49,20 @@ ssv::SsvHardwareCapabilities make_capabilities(
     return capabilities;
 }
 
+ssv::SsvCapabilitySnapshot make_snapshot(
+    std::initializer_list<const char *> elements,
+    bool onnxruntime_available = true,
+    bool tensorrt_engine_available = false)
+{
+    return ssv::SsvCapabilitySnapshot(make_detected_capabilities(
+        elements,
+        onnxruntime_available,
+        tensorrt_engine_available));
+}
+
 void expect_plan_error(
     const ssv::SsvConfig &config,
-    const ssv::SsvHardwareCapabilities &capabilities,
+    const ssv::SsvCapabilitySnapshot &capabilities,
     ssv::SsvExitCode exit_code,
     const std::string &stage)
 {
@@ -68,7 +79,7 @@ void expect_plan_error(
 
 void test_fake_probe_and_auto_resolution_prefer_acceleration()
 {
-    const FakeHardwareCapabilitiesProbe probe(make_capabilities({
+    const FakeHardwareCapabilitiesProbe probe(make_detected_capabilities({
         "vah264dec",
         "vapostproc",
         "nvh264dec",
@@ -78,19 +89,19 @@ void test_fake_probe_and_auto_resolution_prefer_acceleration()
         "glupload",
         "glcolorconvert",
     }));
-    const auto capabilities = probe.detect();
+    const auto capabilities = ssv::SsvCapabilitySnapshot(probe.detect());
     const auto plan =
         ssv::SsvPipelinePlan::resolve(make_config(), capabilities);
 
     assert(plan.source_id == "camera-01");
     assert(plan.capability_snapshot.has_gstreamer_element("vah264dec"));
     assert(plan.capability_snapshot.onnxruntime_available());
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Vaapi);
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::GtkGlSink);
     assert(plan.display_fallback_allowed);
     assert(plan.display_fallback_reasons.empty());
-    assert(plan.inference_backend
+    assert(plan.inference.backend
         == ssv::SsvInferenceBackend::OnnxRuntime);
     assert((plan.expected_caps.decode_output
         == ssv::SsvVideoCaps {
@@ -127,33 +138,43 @@ void test_plan_owns_a_stable_capability_snapshot()
     config.inference.enabled = false;
     config.tracking.enabled = false;
 
-    auto capabilities = make_capabilities({"avdec_h264"});
-    const auto plan = ssv::SsvPipelinePlan::resolve(config, capabilities);
+    auto detected_capabilities =
+        make_detected_capabilities({"avdec_h264"});
+    detected_capabilities.onnxruntime_providers = {
+        ssv::SsvProvider::OpenVino,
+        ssv::SsvProvider::Cpu,
+    };
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(detected_capabilities));
 
-    capabilities.gstreamer_elements.clear();
-    capabilities.onnxruntime_available = false;
+    detected_capabilities.gstreamer_elements.clear();
+    detected_capabilities.onnxruntime_available = false;
+    detected_capabilities.onnxruntime_providers.clear();
 
     assert(plan.capability_snapshot.has_gstreamer_element("avdec_h264"));
     assert(plan.capability_snapshot.onnxruntime_available());
+    assert(plan.capability_snapshot.has_onnxruntime_provider(
+        ssv::SsvProvider::OpenVino));
+    assert(plan.capability_snapshot.onnxruntime_providers().size() == 2);
 }
 
 void test_auto_resolution_falls_back_in_declared_order()
 {
     auto config = make_config();
-    auto capabilities = make_capabilities({
+    auto capabilities = make_snapshot({
         "nvh264dec",
         "avdec_h264",
         "gtksink",
     });
     auto plan = ssv::SsvPipelinePlan::resolve(config, capabilities);
 
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Nvdec);
-    assert(plan.decode_fallbacks.size() == 1);
-    assert(plan.decode_fallbacks.front().from
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Nvdec);
+    assert(plan.codec.decode_fallbacks.size() == 1);
+    assert(plan.codec.decode_fallbacks.front().from
         == ssv::SsvDecodeBackend::Vaapi);
-    assert(plan.decode_fallbacks.front().to
+    assert(plan.codec.decode_fallbacks.front().to
         == ssv::SsvDecodeBackend::Nvdec);
-    assert(!plan.decode_fallbacks.front().reason.empty());
+    assert(!plan.codec.decode_fallbacks.front().reason.empty());
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::GtkSink);
     assert(!plan.display_fallback_allowed);
@@ -167,7 +188,7 @@ void test_auto_resolution_falls_back_in_declared_order()
     assert((plan.expected_caps.decode_output
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::Nv12,
-            ssv::SsvMemoryKind::SystemMemory,
+            ssv::SsvMemoryKind::CudaMemory,
         }));
     assert(plan.expected_caps.display_upload_input == std::nullopt);
     assert((plan.expected_caps.display_sink_input
@@ -176,17 +197,17 @@ void test_auto_resolution_falls_back_in_declared_order()
             ssv::SsvMemoryKind::SystemMemory,
         }));
 
-    capabilities.gstreamer_elements = {"avdec_h264", "gtksink"};
+    capabilities = make_snapshot({"avdec_h264", "gtksink"});
     plan = ssv::SsvPipelinePlan::resolve(config, capabilities);
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Software);
-    assert(plan.decode_fallbacks.size() == 2);
-    assert(plan.decode_fallbacks[0].from
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(plan.codec.decode_fallbacks.size() == 2);
+    assert(plan.codec.decode_fallbacks[0].from
         == ssv::SsvDecodeBackend::Vaapi);
-    assert(plan.decode_fallbacks[0].to
+    assert(plan.codec.decode_fallbacks[0].to
         == ssv::SsvDecodeBackend::Nvdec);
-    assert(plan.decode_fallbacks[1].from
+    assert(plan.codec.decode_fallbacks[1].from
         == ssv::SsvDecodeBackend::Nvdec);
-    assert(plan.decode_fallbacks[1].to
+    assert(plan.codec.decode_fallbacks[1].to
         == ssv::SsvDecodeBackend::Software);
 }
 
@@ -194,7 +215,7 @@ void test_auto_display_uses_gtksink_without_decoder_dmabuf()
 {
     auto config = make_config();
     config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
-    const auto capabilities = make_capabilities({
+    const auto capabilities = make_snapshot({
         "avdec_h264",
         "gtkglsink",
         "glupload",
@@ -204,7 +225,7 @@ void test_auto_display_uses_gtksink_without_decoder_dmabuf()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(config, capabilities);
 
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Software);
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::GtkSink);
     assert(!plan.display_fallback_allowed);
@@ -228,7 +249,7 @@ void test_explicit_gtk_gl_requires_decoder_dmabuf()
 
     expect_plan_error(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "gtkglsink",
             "glupload",
@@ -247,7 +268,7 @@ void test_explicit_rtsp_backend_resolves_encoder_and_caps()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
         "rtspclientsink",
         "rtph264pay",
@@ -256,7 +277,8 @@ void test_explicit_rtsp_backend_resolves_encoder_and_caps()
 
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::RtspClientSink);
-    assert(plan.display_encoder_factory == "openh264enc");
+    assert(plan.codec.encode.has_value());
+    assert(plan.codec.encode->encoder_factory == "openh264enc");
     assert((plan.expected_caps.display_encode_input
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::I420,
@@ -265,6 +287,194 @@ void test_explicit_rtsp_backend_resolves_encoder_and_caps()
     assert(plan.expected_caps.display_overlay_input == std::nullopt);
     assert(!ssv::ssv_display_backend_requires_window(
         *plan.display_backend));
+}
+
+void test_rtsp_hardware_codec_pair_is_bound_to_the_decode_device()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Vaapi;
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Drm,
+        "/dev/dri/renderD129",
+    };
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_snapshot({
+            "varenderD129h264dec",
+            "varenderD129postproc",
+            "varenderD129h264enc",
+            "rtspclientsink",
+            "rtph264pay",
+        }));
+
+    assert(plan.codec.path == ssv::SsvCodecPath::HardwarePair);
+    assert(plan.codec.decode.device.value == "/dev/dri/renderD129");
+    assert(plan.codec.encode.has_value());
+    assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Vaapi);
+    assert(plan.codec.encode->device.value == "/dev/dri/renderD129");
+    assert(plan.codec.encode->encoder_factory == "varenderD129h264enc");
+    assert(plan.codec.encode->input_memory == ssv::SsvMemoryKind::VaMemory);
+    assert(plan.expected_caps.display_encode_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::Nv12,
+            ssv::SsvMemoryKind::VaMemory,
+        });
+}
+
+void test_rtsp_auto_hardware_codec_pair_uses_default_device()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_snapshot({
+            "vah264dec",
+            "vapostproc",
+            "vah264enc",
+            "rtspclientsink",
+            "rtph264pay",
+        }));
+
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(plan.codec.decode.device.kind == ssv::SsvDecodeDeviceKind::Auto);
+    assert(plan.codec.path == ssv::SsvCodecPath::HardwarePair);
+    assert(plan.codec.encode.has_value());
+    assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Vaapi);
+    assert(plan.codec.encode->device.kind == ssv::SsvDecodeDeviceKind::Auto);
+    assert(plan.codec.encode->encoder_factory == "vah264enc");
+}
+
+void test_rtsp_missing_hardware_encoder_keeps_hardware_decode_as_mixed()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Vaapi;
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Drm,
+        "/dev/dri/renderD129",
+    };
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_snapshot({
+            "varenderD129h264dec",
+            "varenderD129postproc",
+            "rtspclientsink",
+            "rtph264pay",
+            "openh264enc",
+        }));
+
+    assert(plan.codec.path == ssv::SsvCodecPath::Mixed);
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(plan.codec.encode.has_value());
+    assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Software);
+    assert(plan.codec.encode->encoder_factory == "openh264enc");
+    assert(plan.codec.fallbacks.size() == 1);
+    assert(plan.codec.fallbacks.front().from
+        == ssv::SsvCodecPath::HardwarePair);
+    assert(plan.codec.fallbacks.front().to == ssv::SsvCodecPath::Mixed);
+    assert(plan.expected_caps.display_encode_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::I420,
+            ssv::SsvMemoryKind::SystemMemory,
+        });
+}
+
+void test_rtsp_cuda_codec_pair_uses_one_cuda_device()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Nvdec;
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Cuda,
+        "2",
+    };
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_snapshot({
+            "nvh264device2dec",
+            "nvh264device2enc",
+            "rtspclientsink",
+            "rtph264pay",
+        }));
+
+    assert(plan.codec.path == ssv::SsvCodecPath::HardwarePair);
+    assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Nvenc);
+    assert(plan.codec.encode->device.value == "2");
+    assert(plan.codec.encode->encoder_factory == "nvh264device2enc");
+    assert(plan.codec.encode->input_memory == ssv::SsvMemoryKind::CudaMemory);
+}
+
+void test_rtsp_overlay_forces_system_memory_mixed_path()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Vaapi;
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Drm,
+        "/dev/dri/renderD129",
+    };
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.burn_in_overlay = true;
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_snapshot({
+            "varenderD129h264dec",
+            "varenderD129postproc",
+            "varenderD129h264enc",
+            "rtspclientsink",
+            "rtph264pay",
+            "ssvoverlay",
+            "openh264enc",
+        }));
+
+    assert(plan.codec.path == ssv::SsvCodecPath::Mixed);
+    assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Software);
+    assert(plan.codec.encode->encoder_factory == "openh264enc");
+    assert(plan.expected_caps.display_overlay_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::Bgrx,
+            ssv::SsvMemoryKind::SystemMemory,
+        });
+    assert(plan.expected_caps.display_encode_input
+        == ssv::SsvVideoCaps {
+            ssv::SsvPixelFormat::I420,
+            ssv::SsvMemoryKind::SystemMemory,
+        });
+}
+
+void test_inference_plan_is_independent_from_codec_plan()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.display.enabled = false;
+    auto capabilities = make_detected_capabilities({"avdec_h264"});
+    capabilities.onnxruntime_providers = {
+        ssv::SsvProvider::OpenVino,
+        ssv::SsvProvider::Cpu,
+    };
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
+
+    assert(plan.inference.backend
+        == ssv::SsvInferenceBackend::OnnxRuntime);
+    assert(plan.inference.available_providers
+        == std::vector<ssv::SsvProvider> {
+            ssv::SsvProvider::OpenVino,
+            ssv::SsvProvider::Cpu,
+        });
+    assert(plan.codec.path == ssv::SsvCodecPath::DecodeOnly);
+    assert(plan.codec.encode == std::nullopt);
 }
 
 void test_rtsp_encoded_passthrough_skips_encoder()
@@ -277,7 +487,7 @@ void test_rtsp_encoded_passthrough_skips_encoder()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "rtspclientsink",
             "rtph264pay",
@@ -286,8 +496,8 @@ void test_rtsp_encoded_passthrough_skips_encoder()
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::RtspClientSink);
     assert(plan.display_encoded_passthrough);
-    assert(plan.decoded_path_required);
-    assert(plan.display_encoder_factory.empty());
+    assert(plan.codec.decoded_path_required);
+    assert(!plan.codec.encode.has_value());
     assert(plan.expected_caps.display_encode_input == std::nullopt);
 }
 
@@ -303,15 +513,15 @@ void test_rtsp_encoded_passthrough_does_not_require_decoder()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "rtspclientsink",
             "rtph264pay",
         }));
 
     assert(plan.display_encoded_passthrough);
-    assert(!plan.decoded_path_required);
-    assert(plan.decode.decoder_factory == "not-applicable");
-    assert(plan.decode_fallbacks.empty());
+    assert(!plan.codec.decoded_path_required);
+    assert(plan.codec.decode.decoder_factory == "not-applicable");
+    assert(plan.codec.decode_fallbacks.empty());
 }
 
 void test_rtsp_encoded_passthrough_rejects_burn_in_overlay()
@@ -324,7 +534,7 @@ void test_rtsp_encoded_passthrough_rejects_burn_in_overlay()
 
     expect_plan_error(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "rtspclientsink",
             "rtph264pay",
@@ -343,7 +553,7 @@ void test_rtsp_overlay_requires_and_resolves_overlay_contract()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "rtspclientsink",
             "rtph264pay",
@@ -368,7 +578,7 @@ void test_rtsp_overlay_requires_ssvoverlay()
 
     expect_plan_error(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "rtspclientsink",
             "rtph264pay",
@@ -387,15 +597,15 @@ void test_rtsp_backend_requires_publish_elements()
 
     expect_plan_error(
         config,
-        make_capabilities({"avdec_h264", "openh264enc"}),
+        make_snapshot({"avdec_h264", "openh264enc"}),
         ssv::SsvExitCode::CapabilityUnavailable,
         "capability.display");
 
     expect_plan_error(
         config,
-        make_capabilities({"avdec_h264", "rtspclientsink", "rtph264pay"}),
+        make_snapshot({"avdec_h264", "rtspclientsink", "rtph264pay"}),
         ssv::SsvExitCode::CapabilityUnavailable,
-        "capability.display");
+        "capability.encode");
 }
 
 void test_disabled_branches_do_not_require_capabilities()
@@ -404,10 +614,10 @@ void test_disabled_branches_do_not_require_capabilities()
     config.display.enabled = false;
     config.inference.enabled = false;
     const auto plan = ssv::SsvPipelinePlan::resolve(
-        config, make_capabilities({"avdec_h264"}, false, false));
+        config, make_snapshot({"avdec_h264"}, false, false));
 
     assert(plan.display_backend == std::nullopt);
-    assert(plan.inference_backend == std::nullopt);
+    assert(plan.inference.backend == std::nullopt);
     assert(plan.expected_caps.display_upload_input == std::nullopt);
     assert(plan.expected_caps.display_sink_input == std::nullopt);
     assert(plan.expected_caps.display_overlay_input == std::nullopt);
@@ -422,7 +632,7 @@ void test_explicit_backends_are_strict()
     config.sources.front().decode.mode = ssv::SsvDecodeMode::Vaapi;
     expect_plan_error(
         config,
-        make_capabilities({"nvh264dec", "avdec_h264", "gtksink"}),
+        make_snapshot({"nvh264dec", "avdec_h264", "gtksink"}),
         ssv::SsvExitCode::CapabilityUnavailable,
         "capability.decode");
 
@@ -430,7 +640,7 @@ void test_explicit_backends_are_strict()
     config.display.backend = ssv::SsvDisplayBackend::GtkGlSink;
     expect_plan_error(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "gtkglsink",
             "glupload",
@@ -441,7 +651,7 @@ void test_explicit_backends_are_strict()
     config = make_config();
     expect_plan_error(
         config,
-        make_capabilities({
+        make_snapshot({
             "avdec_h264",
             "gtksink",
         }, false),
@@ -459,7 +669,7 @@ void test_decode_device_selector_must_match_the_requested_backend()
     };
     expect_plan_error(
         config,
-        make_capabilities({"vah264dec", "vapostproc", "gtksink"}),
+        make_snapshot({"vah264dec", "vapostproc", "gtksink"}),
         ssv::SsvExitCode::InvalidConfiguration,
         "config.sources[0].decode.device");
 
@@ -471,7 +681,7 @@ void test_decode_device_selector_must_match_the_requested_backend()
     };
     expect_plan_error(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}),
+        make_snapshot({"avdec_h264", "gtksink"}),
         ssv::SsvExitCode::InvalidConfiguration,
         "config.sources[0].decode.device");
 }
@@ -486,17 +696,17 @@ void test_decode_plan_resolves_exact_device_factories_and_fallback_policy()
     };
     auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "varenderD129h264dec",
             "varenderD129postproc",
             "gtksink",
         }));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Vaapi);
-    assert(plan.decode.decoder_factory == "varenderD129h264dec");
-    assert(plan.decode.va_postproc_factory == "varenderD129postproc");
-    assert(plan.decode.device.value == "/dev/dri/renderD129");
-    assert(!plan.decode.software_fallback_allowed);
-    assert(plan.decode_fallbacks.empty());
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(plan.codec.decode.decoder_factory == "varenderD129h264dec");
+    assert(plan.codec.decode.va_postproc_factory == "varenderD129postproc");
+    assert(plan.codec.decode.device.value == "/dev/dri/renderD129");
+    assert(!plan.codec.decode.software_fallback_allowed);
+    assert(plan.codec.decode_fallbacks.empty());
 
     config = make_config();
     config.sources.front().decode.mode = ssv::SsvDecodeMode::Nvdec;
@@ -506,20 +716,20 @@ void test_decode_plan_resolves_exact_device_factories_and_fallback_policy()
     };
     plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"nvh264device2dec", "gtksink"}));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Nvdec);
-    assert(plan.decode.decoder_factory == "nvh264device2dec");
-    assert(plan.decode.va_postproc_factory.empty());
-    assert(!plan.decode.software_fallback_allowed);
-    assert(plan.decode_fallbacks.empty());
+        make_snapshot({"nvh264device2dec", "gtksink"}));
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Nvdec);
+    assert(plan.codec.decode.decoder_factory == "nvh264device2dec");
+    assert(plan.codec.decode.va_postproc_factory.empty());
+    assert(!plan.codec.decode.software_fallback_allowed);
+    assert(plan.codec.decode_fallbacks.empty());
 
     config = make_config();
     plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Software);
-    assert(plan.decode.decoder_factory == "avdec_h264");
-    assert(plan.decode.software_fallback_allowed);
+        make_snapshot({"avdec_h264", "gtksink"}));
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(plan.codec.decode.decoder_factory == "avdec_h264");
+    assert(plan.codec.decode.software_fallback_allowed);
 }
 
 void test_auto_mode_keeps_software_fallback_with_explicit_device()
@@ -531,13 +741,13 @@ void test_auto_mode_keeps_software_fallback_with_explicit_device()
     };
     auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({
+        make_snapshot({
             "varenderD129h264dec",
             "varenderD129postproc",
             "gtksink",
         }));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Vaapi);
-    assert(plan.decode.software_fallback_allowed);
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(plan.codec.decode.software_fallback_allowed);
 
     config.sources.front().decode.device = {
         ssv::SsvDecodeDeviceKind::Cuda,
@@ -545,9 +755,9 @@ void test_auto_mode_keeps_software_fallback_with_explicit_device()
     };
     plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"nvh264device2dec", "gtksink"}));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Nvdec);
-    assert(plan.decode.software_fallback_allowed);
+        make_snapshot({"nvh264device2dec", "gtksink"}));
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Nvdec);
+    assert(plan.codec.decode.software_fallback_allowed);
 }
 
 void test_auto_explicit_device_uses_software_when_acceleration_is_unavailable()
@@ -558,20 +768,20 @@ void test_auto_explicit_device_uses_software_when_acceleration_is_unavailable()
         "/dev/dri/renderD129",
     };
     auto plan = ssv::SsvPipelinePlan::resolve(
-        config, make_capabilities({"avdec_h264", "gtksink"}));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Software);
-    assert(plan.decode.device.kind == ssv::SsvDecodeDeviceKind::Auto);
-    assert(plan.decode.software_fallback_allowed);
+        config, make_snapshot({"avdec_h264", "gtksink"}));
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(plan.codec.decode.device.kind == ssv::SsvDecodeDeviceKind::Auto);
+    assert(plan.codec.decode.software_fallback_allowed);
 
     config.sources.front().decode.device = {
         ssv::SsvDecodeDeviceKind::Cuda,
         "2",
     };
     plan = ssv::SsvPipelinePlan::resolve(
-        config, make_capabilities({"avdec_h264", "gtksink"}));
-    assert(plan.decode.backend == ssv::SsvDecodeBackend::Software);
-    assert(plan.decode.device.kind == ssv::SsvDecodeDeviceKind::Auto);
-    assert(plan.decode.software_fallback_allowed);
+        config, make_snapshot({"avdec_h264", "gtksink"}));
+    assert(plan.codec.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(plan.codec.decode.device.kind == ssv::SsvDecodeDeviceKind::Auto);
+    assert(plan.codec.decode.software_fallback_allowed);
 }
 
 void test_tensorrt_engine_runtime_resolves_as_a_value()
@@ -580,10 +790,10 @@ void test_tensorrt_engine_runtime_resolves_as_a_value()
     config.inference.runtime = ssv::SsvTensorRtEngineConfig {};
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}, true, true));
+        make_snapshot({"avdec_h264", "gtksink"}, true, true));
 
     assert(plan.capability_snapshot.tensorrt_engine_available());
-    assert(plan.inference_backend
+    assert(plan.inference.backend
         == ssv::SsvInferenceBackend::TensorRtEngine);
 }
 
@@ -593,7 +803,7 @@ void test_tracking_uses_analysis_rate_as_nominal_frame_rate()
     config.inference.analysis_fps = 12;
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}));
+        make_snapshot({"avdec_h264", "gtksink"}));
 
     assert(plan.tracking.has_value());
     assert(plan.tracking->nominal_frame_rate == 12);
@@ -605,7 +815,7 @@ void test_unlimited_analysis_rate_defers_nominal_tracking_rate()
     config.inference.analysis_fps = 0;
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}));
+        make_snapshot({"avdec_h264", "gtksink"}));
 
     assert(plan.tracking.has_value());
     assert(plan.tracking->nominal_frame_rate == std::nullopt);
@@ -617,7 +827,7 @@ void test_disabled_tracking_has_no_tracking_plan()
     config.tracking.enabled = false;
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config,
-        make_capabilities({"avdec_h264", "gtksink"}));
+        make_snapshot({"avdec_h264", "gtksink"}));
 
     assert(plan.tracking == std::nullopt);
 }
@@ -628,7 +838,7 @@ void test_plan_requires_one_non_empty_source_identity()
     config.sources.clear();
     expect_plan_error(
         config,
-        make_capabilities({}),
+        make_snapshot({}),
         ssv::SsvExitCode::InvalidConfiguration,
         "config");
 
@@ -636,7 +846,7 @@ void test_plan_requires_one_non_empty_source_identity()
     config.sources.front().id = "   ";
     expect_plan_error(
         config,
-        make_capabilities({}),
+        make_snapshot({}),
         ssv::SsvExitCode::InvalidConfiguration,
         "config");
 }
@@ -651,6 +861,12 @@ int main()
     test_auto_display_uses_gtksink_without_decoder_dmabuf();
     test_explicit_gtk_gl_requires_decoder_dmabuf();
     test_explicit_rtsp_backend_resolves_encoder_and_caps();
+    test_rtsp_hardware_codec_pair_is_bound_to_the_decode_device();
+    test_rtsp_auto_hardware_codec_pair_uses_default_device();
+    test_rtsp_missing_hardware_encoder_keeps_hardware_decode_as_mixed();
+    test_rtsp_cuda_codec_pair_uses_one_cuda_device();
+    test_rtsp_overlay_forces_system_memory_mixed_path();
+    test_inference_plan_is_independent_from_codec_plan();
     test_rtsp_encoded_passthrough_skips_encoder();
     test_rtsp_encoded_passthrough_does_not_require_decoder();
     test_rtsp_encoded_passthrough_rejects_burn_in_overlay();

@@ -555,7 +555,10 @@ void test_cpu_execution_provider_smoke()
     runtime.precision = ssv::SsvPrecision::Auto;
     runtime.cache.directory = (directory.path() / "cache").string();
 
-    auto service = ssv::infer::ssv_inference_service_create(config);
+    const std::vector<ssv::SsvProvider> available_providers {
+        ssv::SsvProvider::Cpu};
+    auto service = ssv::infer::ssv_inference_service_create(
+        config, available_providers);
     const auto snapshot =
         ssv::infer::ssv_inference_service_runtime_snapshot(service.get());
     assert(snapshot.provider_chain == "CPUExecutionProvider");

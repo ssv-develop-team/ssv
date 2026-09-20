@@ -33,6 +33,7 @@ std::string_view memory_name(SsvMemoryKind memory)
     switch (memory) {
     case SsvMemoryKind::SystemMemory: return "SystemMemory";
     case SsvMemoryKind::VaMemory: return "VAMemory";
+    case SsvMemoryKind::CudaMemory: return "CUDAMemory";
     case SsvMemoryKind::DmaBuf: return "DMABuf";
     case SsvMemoryKind::GlMemory: return "GLMemory";
     case SsvMemoryKind::Unknown: return "unknown";
@@ -152,6 +153,10 @@ SsvMemoryKind memory_from_text(std::string_view value)
         || lower.find("vasurface") != std::string::npos) {
         return SsvMemoryKind::VaMemory;
     }
+    if (lower.find("cudamemory") != std::string::npos
+        || lower.find("cuda") != std::string::npos) {
+        return SsvMemoryKind::CudaMemory;
+    }
     if (lower.find("glmemory") != std::string::npos)
         return SsvMemoryKind::GlMemory;
     if (lower.find("systemmemory") != std::string::npos
@@ -197,7 +202,7 @@ SsvMemoryKind memory_kind(GstMemory *memory)
         return SsvMemoryKind::Unknown;
     constexpr std::string_view known_types[] {
         "DMABuf", "dmabuf", "VAMemory", "VASurface",
-        "GLMemory", "SystemMemory",
+        "CUDAMemory", "CudaMemory", "GLMemory", "SystemMemory",
     };
     for (const auto type : known_types) {
         if (gst_memory_is_type(memory, type.data()))
@@ -470,8 +475,13 @@ ssv_pipeline_contract_validate(
 SsvPipelineContractRecovery ssv_pipeline_contract_recovery(
     const SsvPipelinePlan &plan) noexcept
 {
-    if (plan.decode.software_fallback_allowed
-        && plan.decode.backend != SsvDecodeBackend::Software) {
+    const auto &decode = plan.codec.decode;
+    if (plan.codec.path == SsvCodecPath::HardwarePair
+        && plan.codec.mixed_fallback_allowed) {
+        return SsvPipelineContractRecovery::FallbackMixedCodec;
+    }
+    if (decode.software_fallback_allowed
+        && decode.backend != SsvDecodeBackend::Software) {
         return SsvPipelineContractRecovery::FallbackSoftware;
     }
     return SsvPipelineContractRecovery::Fatal;

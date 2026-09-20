@@ -70,6 +70,16 @@ InferenceConfig make_inference_config(
     return config;
 }
 
+InferenceConfig make_inference_config(
+    const ssv::SsvInferenceConfig &source,
+    std::span<const ssv::SsvProvider> available_providers)
+{
+    auto config = make_inference_config(source);
+    config.available_providers = std::vector<ssv::SsvProvider>(
+        available_providers.begin(), available_providers.end());
+    return config;
+}
+
 void validate_inference_config(const InferenceConfig &config)
 {
     if (blank(config.model_path))

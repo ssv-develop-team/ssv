@@ -22,6 +22,23 @@ std::string_view decode_backend_name(SsvDecodeBackend backend) noexcept
     return "unknown";
 }
 
+std::string_view codec_path_name(SsvCodecPath path) noexcept
+{
+    switch (path) {
+    case SsvCodecPath::Passthrough:
+        return "passthrough";
+    case SsvCodecPath::DecodeOnly:
+        return "decode-only";
+    case SsvCodecPath::HardwarePair:
+        return "hardware-pair";
+    case SsvCodecPath::Mixed:
+        return "mixed";
+    case SsvCodecPath::Software:
+        return "software";
+    }
+    return "unknown";
+}
+
 std::string join_reasons(const std::vector<std::string> &reasons)
 {
     std::string result;
@@ -46,6 +63,13 @@ SsvConfig SsvRunFallbackState::derive_effective_config(
         effective_config.sources.front().decode.device = {};
     }
     return effective_config;
+}
+
+SsvPipelineResolveOptions SsvRunFallbackState::plan_options() const noexcept
+{
+    return {
+        .force_mixed_codec = force_mixed_codec_,
+    };
 }
 
 std::optional<SsvEvent> SsvRunFallbackState::take_creation_event(
@@ -73,15 +97,29 @@ std::vector<SsvEvent> SsvRunFallbackState::take_plan_events(
 {
     std::vector<SsvEvent> events;
     events.reserve(
-        plan.decode_fallbacks.size()
+        plan.codec.decode_fallbacks.size()
+        + plan.codec.fallbacks.size()
         + (plan.display_fallback_reasons.empty() ? 0U : 1U));
-    for (const auto &fallback : plan.decode_fallbacks) {
+    for (const auto &fallback : plan.codec.decode_fallbacks) {
         auto event = take_creation_event({
             .context = attempt_context,
             .payload = SsvAccelerationFallbackEvent {
                 .from = std::string(decode_backend_name(fallback.from)),
                 .to = std::string(decode_backend_name(fallback.to)),
                 .stage = "decode.resolve",
+                .reason = fallback.reason,
+            },
+        });
+        if (event)
+            events.push_back(std::move(*event));
+    }
+    for (const auto &fallback : plan.codec.fallbacks) {
+        auto event = take_creation_event({
+            .context = attempt_context,
+            .payload = SsvAccelerationFallbackEvent {
+                .from = std::string(codec_path_name(fallback.from)),
+                .to = std::string(codec_path_name(fallback.to)),
+                .stage = "codec.resolve",
                 .reason = fallback.reason,
             },
         });
@@ -103,6 +141,39 @@ std::vector<SsvEvent> SsvRunFallbackState::take_plan_events(
             events.push_back(std::move(*event));
     }
     return events;
+}
+
+std::optional<SsvEvent> SsvRunFallbackState::try_mixed_codec_fallback(
+    const SsvPipelinePlan &plan,
+    const SsvRunAttemptResult &result,
+    SsvEventContext failed_attempt)
+{
+    const bool runtime_codec_failure = result.stop_reason
+            == SsvRunAttemptStopReason::PipelineContractFailure
+        && result.stage == "display.contract";
+    const bool recoverable_creation_failure = result.stop_reason
+            == SsvRunAttemptStopReason::PipelineStartFailure
+        && result.stage.starts_with("display.")
+        && (result.exit_code == SsvExitCode::CapabilityUnavailable
+            || result.exit_code == SsvExitCode::PipelineContractFailed);
+    if (mixed_codec_fallback_attempted_
+        || (!runtime_codec_failure && !recoverable_creation_failure)
+        || ssv_pipeline_contract_recovery(plan)
+            != SsvPipelineContractRecovery::FallbackMixedCodec) {
+        return std::nullopt;
+    }
+
+    mixed_codec_fallback_attempted_ = true;
+    force_mixed_codec_ = true;
+    return SsvEvent {
+        .context = std::move(failed_attempt),
+        .payload = SsvAccelerationFallbackEvent {
+            .from = "hardware-pair",
+            .to = "mixed",
+            .stage = result.stage,
+            .reason = result.error,
+        },
+    };
 }
 
 std::optional<SsvEvent> SsvRunFallbackState::try_display_fallback(
@@ -142,6 +213,7 @@ SsvRunFallbackState::try_software_decode_fallback(
             == SsvRunAttemptStopReason::PipelineStartFailure
         && (result.exit_code == SsvExitCode::CapabilityUnavailable
             || result.exit_code == SsvExitCode::PipelineContractFailed);
+    const auto &decode = plan.codec.decode;
     if (software_decode_fallback_attempted_
         || (!runtime_contract_failure && !recoverable_creation_failure)
         || ssv_pipeline_contract_recovery(plan)
@@ -154,7 +226,7 @@ SsvRunFallbackState::try_software_decode_fallback(
     return SsvEvent {
         .context = std::move(failed_attempt),
         .payload = SsvAccelerationFallbackEvent {
-            .from = std::string(decode_backend_name(plan.decode.backend)),
+            .from = std::string(decode_backend_name(decode.backend)),
             .to = "software",
             .stage = result.stage,
             .reason = result.error,

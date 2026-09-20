@@ -44,6 +44,7 @@ enum class SsvPixelFormat {
 enum class SsvMemoryKind {
     SystemMemory,
     VaMemory,
+    CudaMemory,
     DmaBuf,
     GlMemory,
     Unknown,
@@ -71,17 +72,63 @@ struct SsvTrackingPlan {
 };
 
 struct SsvDecodePlan {
-    SsvDecodeBackend backend;
+    SsvDecodeBackend backend = SsvDecodeBackend::Software;
     SsvDecodeDevice device;
     std::string decoder_factory;
     std::string va_postproc_factory;
     bool software_fallback_allowed = false;
 };
 
+struct SsvInferencePlan {
+    std::optional<SsvInferenceBackend> backend;
+    std::vector<SsvProvider> available_providers;
+};
+
+enum class SsvEncodeBackend {
+    Vaapi,
+    Nvenc,
+    Software,
+};
+
+enum class SsvCodecPath {
+    Passthrough,
+    DecodeOnly,
+    HardwarePair,
+    Mixed,
+    Software,
+};
+
+struct SsvEncodePlan {
+    SsvEncodeBackend backend = SsvEncodeBackend::Software;
+    SsvDecodeDevice device;
+    std::string encoder_factory;
+    SsvMemoryKind input_memory = SsvMemoryKind::SystemMemory;
+};
+
+struct SsvCodecFallbackDecision {
+    SsvCodecPath from = SsvCodecPath::HardwarePair;
+    SsvCodecPath to = SsvCodecPath::Mixed;
+    std::string reason;
+};
+
 struct SsvDecodeFallbackDecision {
     SsvDecodeBackend from;
     SsvDecodeBackend to;
     std::string reason;
+};
+
+struct SsvCodecPlan {
+    SsvDecodePlan decode;
+    std::optional<SsvEncodePlan> encode;
+    SsvCodecPath path = SsvCodecPath::Passthrough;
+    bool mixed_fallback_allowed = false;
+    std::vector<SsvCodecFallbackDecision> fallbacks;
+    std::vector<SsvDecodeFallbackDecision> decode_fallbacks;
+    bool decoded_path_required = true;
+};
+
+struct SsvPipelineResolveOptions {
+    bool force_mixed_codec = false;
 };
 
 class SsvPipelinePlanError : public std::runtime_error {
@@ -102,25 +149,19 @@ private:
 struct SsvPipelinePlan {
     std::string source_id;
     SsvCapabilitySnapshot capability_snapshot;
-    SsvDecodePlan decode;
-    std::vector<SsvDecodeFallbackDecision> decode_fallbacks;
+    SsvInferencePlan inference;
+    SsvCodecPlan codec;
     std::optional<SsvResolvedDisplayBackend> display_backend;
     bool display_encoded_passthrough = false;
-    bool decoded_path_required = true;
-    std::string display_encoder_factory;
     bool display_fallback_allowed = false;
     std::vector<std::string> display_fallback_reasons;
-    std::optional<SsvInferenceBackend> inference_backend;
     std::optional<SsvTrackingPlan> tracking;
     SsvPipelineExpectedCaps expected_caps;
 
     [[nodiscard]] static SsvPipelinePlan resolve(
         const SsvConfig &config,
-        const SsvCapabilitySnapshot &capabilities);
-
-    [[nodiscard]] static SsvPipelinePlan resolve(
-        const SsvConfig &config,
-        const SsvHardwareCapabilities &capabilities);
+        const SsvCapabilitySnapshot &capabilities,
+        SsvPipelineResolveOptions options = {});
 };
 
 } // namespace ssv

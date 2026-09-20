@@ -19,6 +19,8 @@ public:
     [[nodiscard]] SsvConfig derive_effective_config(
         const SsvConfig &original_config) const;
 
+    [[nodiscard]] SsvPipelineResolveOptions plan_options() const noexcept;
+
     [[nodiscard]] std::optional<SsvEvent> take_creation_event(
         SsvEvent event);
 
@@ -32,6 +34,11 @@ public:
         std::string_view stage,
         std::string_view reason);
 
+    [[nodiscard]] std::optional<SsvEvent> try_mixed_codec_fallback(
+        const SsvPipelinePlan &plan,
+        const SsvRunAttemptResult &result,
+        SsvEventContext failed_attempt);
+
     [[nodiscard]] std::optional<SsvEvent> try_software_decode_fallback(
         const SsvPipelinePlan &plan,
         const SsvRunAttemptResult &result,
@@ -42,6 +49,8 @@ private:
     bool force_gtk_sink_ = false;
     bool software_decode_fallback_attempted_ = false;
     bool force_software_decode_ = false;
+    bool mixed_codec_fallback_attempted_ = false;
+    bool force_mixed_codec_ = false;
     using FallbackEventKey = std::tuple<
         std::string,
         std::string,

@@ -100,7 +100,8 @@ ssv::SsvPipelinePlan make_headless_plan(const ssv::SsvConfig &config)
 {
     ssv::SsvHardwareCapabilities capabilities;
     capabilities.gstreamer_elements = {"avdec_h264"};
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
 ssv::SsvPipelinePlan make_enabled_plan(const ssv::SsvConfig &config)
@@ -116,7 +117,8 @@ ssv::SsvPipelinePlan make_enabled_plan(const ssv::SsvConfig &config)
         "gtksink",
     };
     capabilities.onnxruntime_available = true;
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
 ssv::SsvConfig make_rtsp_config()
@@ -137,7 +139,8 @@ ssv::SsvPipelinePlan make_rtsp_plan(const ssv::SsvConfig &config)
         "rtph264pay",
         "rtspclientsink",
     };
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
 void post_fake_bus_error(GstElement *pipeline)

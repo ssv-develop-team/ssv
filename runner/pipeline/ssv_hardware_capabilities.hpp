@@ -1,5 +1,8 @@
 #pragma once
 
+#include "ssv_config.hpp"
+
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -9,6 +12,7 @@ namespace ssv {
 struct SsvHardwareCapabilities {
     std::vector<std::string> gstreamer_elements;
     bool onnxruntime_available = false;
+    std::vector<SsvProvider> onnxruntime_providers;
     bool tensorrt_engine_available = false;
 
     [[nodiscard]] bool has_gstreamer_element(
@@ -23,6 +27,10 @@ public:
     [[nodiscard]] bool has_gstreamer_element(
         std::string_view factory_name) const;
     [[nodiscard]] bool onnxruntime_available() const noexcept;
+    [[nodiscard]] std::span<const SsvProvider>
+    onnxruntime_providers() const noexcept;
+    [[nodiscard]] bool has_onnxruntime_provider(
+        SsvProvider provider) const noexcept;
     [[nodiscard]] bool tensorrt_engine_available() const noexcept;
 
 private:

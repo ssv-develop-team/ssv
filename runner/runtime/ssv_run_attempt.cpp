@@ -160,11 +160,11 @@ public:
             throw std::invalid_argument(
                 "display-enabled SsvRunAttempt requires a display attachment");
         }
-        if (!plan_.inference_backend && service_ != nullptr) {
+        if (!plan_.inference.backend && service_ != nullptr) {
             throw std::invalid_argument(
                 "inference-disabled SsvRunAttempt must not own a service");
         }
-        if (plan_.inference_backend && service_ == nullptr) {
+        if (plan_.inference.backend && service_ == nullptr) {
             throw std::invalid_argument(
                 "inference-enabled SsvRunAttempt requires an inference service");
         }

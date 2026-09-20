@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -120,6 +121,13 @@ struct SsvInferenceRuntimeSnapshot {
 
 [[nodiscard]] SsvInferenceServicePtr ssv_inference_service_create(
     const ssv::SsvInferenceConfig &config);
+
+[[nodiscard]] SsvInferenceServicePtr ssv_inference_service_create(
+    const ssv::SsvInferenceConfig &config,
+    std::span<const ssv::SsvProvider> available_providers);
+
+[[nodiscard]] std::vector<ssv::SsvProvider>
+ssv_inference_detect_available_providers();
 
 [[nodiscard]] SsvInferenceSubmissionResult ssv_inference_service_submit(
     SsvInferenceService *service,

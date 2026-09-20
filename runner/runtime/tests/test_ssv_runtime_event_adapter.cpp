@@ -22,7 +22,7 @@ void test_disabled_runtime_is_snapshotted_without_runtime_handles()
 
     ssv::SsvPipelinePlan plan;
     plan.source_id = "camera-01";
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Software,
         .device = {},
         .decoder_factory = "avdec_h264",
@@ -73,7 +73,7 @@ void test_rtsp_runtime_reports_rtsp_client_sink()
 
     ssv::SsvPipelinePlan plan;
     plan.source_id = "camera-01";
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Software,
         .device = {},
         .decoder_factory = "avdec_h264",
@@ -110,7 +110,7 @@ void test_tensorrt_runtime_uses_source_model_identity_and_device_capability()
 
     ssv::SsvPipelinePlan plan;
     plan.source_id = "camera-01";
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Software,
         .device = {},
         .decoder_factory = "avdec_h264",
@@ -161,7 +161,7 @@ void test_runtime_snapshot_presence_must_match_inference_config()
 
     ssv::SsvPipelinePlan plan;
     plan.source_id = "camera-01";
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Software,
         .device = {},
         .decoder_factory = "avdec_h264",

@@ -214,6 +214,21 @@ ssv::SsvHardwareCapabilities make_gtk_system_memory_capabilities()
     return capabilities;
 }
 
+ssv::SsvHardwareCapabilities make_codec_pair_fallback_capabilities()
+{
+    ssv::SsvHardwareCapabilities capabilities;
+    capabilities.gstreamer_elements = {
+        "varenderD129h264dec",
+        "varenderD129postproc",
+        "varenderD129h264enc",
+        "avdec_h264",
+        "openh264enc",
+        "rtph264pay",
+        "rtspclientsink",
+    };
+    return capabilities;
+}
+
 void test_successful_run_uses_one_owned_attempt_with_id_one()
 {
     auto state = std::make_shared<FakeFactoryState>();
@@ -357,7 +372,8 @@ void test_auto_decode_contract_failure_retries_in_software()
         == ssv::SsvDecodeDeviceKind::Drm);
     assert(accelerated.effective_config.sources.front().decode.device.value
         == "/dev/dri/renderD129");
-    assert(accelerated.plan.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(accelerated.plan.codec.decode.backend
+        == ssv::SsvDecodeBackend::Vaapi);
     assert(accelerated.context.run_attempt_id == 1);
     const auto &software = state->attempts[1];
     assert(software.effective_config.sources.front().decode.mode
@@ -366,7 +382,8 @@ void test_auto_decode_contract_failure_retries_in_software()
         == ssv::SsvDecodeDeviceKind::Auto);
     assert(software.effective_config.sources.front().decode.device.value
         == "auto");
-    assert(software.plan.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(software.plan.codec.decode.backend
+        == ssv::SsvDecodeBackend::Software);
     assert(software.context.run_attempt_id == 2);
     assert(state->lifecycle == std::vector<std::string>({
         "create:1",
@@ -385,6 +402,123 @@ void test_auto_decode_contract_failure_retries_in_software()
         != std::string::npos);
     assert(record.find("stage=pipeline.contract")
         != std::string::npos);
+}
+
+void test_codec_pair_failure_falls_back_through_mixed_before_software()
+{
+    auto state = std::make_shared<FakeFactoryState>();
+    state->scripted_results = {
+        {
+            ssv::SsvExitCode::PipelineContractFailed,
+            ssv::SsvRunAttemptStopReason::PipelineContractFailure,
+            true,
+            "display.contract",
+            "hardware encoder rejected VAMemory",
+        },
+        {
+            ssv::SsvExitCode::PipelineContractFailed,
+            ssv::SsvRunAttemptStopReason::PipelineContractFailure,
+            true,
+            "display.contract",
+            "mixed codec path failed",
+        },
+        {
+            ssv::SsvExitCode::Success,
+            ssv::SsvRunAttemptStopReason::EndOfStream,
+            true,
+            {},
+            {},
+        },
+    };
+    auto config = make_config();
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Drm,
+        "/dev/dri/renderD129",
+    };
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    auto log_state = std::make_shared<RecordedLogState>();
+    auto event_log = ssv::SsvEventLog::create(
+        {}, std::make_unique<RecordingLogSink>(log_state));
+    auto runner = ssv::ssv_runner_create_with_factory(
+        std::move(config),
+        *event_log,
+        std::make_unique<FakeRunAttemptFactory>(
+            state, make_codec_pair_fallback_capabilities()));
+
+    const auto result = runner->run();
+
+    assert(result.exit_code == ssv::SsvExitCode::Success);
+    assert(state->prepare_run_calls == 1);
+    assert(state->attempts.size() == 3);
+    const auto &hardware_pair = state->attempts[0].plan.codec;
+    assert(hardware_pair.path == ssv::SsvCodecPath::HardwarePair);
+    assert(hardware_pair.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(hardware_pair.encode->backend == ssv::SsvEncodeBackend::Vaapi);
+    assert(hardware_pair.decode.device.value == "/dev/dri/renderD129");
+    assert(hardware_pair.encode->device.value == "/dev/dri/renderD129");
+
+    const auto &mixed = state->attempts[1].plan.codec;
+    assert(mixed.path == ssv::SsvCodecPath::Mixed);
+    assert(mixed.decode.backend == ssv::SsvDecodeBackend::Vaapi);
+    assert(mixed.encode->backend == ssv::SsvEncodeBackend::Software);
+    assert(mixed.encode->input_memory == ssv::SsvMemoryKind::SystemMemory);
+
+    const auto &software = state->attempts[2].plan.codec;
+    assert(software.path == ssv::SsvCodecPath::Software);
+    assert(software.decode.backend == ssv::SsvDecodeBackend::Software);
+    assert(software.encode->backend == ssv::SsvEncodeBackend::Software);
+    assert(state->attempts[0].context.run_attempt_id == 1);
+    assert(state->attempts[1].context.run_attempt_id == 2);
+    assert(state->attempts[2].context.run_attempt_id == 3);
+    assert(log_state->records.size() == 2);
+    assert(log_state->records[0].bytes.find(
+               "from=hardware-pair to=mixed")
+        != std::string::npos);
+    assert(log_state->records[0].bytes.find("run_attempt_id=1")
+        != std::string::npos);
+    assert(log_state->records[1].bytes.find("from=vaapi to=software")
+        != std::string::npos);
+    assert(log_state->records[1].bytes.find("run_attempt_id=2")
+        != std::string::npos);
+}
+
+void test_non_display_contract_failure_does_not_trigger_codec_fallback()
+{
+    auto state = std::make_shared<FakeFactoryState>();
+    state->scripted_results = {{
+        ssv::SsvExitCode::PipelineContractFailed,
+        ssv::SsvRunAttemptStopReason::PipelineContractFailure,
+        true,
+        "pipeline.contract",
+        "analysis host contract failed",
+    }};
+    auto config = make_config();
+    config.sources.front().decode.device = {
+        ssv::SsvDecodeDeviceKind::Drm,
+        "/dev/dri/renderD129",
+    };
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    auto log_state = std::make_shared<RecordedLogState>();
+    auto event_log = ssv::SsvEventLog::create(
+        {}, std::make_unique<RecordingLogSink>(log_state));
+    auto runner = ssv::ssv_runner_create_with_factory(
+        std::move(config),
+        *event_log,
+        std::make_unique<FakeRunAttemptFactory>(
+            state, make_codec_pair_fallback_capabilities()));
+
+    const auto result = runner->run();
+
+    assert(result.exit_code == ssv::SsvExitCode::PipelineContractFailed);
+    assert(state->prepare_run_calls == 1);
+    assert(state->attempts.size() == 1);
+    assert(state->attempts.front().plan.codec.path
+        == ssv::SsvCodecPath::HardwarePair);
+    assert(log_state->records.empty());
 }
 
 void test_explicit_display_backend_does_not_fallback()
@@ -450,7 +584,8 @@ void test_explicit_decode_backend_does_not_fallback()
     assert(result.exit_code == ssv::SsvExitCode::PipelineContractFailed);
     assert(result.stage == "pipeline.contract");
     assert(state->attempts.size() == 1);
-    assert(!state->attempts.front().plan.decode.software_fallback_allowed);
+    assert(!state->attempts.front()
+                .plan.codec.decode.software_fallback_allowed);
     assert(state->lifecycle == std::vector<std::string>({
         "create:1",
         "run:1",
@@ -549,12 +684,12 @@ void test_auto_decode_pipeline_creation_error_retries_in_software()
 
     assert(result.exit_code == ssv::SsvExitCode::Success);
     assert(state->attempts.size() == 2);
-    assert(state->attempts[0].plan.decode.backend
+    assert(state->attempts[0].plan.codec.decode.backend
         == ssv::SsvDecodeBackend::Vaapi);
     assert(state->attempts[0].context.run_attempt_id == 1);
     assert(state->attempts[1].effective_config.sources.front().decode.mode
         == ssv::SsvDecodeMode::Software);
-    assert(state->attempts[1].plan.decode.backend
+    assert(state->attempts[1].plan.codec.decode.backend
         == ssv::SsvDecodeBackend::Software);
     assert(state->attempts[1].context.run_attempt_id == 2);
     assert(state->lifecycle == std::vector<std::string>({
@@ -803,7 +938,7 @@ void test_plan_decode_fallback_is_emitted_for_the_attempt()
 
     assert(result.exit_code == ssv::SsvExitCode::Success);
     assert(state->attempts.size() == 1);
-    assert(state->attempts.front().plan.decode.backend
+    assert(state->attempts.front().plan.codec.decode.backend
         == ssv::SsvDecodeBackend::Nvdec);
     assert(log_state->records.size() == 1);
     const auto &record = log_state->records.front().bytes;
@@ -909,6 +1044,8 @@ int main()
     test_successful_run_uses_one_owned_attempt_with_id_one();
     test_auto_display_failure_retries_after_destroying_failed_attempt();
     test_auto_decode_contract_failure_retries_in_software();
+    test_codec_pair_failure_falls_back_through_mixed_before_software();
+    test_non_display_contract_failure_does_not_trigger_codec_fallback();
     test_explicit_display_backend_does_not_fallback();
     test_explicit_decode_backend_does_not_fallback();
     test_auto_display_creation_error_retries_with_gtk_sink();

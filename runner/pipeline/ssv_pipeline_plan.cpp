@@ -11,7 +11,7 @@ namespace {
 constexpr auto kGtkGlDmabufRequirement =
     "gtkglsink requires DMABuf input from the resolved decoder";
 
-constexpr std::array<std::string_view, 3> kRtspEncoderFactories {
+constexpr std::array<std::string_view, 3> kSoftwareEncoderFactories {
     "openh264enc",
     "x264enc",
     "avenc_h264",
@@ -62,11 +62,19 @@ std::string nvdec_factory(const SsvDecodeDevice &device)
     return "nvh264device" + device.value + "dec";
 }
 
+std::string nvenc_factory(const SsvDecodeDevice &device)
+{
+    if (device.kind != SsvDecodeDeviceKind::Cuda || device.value == "0")
+        return "nvh264enc";
+    return "nvh264device" + device.value + "enc";
+}
+
 std::string require_factory(
     const SsvCapabilitySnapshot &capabilities,
     std::string preferred,
     std::string fallback,
-    std::string_view purpose)
+    std::string_view purpose,
+    std::string_view stage_name = "capability.decode")
 {
     if (!preferred.empty()
         && capabilities.has_gstreamer_element(preferred)) {
@@ -79,7 +87,7 @@ std::string require_factory(
     const auto missing = preferred.empty() ? fallback : preferred;
     fail_plan(
         SsvExitCode::CapabilityUnavailable,
-        "capability.decode",
+        std::string(stage_name),
         "required GStreamer " + std::string(purpose)
             + " is unavailable: " + missing);
 }
@@ -222,6 +230,151 @@ SsvDecodePlan make_passthrough_decode_plan(const SsvDecodeConfig &decode)
         .va_postproc_factory = {},
         .software_fallback_allowed = false,
     };
+}
+
+SsvMemoryKind decode_memory(SsvDecodeBackend backend)
+{
+    switch (backend) {
+    case SsvDecodeBackend::Vaapi:
+        return SsvMemoryKind::VaMemory;
+    case SsvDecodeBackend::Nvdec:
+        return SsvMemoryKind::CudaMemory;
+    case SsvDecodeBackend::Software:
+        return SsvMemoryKind::SystemMemory;
+    }
+    return SsvMemoryKind::Unknown;
+}
+
+std::optional<std::string> find_encoder_factory(
+    const SsvCapabilitySnapshot &capabilities,
+    std::string preferred,
+    std::string fallback)
+{
+    if (!preferred.empty()
+        && capabilities.has_gstreamer_element(preferred)) {
+        return preferred;
+    }
+    if (!fallback.empty()
+        && capabilities.has_gstreamer_element(fallback)) {
+        return fallback;
+    }
+    return std::nullopt;
+}
+
+SsvEncodePlan make_software_encode_plan(
+    const SsvCapabilitySnapshot &capabilities)
+{
+    for (const auto factory : kSoftwareEncoderFactories) {
+        if (capabilities.has_gstreamer_element(factory)) {
+            return {
+                .backend = SsvEncodeBackend::Software,
+                .device = {},
+                .encoder_factory = std::string(factory),
+                .input_memory = SsvMemoryKind::SystemMemory,
+            };
+        }
+    }
+    fail_plan(
+        SsvExitCode::CapabilityUnavailable,
+        "capability.encode",
+        "RTSP display backend requires an H.264 encoder");
+}
+
+std::optional<SsvEncodePlan> resolve_hardware_encode_plan(
+    const SsvDecodePlan &decode,
+    const SsvCapabilitySnapshot &capabilities)
+{
+    // An explicit selector is copied to the encoder. With an Auto selector,
+    // the matching generic factory pair uses the same backend default device.
+    // The builder still validates explicit device properties when available.
+    switch (decode.backend) {
+    case SsvDecodeBackend::Vaapi: {
+        const auto factory = find_encoder_factory(
+            capabilities,
+            va_device_factory(decode.device, "h264enc"),
+            "vah264enc");
+        if (!factory)
+            return std::nullopt;
+        return SsvEncodePlan {
+            .backend = SsvEncodeBackend::Vaapi,
+            .device = decode.device,
+            .encoder_factory = *factory,
+            .input_memory = SsvMemoryKind::VaMemory,
+        };
+    }
+    case SsvDecodeBackend::Nvdec: {
+        const auto factory = find_encoder_factory(
+            capabilities, nvenc_factory(decode.device), "nvh264enc");
+        if (!factory)
+            return std::nullopt;
+        return SsvEncodePlan {
+            .backend = SsvEncodeBackend::Nvenc,
+            .device = decode.device,
+            .encoder_factory = *factory,
+            .input_memory = SsvMemoryKind::CudaMemory,
+        };
+    }
+    case SsvDecodeBackend::Software:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+SsvCodecPlan resolve_codec_plan(
+    const SsvConfig &config,
+    const SsvCapabilitySnapshot &capabilities,
+    SsvDecodePlan decode,
+    std::optional<SsvResolvedDisplayBackend> display_backend,
+    bool encoded_passthrough,
+    SsvPipelineResolveOptions options)
+{
+    SsvCodecPlan codec {
+        .decode = std::move(decode),
+        .encode = std::nullopt,
+        .path = SsvCodecPath::Passthrough,
+        .mixed_fallback_allowed = false,
+        .fallbacks = {},
+        .decode_fallbacks = {},
+        .decoded_path_required = true,
+    };
+    if (display_backend != SsvResolvedDisplayBackend::RtspClientSink
+        || encoded_passthrough) {
+        codec.path = encoded_passthrough
+            ? SsvCodecPath::Passthrough
+            : SsvCodecPath::DecodeOnly;
+        return codec;
+    }
+
+    const bool hardware_decoder = codec.decode.backend
+        != SsvDecodeBackend::Software;
+    const auto hardware_encoder = hardware_decoder
+        ? resolve_hardware_encode_plan(codec.decode, capabilities)
+        : std::nullopt;
+    const bool needs_system_memory = config.display.rtsp.burn_in_overlay;
+
+    if (!options.force_mixed_codec && hardware_encoder && !needs_system_memory) {
+        codec.encode = hardware_encoder;
+        codec.path = SsvCodecPath::HardwarePair;
+        codec.mixed_fallback_allowed = true;
+        return codec;
+    }
+
+    codec.encode = make_software_encode_plan(capabilities);
+    if (hardware_decoder) {
+        codec.path = SsvCodecPath::Mixed;
+        if (!options.force_mixed_codec) {
+            codec.fallbacks.push_back({
+                .from = SsvCodecPath::HardwarePair,
+                .to = SsvCodecPath::Mixed,
+                .reason = needs_system_memory
+                    ? "CPU overlay requires SystemMemory before encoding"
+                    : "matching hardware H.264 encoder is unavailable",
+            });
+        }
+    } else {
+        codec.path = SsvCodecPath::Software;
+    }
+    return codec;
 }
 
 std::vector<SsvDecodeFallbackDecision> resolve_decode_fallbacks(
@@ -377,22 +530,6 @@ std::optional<SsvResolvedDisplayBackend> resolve_display_backend(
         "required GTK display backend is unavailable");
 }
 
-std::string resolve_display_encoder_factory(
-    std::optional<SsvResolvedDisplayBackend> display_backend,
-    const SsvCapabilitySnapshot &capabilities)
-{
-    if (display_backend != SsvResolvedDisplayBackend::RtspClientSink)
-        return {};
-    for (const auto factory : kRtspEncoderFactories) {
-        if (capabilities.has_gstreamer_element(factory))
-            return std::string(factory);
-    }
-    fail_plan(
-        SsvExitCode::CapabilityUnavailable,
-        "capability.display",
-        "RTSP display backend requires an H.264 encoder");
-}
-
 std::vector<std::string> resolve_display_fallback_reasons(
     const SsvDisplayConfig &display,
     const SsvCapabilitySnapshot &capabilities,
@@ -443,6 +580,23 @@ std::optional<SsvInferenceBackend> resolve_inference_backend(
         "TensorRT engine runtime is unavailable");
 }
 
+SsvInferencePlan resolve_inference_plan(
+    const SsvInferenceConfig &inference,
+    const SsvCapabilitySnapshot &capabilities)
+{
+    const auto backend = resolve_inference_backend(inference, capabilities);
+    if (!backend)
+        return {};
+
+    return {
+        .backend = backend,
+        .available_providers = {
+            capabilities.onnxruntime_providers().begin(),
+            capabilities.onnxruntime_providers().end(),
+        },
+    };
+}
+
 std::optional<SsvTrackingPlan> resolve_tracking_plan(
     const SsvConfig &config)
 {
@@ -456,18 +610,18 @@ std::optional<SsvTrackingPlan> resolve_tracking_plan(
 }
 
 SsvPipelineExpectedCaps resolve_expected_caps(
-    SsvDecodeBackend decode_backend,
+    const SsvCodecPlan &codec,
     std::optional<SsvResolvedDisplayBackend> display_backend,
     bool burn_in_overlay,
     bool encoded_passthrough,
     std::optional<SsvInferenceBackend> inference_backend)
 {
-    const bool vaapi = decode_backend == SsvDecodeBackend::Vaapi;
+    const bool hardware_decode =
+        codec.decode.backend != SsvDecodeBackend::Software;
     SsvPipelineExpectedCaps caps {
         .decode_output = {
             SsvPixelFormat::Nv12,
-            vaapi ? SsvMemoryKind::VaMemory
-                  : SsvMemoryKind::SystemMemory,
+            decode_memory(codec.decode.backend),
         },
         .display_upload_input = std::nullopt,
         .display_sink_input = std::nullopt,
@@ -499,17 +653,25 @@ SsvPipelineExpectedCaps resolve_expected_caps(
                 SsvMemoryKind::SystemMemory,
             };
         }
-        caps.display_encode_input = SsvVideoCaps {
-            SsvPixelFormat::I420,
-            SsvMemoryKind::SystemMemory,
-        };
+        if (codec.encode
+            && codec.encode->input_memory != SsvMemoryKind::SystemMemory) {
+            caps.display_encode_input = SsvVideoCaps {
+                SsvPixelFormat::Nv12,
+                codec.encode->input_memory,
+            };
+        } else {
+            caps.display_encode_input = SsvVideoCaps {
+                SsvPixelFormat::I420,
+                SsvMemoryKind::SystemMemory,
+            };
+        }
     }
 
     if (inference_backend) {
-        if (vaapi) {
+        if (hardware_decode) {
             caps.analysis_gpu_input = SsvVideoCaps {
                 SsvPixelFormat::Nv12,
-                SsvMemoryKind::VaMemory,
+                decode_memory(codec.decode.backend),
             };
         }
         caps.analysis_host_input = SsvVideoCaps {
@@ -544,7 +706,8 @@ const std::string &SsvPipelinePlanError::stage() const noexcept
 
 SsvPipelinePlan SsvPipelinePlan::resolve(
     const SsvConfig &config,
-    const SsvCapabilitySnapshot &capabilities)
+    const SsvCapabilitySnapshot &capabilities,
+    SsvPipelineResolveOptions options)
 {
     if (config.sources.size() != 1 || is_blank(config.sources.front().id)) {
         fail_plan(
@@ -572,47 +735,42 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
         : make_passthrough_decode_plan(config.sources.front().decode);
     const auto display_backend =
         resolve_display_backend(config.display, capabilities, decode.backend);
-    const auto display_encoder_factory =
-        encoded_passthrough
-        ? std::string {}
-        : resolve_display_encoder_factory(display_backend, capabilities);
-    const auto inference_backend =
-        resolve_inference_backend(config.inference, capabilities);
+    auto codec = resolve_codec_plan(
+        config,
+        capabilities,
+        decode,
+        display_backend,
+        encoded_passthrough,
+        options);
+    codec.decoded_path_required = decoded_path_required;
+    if (decoded_path_required) {
+        codec.decode_fallbacks = resolve_decode_fallbacks(
+            config.sources.front().decode, codec.decode);
+    }
+    const auto inference =
+        resolve_inference_plan(config.inference, capabilities);
 
     return {
         .source_id = config.sources.front().id,
         .capability_snapshot = capabilities,
-        .decode = decode,
-        .decode_fallbacks = decoded_path_required
-            ? resolve_decode_fallbacks(
-                  config.sources.front().decode, decode)
-            : std::vector<SsvDecodeFallbackDecision> {},
+        .inference = inference,
+        .codec = codec,
         .display_backend = display_backend,
         .display_encoded_passthrough = encoded_passthrough,
-        .decoded_path_required = decoded_path_required,
-        .display_encoder_factory = display_encoder_factory,
         .display_fallback_allowed = config.display.enabled
             && config.display.backend == SsvDisplayBackend::Auto
             && display_backend == SsvResolvedDisplayBackend::GtkGlSink
             && capabilities.has_gstreamer_element("gtksink"),
         .display_fallback_reasons = resolve_display_fallback_reasons(
             config.display, capabilities, decode.backend, display_backend),
-        .inference_backend = inference_backend,
         .tracking = resolve_tracking_plan(config),
         .expected_caps = resolve_expected_caps(
-            decode.backend,
+            codec,
             display_backend,
             config.display.rtsp.burn_in_overlay,
             encoded_passthrough,
-            inference_backend),
+            inference.backend),
     };
-}
-
-SsvPipelinePlan SsvPipelinePlan::resolve(
-    const SsvConfig &config,
-    const SsvHardwareCapabilities &capabilities)
-{
-    return resolve(config, SsvCapabilitySnapshot(capabilities));
 }
 
 } // namespace ssv

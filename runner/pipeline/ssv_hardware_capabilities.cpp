@@ -1,5 +1,7 @@
 #include "ssv_hardware_capabilities.hpp"
 
+#include "ssv_inference_service.hpp"
+
 #include <gst/gst.h>
 
 #include <algorithm>
@@ -31,6 +33,20 @@ bool SsvCapabilitySnapshot::onnxruntime_available() const noexcept
     return capabilities_.onnxruntime_available;
 }
 
+std::span<const SsvProvider>
+SsvCapabilitySnapshot::onnxruntime_providers() const noexcept
+{
+    return capabilities_.onnxruntime_providers;
+}
+
+bool SsvCapabilitySnapshot::has_onnxruntime_provider(
+    SsvProvider provider) const noexcept
+{
+    return std::ranges::find(
+        capabilities_.onnxruntime_providers, provider)
+        != capabilities_.onnxruntime_providers.end();
+}
+
 bool SsvCapabilitySnapshot::tensorrt_engine_available() const noexcept
 {
     return capabilities_.tensorrt_engine_available;
@@ -59,6 +75,9 @@ SsvHardwareCapabilities SsvSystemHardwareCapabilitiesProbe::detect() const
         std::ranges::unique(capabilities.gstreamer_elements).begin(),
         capabilities.gstreamer_elements.end());
     capabilities.onnxruntime_available = SSV_HAS_ONNXRUNTIME != 0;
+    if (capabilities.onnxruntime_available)
+        capabilities.onnxruntime_providers =
+            infer::ssv_inference_detect_available_providers();
     capabilities.tensorrt_engine_available =
         SSV_HAS_TENSORRT_ENGINE != 0;
     return capabilities;

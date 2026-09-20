@@ -62,7 +62,8 @@ public:
         std::vector<SsvEvent> events;
         if (effective_config.inference.enabled) {
             resources.service = infer::ssv_inference_service_create(
-                effective_config.inference);
+                effective_config.inference,
+                plan.inference.available_providers);
             inference_runtime_snapshot =
                 infer::ssv_inference_service_runtime_snapshot(
                     resources.service.get());
