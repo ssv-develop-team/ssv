@@ -101,15 +101,22 @@ private:
 
 struct SsvPipelinePlan {
     std::string source_id;
+    SsvCapabilitySnapshot capability_snapshot;
     SsvDecodePlan decode;
     std::vector<SsvDecodeFallbackDecision> decode_fallbacks;
     std::optional<SsvResolvedDisplayBackend> display_backend;
+    bool display_encoded_passthrough = false;
+    bool decoded_path_required = true;
     std::string display_encoder_factory;
     bool display_fallback_allowed = false;
     std::vector<std::string> display_fallback_reasons;
     std::optional<SsvInferenceBackend> inference_backend;
     std::optional<SsvTrackingPlan> tracking;
     SsvPipelineExpectedCaps expected_caps;
+
+    [[nodiscard]] static SsvPipelinePlan resolve(
+        const SsvConfig &config,
+        const SsvCapabilitySnapshot &capabilities);
 
     [[nodiscard]] static SsvPipelinePlan resolve(
         const SsvConfig &config,

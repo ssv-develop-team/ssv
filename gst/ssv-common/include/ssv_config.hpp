@@ -120,6 +120,7 @@ struct SsvOverlayConfig {
 struct SsvRtspOutputConfig {
     std::string location;
     bool burn_in_overlay = false;
+    bool encoded_passthrough = false;
 };
 
 struct SsvDisplayConfig {

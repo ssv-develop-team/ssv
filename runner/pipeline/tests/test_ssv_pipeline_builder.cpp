@@ -146,7 +146,7 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
         640, 640, ssv::SsvResizeMode::Letterbox};
 
     const auto topology = ssv::pipeline_internal::resolve_topology(
-        config, plan, registry, model);
+        config, plan, model);
 
     assert(factories(topology.source_path) == std::vector<std::string>({
         "rtspsrc",
@@ -242,7 +242,7 @@ void test_evidence_cache_topology_is_optional()
         640, 640, ssv::SsvResizeMode::Letterbox};
 
     const auto topology = ssv::pipeline_internal::resolve_topology(
-        config, plan, registry, model);
+        config, plan, model);
     assert(factories(topology.source_path) == std::vector<std::string>({
         "rtspsrc",
         "capsfilter",
@@ -281,7 +281,7 @@ void test_rtsp_topology_uses_encoded_gstreamer_output()
     const ssv::infer::SsvModelContract model {
         640, 640, ssv::SsvResizeMode::Letterbox};
     const auto topology = ssv::pipeline_internal::resolve_topology(
-        config, plan, registry, model);
+        config, plan, model);
 
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::RtspClientSink);
@@ -324,7 +324,7 @@ void test_rtsp_overlay_topology_inserts_burn_in_stage()
     const ssv::infer::SsvModelContract model {
         640, 640, ssv::SsvResizeMode::Letterbox};
     const auto topology = ssv::pipeline_internal::resolve_topology(
-        config, plan, registry, model);
+        config, plan, model);
 
     assert(topology.display_overlay_caps == "video/x-raw,format=BGRx");
     assert(topology.display_encode_caps == "video/x-raw,format=I420");
@@ -350,6 +350,180 @@ void test_rtsp_overlay_topology_inserts_burn_in_stage()
             ssv::SsvMemoryKind::SystemMemory});
 }
 
+void test_rtsp_encoded_passthrough_topology_uses_encoded_tee()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+
+    auto registry = make_registry();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    const auto topology = ssv::pipeline_internal::resolve_topology(
+        config, plan, std::nullopt);
+
+    assert(topology.encoded_tee.has_value());
+    assert(topology.display_from_encoded);
+    assert(topology.display.has_value());
+    assert(topology.decode_path.empty());
+    assert(!topology.decoded_discard.has_value());
+    assert(factories(topology.display->stages)
+        == std::vector<std::string>({
+            "queue",
+            "rtph264pay",
+            "rtspclientsink",
+        }));
+}
+
+void test_rtsp_encoded_passthrough_coexists_with_analysis_and_evidence()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.evidence_cache.enabled = true;
+    config.inference.enabled = true;
+    config.tracking.enabled = true;
+
+    const auto registry = make_registry();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    const ssv::infer::SsvModelContract model {
+        640, 640, ssv::SsvResizeMode::Letterbox};
+    const auto topology = ssv::pipeline_internal::resolve_topology(
+        config, plan, model);
+
+    assert(topology.encoded_tee.has_value());
+    assert(topology.display_from_encoded);
+    assert(topology.decode_path.size() == 5);
+    assert(topology.evidence_cache.has_value());
+    assert(topology.analysis.has_value());
+    assert(!topology.decoded_discard.has_value());
+    assert(factories(topology.display->stages)
+        == std::vector<std::string>({
+            "queue",
+            "rtph264pay",
+            "rtspclientsink",
+        }));
+    assert(factories(topology.evidence_cache->stages)
+        == std::vector<std::string>({"queue", "splitmuxsink"}));
+    assert(factories(topology.analysis->stages)
+        == std::vector<std::string>({
+            "queue",
+            "videorate",
+            "videoscale",
+            "videoconvert",
+            "capsfilter",
+            "ssvinfer",
+            "ssvtrack",
+            "ssvpub",
+            "fakesink",
+        }));
+}
+
+void test_rtsp_encoded_passthrough_builder_skips_decoder()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+
+    auto registry = make_registry();
+    const bool registered_rtsp_sink = register_test_rtsp_sink_alias();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    auto instance = ssv::SsvPipelineBuilder::build(
+        config, plan, nullptr);
+
+    auto *decoder = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "h264-decoder");
+    auto *encoded_tee = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "encoded-tee");
+    auto *pay = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "display-rtp-pay");
+    auto *sink = gst_bin_get_by_name(
+        GST_BIN(instance.pipeline()), "display-sink");
+    assert(decoder == nullptr);
+    assert(encoded_tee != nullptr && pay != nullptr && sink != nullptr);
+    if (decoder != nullptr)
+        gst_object_unref(decoder);
+    gst_object_unref(encoded_tee);
+    gst_object_unref(pay);
+    gst_object_unref(sink);
+    instance.reset();
+    unregister_test_rtsp_sink_alias(registered_rtsp_sink);
+}
+
+void test_rtsp_encoded_passthrough_builder_connects_analysis_and_evidence()
+{
+    namespace fs = std::filesystem;
+
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.sources.front().decode.device = {};
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.evidence_cache.enabled = true;
+    const auto cache_root = fs::temp_directory_path()
+        / ("ssv-pipeline-builder-passthrough-cache-"
+           + std::to_string(::getpid()));
+    std::error_code error;
+    fs::remove_all(cache_root, error);
+    assert(!error);
+    assert(fs::create_directories(cache_root, error));
+    assert(!error);
+    config.evidence_cache.directory = cache_root.string();
+
+    config.inference.enabled = true;
+    config.inference.model.path = "/bin/true";
+    config.inference.model.output_format = "yolo_nx6";
+    const char *label_map = std::getenv("SSV_TEST_LABEL_MAP_PATH");
+    assert(label_map != nullptr && label_map[0] != '\0');
+    config.inference.model.label_map = label_map;
+    config.inference.model.preprocess = ssv::SsvPreprocessConfig {};
+    config.tracking.enabled = true;
+
+    auto registry = make_registry();
+    const bool registered_rtsp_sink = register_test_rtsp_sink_alias();
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
+    auto service = ssv::infer::ssv_inference_test_service_create(
+        config.inference);
+    auto instance = ssv::SsvPipelineBuilder::build(
+        config, plan, service.get());
+
+    for (const char *name : {
+             "encoded-tee",
+             "h264-decoder",
+             "decoded-tee",
+             "evidence-cache-sink",
+             "analysis-infer",
+             "analysis-track",
+             "analysis-publish",
+             "display-rtp-pay",
+             "display-sink",
+         }) {
+        auto *element = gst_bin_get_by_name(
+            GST_BIN(instance.pipeline()), name);
+        assert(element != nullptr);
+        gst_object_unref(element);
+    }
+
+    instance.reset();
+    ssv::infer::ssv_inference_service_stop(service.get());
+    unregister_test_rtsp_sink_alias(registered_rtsp_sink);
+    fs::remove_all(cache_root, error);
+    assert(!error);
+}
+
 void test_builder_configures_rtsp_overlay_properties()
 {
     auto config = make_config();
@@ -371,7 +545,7 @@ void test_builder_configures_rtsp_overlay_properties()
     const bool registered_rtsp_sink = register_test_rtsp_sink_alias();
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, registry, nullptr);
+        config, plan, nullptr);
 
     auto *overlay = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "display-overlay");
@@ -470,7 +644,7 @@ void test_builder_configures_evidence_cache_queue()
     };
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, registry, nullptr);
+        config, plan, nullptr);
     GstElement *queue = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "evidence-cache-queue");
     assert(queue != nullptr);
@@ -490,19 +664,18 @@ void test_builder_configures_evidence_cache_queue()
     assert(!error);
 }
 
-void test_fake_registry_reports_the_exact_missing_element()
+void test_plan_snapshot_reports_the_exact_missing_element()
 {
     const auto config = make_config();
     auto registry = make_registry();
-    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     std::erase(registry.gstreamer_elements, "clocksync");
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     const ssv::infer::SsvModelContract model {
         640, 640, ssv::SsvResizeMode::Letterbox};
     try {
         static_cast<void>(ssv::pipeline_internal::resolve_topology(
             config,
             plan,
-            registry,
             model));
         assert(false && "missing clocksync was accepted");
     } catch (const ssv::SsvPipelineBuilderError &error) {
@@ -523,7 +696,7 @@ void test_gtksink_compatibility_does_not_require_dmabuf_export()
         640, 640, ssv::SsvResizeMode::Letterbox};
 
     const auto topology = ssv::pipeline_internal::resolve_topology(
-        config, plan, registry, model);
+        config, plan, model);
 
     assert(plan.display_backend == ssv::SsvResolvedDisplayBackend::GtkSink);
     assert(topology.display.has_value());
@@ -575,7 +748,7 @@ void test_display_branch_build_failure_is_classified_for_auto_fallback()
 
     try {
         static_cast<void>(ssv::SsvPipelineBuilder::build(
-            config, plan, registry, nullptr));
+            config, plan, nullptr));
         assert(false && "display build failure lost its recovery stage");
     } catch (const ssv::SsvPipelineBuilderError &error) {
         assert(error.exit_code() == ssv::SsvExitCode::CapabilityUnavailable);
@@ -613,7 +786,7 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
     };
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, registry, nullptr);
+        config, plan, nullptr);
     assert(instance);
     assert(instance.display_attachment() == nullptr);
     auto source_context = instance.source_context();
@@ -719,7 +892,7 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     auto service = ssv::infer::ssv_inference_test_service_create(
         service_config);
     auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, registry, service.get());
+        config, plan, service.get());
 
     auto source_context = instance.source_context();
     assert(source_context != nullptr);
@@ -790,7 +963,7 @@ void test_builder_passes_one_source_context_to_analysis_plugins()
     auto stretch_service = ssv::infer::ssv_inference_test_service_create(
         service_config);
     auto stretch_instance = ssv::SsvPipelineBuilder::build(
-        config, stretch_plan, registry, stretch_service.get());
+        config, stretch_plan, stretch_service.get());
     analysis_scale = gst_bin_get_by_name(
         GST_BIN(stretch_instance.pipeline()), "analysis-scale");
     assert(analysis_scale != nullptr);
@@ -1021,7 +1194,7 @@ void test_nvdec_decoder_disables_qos_and_discards_corrupted_frames()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(config, registry);
     auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, registry, nullptr);
+        config, plan, nullptr);
     GstElement *decoder = gst_bin_get_by_name(
         GST_BIN(instance.pipeline()), "h264-decoder");
     assert(decoder != nullptr);
@@ -1067,9 +1240,13 @@ int main(int argc, char **argv)
     test_evidence_cache_topology_is_optional();
     test_rtsp_topology_uses_encoded_gstreamer_output();
     test_rtsp_overlay_topology_inserts_burn_in_stage();
+    test_rtsp_encoded_passthrough_topology_uses_encoded_tee();
+    test_rtsp_encoded_passthrough_coexists_with_analysis_and_evidence();
+    test_rtsp_encoded_passthrough_builder_skips_decoder();
+    test_rtsp_encoded_passthrough_builder_connects_analysis_and_evidence();
     test_builder_configures_rtsp_overlay_properties();
     test_builder_configures_evidence_cache_queue();
-    test_fake_registry_reports_the_exact_missing_element();
+    test_plan_snapshot_reports_the_exact_missing_element();
     test_gtksink_compatibility_does_not_require_dmabuf_export();
     test_display_branch_build_failure_is_classified_for_auto_fallback();
     test_builder_realizes_the_internal_topology_and_element_properties();

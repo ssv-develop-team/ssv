@@ -24,7 +24,7 @@ public:
     {
     }
 
-    SsvHardwareCapabilities prepare_run(
+    SsvCapabilitySnapshot prepare_run(
         const SsvConfig &original_config) override
     {
         GError *gst_error = nullptr;
@@ -40,7 +40,7 @@ public:
         }
 
         const SsvSystemHardwareCapabilitiesProbe probe;
-        capabilities_ = probe.detect();
+        auto capabilities = SsvCapabilitySnapshot(probe.detect());
         // RTSP publishing is a headless output branch. GTK initialization is
         // only needed when the resolved output will own a local window.
         if (original_config.display.enabled
@@ -48,7 +48,7 @@ public:
                 != SsvDisplayBackend::RtspClientSink)
             SsvDisplayWindow::initialize(
                 original_config.display.gl_backend);
-        return capabilities_;
+        return capabilities;
     }
 
     SsvRunAttemptCreation create(
@@ -73,7 +73,6 @@ public:
         auto pipeline_instance = SsvPipelineBuilder::build(
             effective_config,
             plan,
-            capabilities_,
             resources.service.get());
         if (effective_config.display.enabled
             && plan.display_backend
@@ -107,7 +106,6 @@ public:
 
 private:
     SsvEventLog &event_log_;
-    SsvHardwareCapabilities capabilities_;
 };
 
 } // namespace

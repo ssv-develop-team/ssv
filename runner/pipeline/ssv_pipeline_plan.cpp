@@ -63,7 +63,7 @@ std::string nvdec_factory(const SsvDecodeDevice &device)
 }
 
 std::string require_factory(
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     std::string preferred,
     std::string fallback,
     std::string_view purpose)
@@ -85,7 +85,7 @@ std::string require_factory(
 }
 
 bool has_factory(
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     std::string_view preferred,
     std::string_view fallback = {})
 {
@@ -98,7 +98,7 @@ bool has_factory(
 
 SsvDecodePlan make_vaapi_plan(
     const SsvDecodeConfig &decode,
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     bool software_fallback_allowed)
 {
     return {
@@ -120,7 +120,7 @@ SsvDecodePlan make_vaapi_plan(
 
 SsvDecodePlan make_nvdec_plan(
     const SsvDecodeConfig &decode,
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     bool software_fallback_allowed)
 {
     const auto factory = nvdec_factory(decode.device);
@@ -136,7 +136,7 @@ SsvDecodePlan make_nvdec_plan(
 
 SsvDecodePlan make_software_plan(
     const SsvDecodeConfig &decode,
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     bool software_fallback_allowed)
 {
     return {
@@ -151,7 +151,7 @@ SsvDecodePlan make_software_plan(
 
 SsvDecodePlan make_software_fallback_plan(
     const SsvDecodeConfig &decode,
-    const SsvHardwareCapabilities &capabilities)
+    const SsvCapabilitySnapshot &capabilities)
 {
     auto software = decode;
     software.mode = SsvDecodeMode::Software;
@@ -161,7 +161,7 @@ SsvDecodePlan make_software_fallback_plan(
 
 SsvDecodePlan resolve_decode_plan(
     const SsvDecodeConfig &decode,
-    const SsvHardwareCapabilities &capabilities)
+    const SsvCapabilitySnapshot &capabilities)
 {
     const bool allow_software_fallback =
         decode.mode == SsvDecodeMode::Auto;
@@ -209,6 +209,19 @@ SsvDecodePlan resolve_decode_plan(
         SsvExitCode::InvalidConfiguration,
         "config",
         "unsupported decode mode");
+}
+
+SsvDecodePlan make_passthrough_decode_plan(const SsvDecodeConfig &decode)
+{
+    // Encoded RTSP passthrough has no decoded branch. Keep the public plan
+    // shape stable, but make the unused decoder capability explicit.
+    return {
+        .backend = SsvDecodeBackend::Software,
+        .device = decode.device,
+        .decoder_factory = "not-applicable",
+        .va_postproc_factory = {},
+        .software_fallback_allowed = false,
+    };
 }
 
 std::vector<SsvDecodeFallbackDecision> resolve_decode_fallbacks(
@@ -294,7 +307,7 @@ bool decode_exports_dmabuf(SsvDecodeBackend backend)
 
 std::optional<SsvResolvedDisplayBackend> resolve_display_backend(
     const SsvDisplayConfig &display,
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     SsvDecodeBackend decode_backend)
 {
     if (!display.enabled)
@@ -366,7 +379,7 @@ std::optional<SsvResolvedDisplayBackend> resolve_display_backend(
 
 std::string resolve_display_encoder_factory(
     std::optional<SsvResolvedDisplayBackend> display_backend,
-    const SsvHardwareCapabilities &capabilities)
+    const SsvCapabilitySnapshot &capabilities)
 {
     if (display_backend != SsvResolvedDisplayBackend::RtspClientSink)
         return {};
@@ -382,7 +395,7 @@ std::string resolve_display_encoder_factory(
 
 std::vector<std::string> resolve_display_fallback_reasons(
     const SsvDisplayConfig &display,
-    const SsvHardwareCapabilities &capabilities,
+    const SsvCapabilitySnapshot &capabilities,
     SsvDecodeBackend decode_backend,
     std::optional<SsvResolvedDisplayBackend> resolved_backend)
 {
@@ -409,20 +422,20 @@ std::vector<std::string> resolve_display_fallback_reasons(
 
 std::optional<SsvInferenceBackend> resolve_inference_backend(
     const SsvInferenceConfig &inference,
-    const SsvHardwareCapabilities &capabilities)
+    const SsvCapabilitySnapshot &capabilities)
 {
     if (!inference.enabled)
         return std::nullopt;
 
     if (std::holds_alternative<SsvOnnxRuntimeConfig>(inference.runtime)) {
-        if (capabilities.onnxruntime_available)
+        if (capabilities.onnxruntime_available())
             return SsvInferenceBackend::OnnxRuntime;
         fail_plan(
             SsvExitCode::ModelInitializationFailed,
             "inference.resolve",
             "ONNX Runtime is unavailable");
     }
-    if (capabilities.tensorrt_engine_available)
+    if (capabilities.tensorrt_engine_available())
         return SsvInferenceBackend::TensorRtEngine;
     fail_plan(
         SsvExitCode::ModelInitializationFailed,
@@ -446,6 +459,7 @@ SsvPipelineExpectedCaps resolve_expected_caps(
     SsvDecodeBackend decode_backend,
     std::optional<SsvResolvedDisplayBackend> display_backend,
     bool burn_in_overlay,
+    bool encoded_passthrough,
     std::optional<SsvInferenceBackend> inference_backend)
 {
     const bool vaapi = decode_backend == SsvDecodeBackend::Vaapi;
@@ -477,7 +491,8 @@ SsvPipelineExpectedCaps resolve_expected_caps(
             SsvPixelFormat::Bgrx,
             SsvMemoryKind::SystemMemory,
         };
-    } else if (display_backend == SsvResolvedDisplayBackend::RtspClientSink) {
+    } else if (display_backend == SsvResolvedDisplayBackend::RtspClientSink
+        && !encoded_passthrough) {
         if (burn_in_overlay) {
             caps.display_overlay_input = SsvVideoCaps {
                 SsvPixelFormat::Bgrx,
@@ -529,7 +544,7 @@ const std::string &SsvPipelinePlanError::stage() const noexcept
 
 SsvPipelinePlan SsvPipelinePlan::resolve(
     const SsvConfig &config,
-    const SsvHardwareCapabilities &capabilities)
+    const SsvCapabilitySnapshot &capabilities)
 {
     if (config.sources.size() != 1 || is_blank(config.sources.front().id)) {
         fail_plan(
@@ -538,23 +553,43 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
             "pipeline plan requires exactly one source with a non-empty id");
     }
 
+    const bool encoded_passthrough = config.display.enabled
+        && config.display.backend == SsvDisplayBackend::RtspClientSink
+        && config.display.rtsp.encoded_passthrough;
+    if (encoded_passthrough && config.display.rtsp.burn_in_overlay) {
+        fail_plan(
+            SsvExitCode::InvalidConfiguration,
+            "display.rtsp.encoded_passthrough",
+            "encoded RTSP passthrough cannot be combined with burn-in overlay");
+    }
+
     validate_decode_device(config.sources.front().decode);
 
-    const auto decode = resolve_decode_plan(
-        config.sources.front().decode, capabilities);
+    const bool decoded_path_required =
+        !encoded_passthrough || config.inference.enabled;
+    const auto decode = decoded_path_required
+        ? resolve_decode_plan(config.sources.front().decode, capabilities)
+        : make_passthrough_decode_plan(config.sources.front().decode);
     const auto display_backend =
         resolve_display_backend(config.display, capabilities, decode.backend);
     const auto display_encoder_factory =
-        resolve_display_encoder_factory(display_backend, capabilities);
+        encoded_passthrough
+        ? std::string {}
+        : resolve_display_encoder_factory(display_backend, capabilities);
     const auto inference_backend =
         resolve_inference_backend(config.inference, capabilities);
 
     return {
         .source_id = config.sources.front().id,
+        .capability_snapshot = capabilities,
         .decode = decode,
-        .decode_fallbacks = resolve_decode_fallbacks(
-            config.sources.front().decode, decode),
+        .decode_fallbacks = decoded_path_required
+            ? resolve_decode_fallbacks(
+                  config.sources.front().decode, decode)
+            : std::vector<SsvDecodeFallbackDecision> {},
         .display_backend = display_backend,
+        .display_encoded_passthrough = encoded_passthrough,
+        .decoded_path_required = decoded_path_required,
         .display_encoder_factory = display_encoder_factory,
         .display_fallback_allowed = config.display.enabled
             && config.display.backend == SsvDisplayBackend::Auto
@@ -568,8 +603,16 @@ SsvPipelinePlan SsvPipelinePlan::resolve(
             decode.backend,
             display_backend,
             config.display.rtsp.burn_in_overlay,
+            encoded_passthrough,
             inference_backend),
     };
+}
+
+SsvPipelinePlan SsvPipelinePlan::resolve(
+    const SsvConfig &config,
+    const SsvHardwareCapabilities &capabilities)
+{
+    return resolve(config, SsvCapabilitySnapshot(capabilities));
 }
 
 } // namespace ssv

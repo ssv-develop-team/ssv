@@ -14,6 +14,28 @@ bool SsvHardwareCapabilities::has_gstreamer_element(
         != gstreamer_elements.end();
 }
 
+SsvCapabilitySnapshot::SsvCapabilitySnapshot(
+    SsvHardwareCapabilities capabilities)
+    : capabilities_(std::move(capabilities))
+{
+}
+
+bool SsvCapabilitySnapshot::has_gstreamer_element(
+    std::string_view factory_name) const
+{
+    return capabilities_.has_gstreamer_element(factory_name);
+}
+
+bool SsvCapabilitySnapshot::onnxruntime_available() const noexcept
+{
+    return capabilities_.onnxruntime_available;
+}
+
+bool SsvCapabilitySnapshot::tensorrt_engine_available() const noexcept
+{
+    return capabilities_.tensorrt_engine_available;
+}
+
 SsvHardwareCapabilities SsvSystemHardwareCapabilitiesProbe::detect() const
 {
     if (!gst_is_initialized()) {

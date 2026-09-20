@@ -305,6 +305,29 @@ inference:
     assert(config.display.rtsp.burn_in_overlay);
 }
 
+void test_loads_rtsp_encoded_passthrough_config()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("rtsp-passthrough.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+display:
+  backend: "rtsp"
+  rtsp:
+    location: "rtsp://publisher.example/live/camera-01"
+    encoded_passthrough: true
+inference:
+  enabled: false
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+
+    assert(config.display.rtsp.encoded_passthrough);
+    assert(!config.display.rtsp.burn_in_overlay);
+}
+
 void test_loads_example_config(std::string_view path)
 {
     const auto config = ssv::ssv_config_load(std::string(path));
@@ -2008,6 +2031,7 @@ int main(int argc, char **argv)
 
     test_loads_complete_config();
     test_loads_rtsp_display_config();
+    test_loads_rtsp_encoded_passthrough_config();
     test_loads_example_config(argv[1]);
     test_accepts_shared_agent_config_fields();
     test_evidence_cache_rejects_invalid_values();

@@ -83,6 +83,8 @@ void test_fake_probe_and_auto_resolution_prefer_acceleration()
         ssv::SsvPipelinePlan::resolve(make_config(), capabilities);
 
     assert(plan.source_id == "camera-01");
+    assert(plan.capability_snapshot.has_gstreamer_element("vah264dec"));
+    assert(plan.capability_snapshot.onnxruntime_available());
     assert(plan.decode.backend == ssv::SsvDecodeBackend::Vaapi);
     assert(plan.display_backend
         == ssv::SsvResolvedDisplayBackend::GtkGlSink);
@@ -115,6 +117,24 @@ void test_fake_probe_and_auto_resolution_prefer_acceleration()
             ssv::SsvPixelFormat::Rgba,
             ssv::SsvMemoryKind::SystemMemory,
         }));
+}
+
+void test_plan_owns_a_stable_capability_snapshot()
+{
+    auto config = make_config();
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.display.enabled = false;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+
+    auto capabilities = make_capabilities({"avdec_h264"});
+    const auto plan = ssv::SsvPipelinePlan::resolve(config, capabilities);
+
+    capabilities.gstreamer_elements.clear();
+    capabilities.onnxruntime_available = false;
+
+    assert(plan.capability_snapshot.has_gstreamer_element("avdec_h264"));
+    assert(plan.capability_snapshot.onnxruntime_available());
 }
 
 void test_auto_resolution_falls_back_in_declared_order()
@@ -245,6 +265,72 @@ void test_explicit_rtsp_backend_resolves_encoder_and_caps()
     assert(plan.expected_caps.display_overlay_input == std::nullopt);
     assert(!ssv::ssv_display_backend_requires_window(
         *plan.display_backend));
+}
+
+void test_rtsp_encoded_passthrough_skips_encoder()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_capabilities({
+            "avdec_h264",
+            "rtspclientsink",
+            "rtph264pay",
+        }));
+
+    assert(plan.display_backend
+        == ssv::SsvResolvedDisplayBackend::RtspClientSink);
+    assert(plan.display_encoded_passthrough);
+    assert(plan.decoded_path_required);
+    assert(plan.display_encoder_factory.empty());
+    assert(plan.expected_caps.display_encode_input == std::nullopt);
+}
+
+void test_rtsp_encoded_passthrough_does_not_require_decoder()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.sources.front().decode.mode = ssv::SsvDecodeMode::Software;
+    config.inference.enabled = false;
+    config.tracking.enabled = false;
+
+    const auto plan = ssv::SsvPipelinePlan::resolve(
+        config,
+        make_capabilities({
+            "rtspclientsink",
+            "rtph264pay",
+        }));
+
+    assert(plan.display_encoded_passthrough);
+    assert(!plan.decoded_path_required);
+    assert(plan.decode.decoder_factory == "not-applicable");
+    assert(plan.decode_fallbacks.empty());
+}
+
+void test_rtsp_encoded_passthrough_rejects_burn_in_overlay()
+{
+    auto config = make_config();
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    config.display.rtsp.encoded_passthrough = true;
+    config.display.rtsp.burn_in_overlay = true;
+
+    expect_plan_error(
+        config,
+        make_capabilities({
+            "avdec_h264",
+            "rtspclientsink",
+            "rtph264pay",
+        }),
+        ssv::SsvExitCode::InvalidConfiguration,
+        "display.rtsp.encoded_passthrough");
 }
 
 void test_rtsp_overlay_requires_and_resolves_overlay_contract()
@@ -496,6 +582,7 @@ void test_tensorrt_engine_runtime_resolves_as_a_value()
         config,
         make_capabilities({"avdec_h264", "gtksink"}, true, true));
 
+    assert(plan.capability_snapshot.tensorrt_engine_available());
     assert(plan.inference_backend
         == ssv::SsvInferenceBackend::TensorRtEngine);
 }
@@ -559,10 +646,14 @@ void test_plan_requires_one_non_empty_source_identity()
 int main()
 {
     test_fake_probe_and_auto_resolution_prefer_acceleration();
+    test_plan_owns_a_stable_capability_snapshot();
     test_auto_resolution_falls_back_in_declared_order();
     test_auto_display_uses_gtksink_without_decoder_dmabuf();
     test_explicit_gtk_gl_requires_decoder_dmabuf();
     test_explicit_rtsp_backend_resolves_encoder_and_caps();
+    test_rtsp_encoded_passthrough_skips_encoder();
+    test_rtsp_encoded_passthrough_does_not_require_decoder();
+    test_rtsp_encoded_passthrough_rejects_burn_in_overlay();
     test_rtsp_overlay_requires_and_resolves_overlay_contract();
     test_rtsp_overlay_requires_ssvoverlay();
     test_rtsp_backend_requires_publish_elements();

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "ssv_hardware_capabilities.hpp"
 #include "ssv_inference_service.hpp"
 #include "ssv_pipeline_instance.hpp"
 #include "ssv_pipeline_plan.hpp"
@@ -30,7 +29,6 @@ public:
     [[nodiscard]] static SsvPipelineInstance build(
         const SsvConfig &config,
         const SsvPipelinePlan &plan,
-        const SsvHardwareCapabilities &registry,
         SsvInferenceService *inference_service);
 };
 

@@ -1165,7 +1165,9 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
     if (const auto rtsp = node["rtsp"]) {
         require_map(rtsp, "display.rtsp");
         reject_unknown_keys(
-            rtsp, "display.rtsp", {"location", "burn_in_overlay"});
+            rtsp,
+            "display.rtsp",
+            {"location", "burn_in_overlay", "encoded_passthrough"});
         display.rtsp.location = get_or<std::string>(
             rtsp, "location", display.rtsp.location, "display.rtsp.location");
         display.rtsp.burn_in_overlay = get_or<bool>(
@@ -1173,6 +1175,11 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
             "burn_in_overlay",
             display.rtsp.burn_in_overlay,
             "display.rtsp.burn_in_overlay");
+        display.rtsp.encoded_passthrough = get_or<bool>(
+            rtsp,
+            "encoded_passthrough",
+            display.rtsp.encoded_passthrough,
+            "display.rtsp.encoded_passthrough");
     }
     if (display.backend == SsvDisplayBackend::RtspClientSink) {
         if (is_blank(display.rtsp.location)) {

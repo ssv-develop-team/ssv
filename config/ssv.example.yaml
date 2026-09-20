@@ -59,6 +59,8 @@ display:
     location: "rtsp://127.0.0.1:8554/ssv"
     # true 时将检测框、类别、置信度和 track ID 烧录进 RTSP 视频像素。
     burn_in_overlay: false
+    # true 时直接转发输入 H.264；不能与 burn_in_overlay 同时开启，且不受 display.fps 限流。
+    encoded_passthrough: false
   # drop-only 显示上限，不复制旧帧补足帧率。
   fps: 30
   # auto、x11 或 wayland。

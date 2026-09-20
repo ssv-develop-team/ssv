@@ -58,6 +58,7 @@ struct AttemptObservation {
 
 struct FakeFactoryState {
     std::vector<ssv::SsvRunAttemptResult> scripted_results;
+    int prepare_run_calls = 0;
     std::exception_ptr prepare_error;
     std::vector<std::exception_ptr> scripted_creation_errors;
     std::vector<std::vector<ssv::SsvEvent>> scripted_creation_events;
@@ -105,12 +106,13 @@ public:
     {
     }
 
-    ssv::SsvHardwareCapabilities prepare_run(
+    ssv::SsvCapabilitySnapshot prepare_run(
         const ssv::SsvConfig &) override
     {
+        ++state_->prepare_run_calls;
         if (state_->prepare_error)
             std::rethrow_exception(state_->prepare_error);
-        return capabilities_;
+        return ssv::SsvCapabilitySnapshot(capabilities_);
     }
 
     ssv::SsvRunAttemptCreation create(
@@ -346,6 +348,7 @@ void test_auto_decode_contract_failure_retries_in_software()
     const auto result = runner->run();
 
     assert(result.exit_code == ssv::SsvExitCode::Success);
+    assert(state->prepare_run_calls == 1);
     assert(state->attempts.size() == 2);
     const auto &accelerated = state->attempts[0];
     assert(accelerated.effective_config.sources.front().decode.mode
@@ -643,7 +646,7 @@ void test_system_factory_prepares_and_creates_headless_attempt()
             .run_attempt_id = 1,
         });
 
-    assert(!capabilities.gstreamer_elements.empty());
+    assert(capabilities.has_gstreamer_element("rtspsrc"));
     assert(creation.attempt != nullptr);
     assert(creation.events.empty());
     assert(log_state->records.empty());
@@ -663,7 +666,7 @@ void test_system_factory_prepares_rtsp_without_gtk()
 
     const auto capabilities = factory->prepare_run(config);
 
-    assert(!capabilities.gstreamer_elements.empty());
+    assert(capabilities.has_gstreamer_element("rtspsrc"));
     assert(log_state->records.empty());
 }
 
