@@ -4,6 +4,7 @@
 
 ## 使用文档
 
+- [Agent 架构与实现](Agent架构与实现.md)：给 Codex/Agent 阅读的系统边界、启动流程、硬件选择、fallback、实现状态和验证矩阵。
 - [依赖与构建](依赖与构建.md)：系统包、Python 环境、`uv`、runtime profile、ONNX Runtime/OpenCV/TensorRT provider 和构建缓存。
 - [检测前端配置](检测前端配置.md)：实时输入、解码、GTK 显示、overlay、推理、模型、跟踪和调试。
 - [Agent 配置](Agent配置.md)：Redis 消费、SQLite 账本、复核 worker、索引 worker、DeerFlow 模型、证据和 Qdrant。

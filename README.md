@@ -146,6 +146,7 @@ cd agent
 ## 文档
 
 - [文档索引](docs/README.md)
+- [Agent 架构与实现](docs/Agent架构与实现.md)
 - [依赖与构建](docs/依赖与构建.md)
 - [检测前端配置](docs/检测前端配置.md)
 - [Agent 配置](docs/Agent配置.md)
