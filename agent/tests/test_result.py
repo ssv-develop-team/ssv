@@ -91,6 +91,31 @@ def test_result_artifacts_are_content_addressed_and_never_overwrite_each_other(
     assert first_markdown.read_text(encoding="utf-8") == LEGACY_UNCERTAIN
 
 
+def test_content_addressed_artifact_rejects_conflicting_existing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    path = write_result_markdown("case-1", LEGACY_UNCERTAIN)
+    path.write_text("modified artifact", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="conflicting contents"):
+        write_result_markdown("case-1", LEGACY_UNCERTAIN)
+
+
+def test_content_addressed_artifact_rejects_symlink_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    path = write_result_markdown("case-1", LEGACY_UNCERTAIN)
+    sibling = path.with_name("shared.md")
+    sibling.write_text(LEGACY_UNCERTAIN, encoding="utf-8")
+    path.unlink()
+    path.symlink_to(sibling)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        write_result_markdown("case-1", LEGACY_UNCERTAIN)
+
+
 @pytest.mark.parametrize(
     "event_id", [".", "..", "../../escape", "nested/event", r"nested\\event", "x" * 129]
 )

@@ -19,6 +19,11 @@ from ssv_agent.evidence_provider import (
 )
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.review_context import RuleRetrievalContext
+from ssv_agent.report import (
+    REPORT_TEMPLATE_VERSION,
+    render_analysis_report,
+    write_analysis_report,
+)
 from ssv_agent.result import (
     ReviewResult,
     parse_review_result,
@@ -594,3 +599,122 @@ class IndexWorker(_PollingWorker):
             "confidence": review.get("confidence", getattr(case, "confidence")),
             "evidence_status": review.get("evidence_status"),
         }
+
+
+class ReportWorker(_PollingWorker):
+    """将指定历史复核版本渲染为确定性 Markdown 报告。"""
+
+    def __init__(
+        self,
+        *,
+        ledger_factory: LedgerFactory,
+        worker_id: str,
+        lease_ms: int,
+        max_retries: int,
+        retry_delay_ms: int,
+        poll_interval_seconds: float = 1.0,
+    ) -> None:
+        super().__init__(
+            worker_id=worker_id,
+            poll_interval_seconds=poll_interval_seconds,
+            job_kind=JobKind.REPORT,
+        )
+        self._ledger_factory = ledger_factory
+        self._lease_ms = lease_ms
+        self._max_retries = max_retries
+        self._retry_delay_ms = retry_delay_ms
+
+    def run_once(self) -> bool:
+        """领取并提交一份报告；报告失败不修改已提交的复核事实。"""
+        with self._ledger_factory() as ledger:
+            job = ledger.claim_job(JobKind.REPORT, self._worker_id, self._lease_ms)
+            if job is None:
+                return False
+
+            heartbeat: _LeaseHeartbeat | None = None
+            try:
+                if _mark_exhausted_attempt_dead(
+                    ledger,
+                    job,
+                    self._worker_id,
+                    self._max_retries,
+                ):
+                    return True
+
+                case = ledger.get_case(job.entity_id)
+                if case is None:
+                    raise KeyError(
+                        f"report job references missing event: {job.entity_id}"
+                    )
+                review = ledger.get_review_record(job.entity_id, job.entity_revision)
+                if review is None:
+                    raise KeyError(
+                        "report job references missing review: "
+                        f"{job.entity_id}@{job.entity_revision}"
+                    )
+
+                heartbeat = _LeaseHeartbeat(
+                    ledger_factory=self._ledger_factory,
+                    job=job,
+                    worker_id=self._worker_id,
+                    lease_ms=self._lease_ms,
+                )
+                heartbeat.start()
+                heartbeat.checkpoint()
+                markdown = render_analysis_report(case, review)
+                artifact = write_analysis_report(job.entity_id, review.review_id, markdown)
+                heartbeat.checkpoint()
+                heartbeat.stop_and_join()
+                heartbeat.checkpoint()
+                ledger.complete_report_job(
+                    job,
+                    self._worker_id,
+                    artifact,
+                    REPORT_TEMPLATE_VERSION,
+                )
+                logger.info(
+                    "report job completed",
+                    event_id=job.entity_id,
+                    review_id=review.review_id,
+                    revision=job.entity_revision,
+                    job_id=job.job_id,
+                    artifact_path=str(artifact.path),
+                    sha256=artifact.sha256,
+                )
+            except LeaseLostError:
+                _stop_heartbeat(heartbeat)
+                logger.info(
+                    "report job lease lost",
+                    event_id=job.entity_id,
+                    job_id=job.job_id,
+                    worker_id=self._worker_id,
+                )
+            except Exception as exc:
+                _stop_heartbeat(heartbeat)
+                try:
+                    state = ledger.fail_job(
+                        job.job_id,
+                        self._worker_id,
+                        job.attempts,
+                        str(exc),
+                        self._max_retries,
+                        self._retry_delay_ms,
+                    )
+                except LeaseLostError:
+                    logger.info(
+                        "report job lease lost",
+                        event_id=job.entity_id,
+                        job_id=job.job_id,
+                        worker_id=self._worker_id,
+                    )
+                else:
+                    logger.warning(
+                        "report job failed",
+                        event_id=job.entity_id,
+                        job_id=job.job_id,
+                        state=state.value,
+                        error=str(exc),
+                    )
+            finally:
+                _stop_heartbeat(heartbeat)
+            return True

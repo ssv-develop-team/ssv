@@ -9,12 +9,20 @@ Agent 是实时检测链路之外的异步服务：
 ```text
 Redis Stream -> EventConsumer -> SQLite EventLedger -> ACK
                                       |
-                                      +-> review worker（可选）
-                                      +-> index worker（可选）
-                                      +-> Qdrant 语义投影（可重建）
+                                      +-> review job -> ReviewWorker -> ReviewRecord
+                                                               |
+                                                +--------------+--------------+
+                                                |                             |
+                                                v                             v
+                                           IndexWorker                  ReportWorker
+                                                |                             |
+                                                v                             v
+                                      Qdrant 投影（可重建）          Markdown artifact
 ```
 
 SQLite `EventLedger` 是事件、证据和复核结论的事实源。模型、embedding 或 Qdrant 失败只影响对应异步 job，不应阻塞已经提交的事件；SQLite 写入失败时 Redis entry 保持 pending。
+
+Review 成功提交后，账本同一事务创建 index 与 report job；两者独立运行。报告生成失败不会回滚或改写已完成的 review。
 
 ## 安装和启动
 
@@ -61,11 +69,12 @@ cp config/ssv.example.yaml config/ssv.yaml
 | `redis.consumer_name` | 固定 consumer 名称；为空时每个进程生成唯一名称 |
 | `agent.model_name` | review worker 使用的默认模型名 |
 | `agent.event_db_path` | SQLite EventLedger 路径 |
-| `agent.output_dir` | 复核结果输出目录 |
+| `agent.output_dir` | 复核 JSON 与报告 Markdown 的 outputs root |
 | `agent.evidence_roots` | 允许登记和读取的绝对证据根目录 |
 | `agent.dedup_enabled` / `agent.dedup_cooldown_seconds` | 消费侧冷却去重 |
 | `agent.review` | 复核 worker 的开关、lease、重试和 policy |
 | `agent.indexing` | embedding/index worker 的开关、lease、重试和 backend |
+| `agent.reporting` | 报告 worker 的开关、轮询、lease 和重试配置 |
 
 最小配置示例：
 
@@ -85,7 +94,19 @@ agent:
   indexing:
     enabled: false
     embedding_backend: "mock"
+  reporting:
+    enabled: true
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000
 ```
+
+`agent.reporting.enabled` 默认是 `true`。报告 worker 只消费新提交 review 所创建的 report job；禁用时停止领取，已存在的 pending job 保留，重新启用后继续处理。历史 review 不自动回填报告。
+
+报告由固定模板从账本案件快照与指定历史 `ReviewRecord` 确定性渲染，不再调用 DeerFlow/LLM，也不启用 subagent。每份成功报告在 SQLite `reports` 表登记 review ID、revision、模板版本、SHA-256 和 artifact 路径。Markdown 是展示用派生产物；结构化复核 JSON 与 SQLite review 历史仍是结论依据。报告失败只影响自己的 durable job，可重试并最终进入 `dead`，不会改变 review、index 或 Redis ingress 状态。
+
+报告与复核 JSON 写入 `agent.output_dir` 指向的 outputs root，按事件分目录并以内容寻址，重试产生相同内容时复用同一路径，不同内容不会覆盖既有 artifact。正文包含账本事件事实、复核结论、claims、规则引用和 evidence IDs，不暴露宿主机证据路径。当前没有报告查询 API、历史回填或 artifact 自动清理；部署方需自行管理输出目录的长期保留。
 
 `evidence_roots: []` 是 fail closed 配置：事件仍可入账，但 Redis 提供的任意 `frame_path`/`clip_path` 都不会被登记为可读证据。证据根必须是绝对路径，解析后的 symlink 也不能越界。
 
@@ -224,7 +245,7 @@ Agent 的持久化默认位置和配置字段：
 | `data/events.db` | `agent.event_db_path` | SQLite EventLedger |
 | `knowledge/rules` | `agent.knowledge.rules_dir` | Agent 管理的版本化规则目录 |
 | `agent/data/qdrant` | `agent.knowledge.qdrant_path` | 本地 Qdrant |
-| `outputs` | `agent.output_dir` | 复核 JSON 结果 |
+| `outputs` | `agent.output_dir` | 复核 JSON 与报告 Markdown artifacts |
 | `http://localhost:6333` | `agent.knowledge.qdrant_url` | Docker Qdrant 服务 |
 | 无 | `SSV_QDRANT_API_KEY` | Qdrant 服务认证密钥 |
 

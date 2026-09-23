@@ -38,7 +38,15 @@ RTSP H.264 source
         |                                      |  SSV cache clip/frames  DeerFlow/model
         |                                      |                             |
         |                                      |                             v
-        |                                      |                         review result
+        |                                      |                    committed ReviewRecord
+        |                                      |                             |
+        |                                      |                  +----------+----------+
+        |                                      |                  |                     |
+        |                                      |                  v                     v
+        |                                      |             IndexWorker           ReportWorker
+        |                                      |                  |                     |
+        |                                      |                  v                     v
+        |                                      |               Qdrant           Markdown artifact
         |                                      |
         +--> display: gtksink / gtkglsink / RTSP output
         +--> encoded evidence cache: splitmuxsink + mp4mux
@@ -65,6 +73,7 @@ RTSP H.264 source
 | episode 合并与取证窗口 | Python Agent，但依据上游 event lifecycle 和 PTS | event_episode.py、event_store/ledger.py | 下游模型不应自行合并事件或修改窗口 |
 | 短时视频留存 | C++ GStreamer evidence branch | runner/pipeline/ssv_evidence_cache.* | Agent 只读取 finalized cache，不负责连续录制 |
 | 视觉复核 | Python ReviewWorker + 受控 DeerFlow client | workers.py、review_runtime.py、runner.py | Redis consumer 线程不应调用模型 |
+| 分析报告 | Python ReportWorker + 确定性 renderer | workers.py、report.py、event_store/ledger.py | 报告 worker 不应再次判断或调用模型 |
 | 规则知识 | Agent-owned rule directory / 可选 Qdrant projection | knowledge/catalog.py、knowledge/backends/ | 规则正文不应硬编码到 C++ 或固定 prompt |
 
 ## 3. C++ 启动流程
@@ -251,10 +260,11 @@ AgentService.start()
   +--> RecordingEvidenceWorker（enabled 时）
   +--> ReviewWorker（enabled 时，创建隔离 DeerFlow config/client）
   +--> IndexWorker（enabled 时，创建 embedding provider/Qdrant factory）
+  +--> ReportWorker（enabled 时，确定性生成 Markdown，不创建 DeerFlow client）
   +--> EventConsumer thread
 ~~~
 
-worker 先启动、consumer 后启动，避免 Redis ingress 已进入账本而对应的异步任务没有消费者。停止时先停止领取新 ingress/job，等待线程退出，再关闭 Redis、DeerFlow 和临时配置资源。
+worker 先启动、consumer 后启动，避免 Redis ingress 已进入账本而对应的异步任务没有消费者。ReviewWorker 完成后，账本在同一事务中创建 index 与 report job；IndexWorker 和 ReportWorker 是并行派生任务。报告 worker 不增加 subagent 权限。停止时先停止领取新 ingress/job，等待线程退出，再关闭 Redis、DeerFlow 和临时配置资源。
 
 ### 6.2 Redis ingress 与 SQLite 权威账本
 
@@ -270,6 +280,8 @@ Redis Stream
         +-> index job
         +-> evidence_extract job（episode 关闭时）
   -> SQLite commit 成功后 XACK
+
+ReviewWorker 成功复核后，`complete_review_job()` 在同一 SQLite 事务中追加 ReviewRecord，并创建对应 revision 的 index/report job；两者之后并行处理。
 ~~~
 
 关键语义：
@@ -300,8 +312,11 @@ Redis Stream
 | RecordingEvidenceWorker | evidence_extract job | 读取 SSV cache，原子生成 clip/帧/manifest | complete_evidence_extract_job |
 | ReviewWorker | review job | 读取案件和规则，调用受控 DeerFlow/model，写 review JSON | complete_review_job |
 | IndexWorker | index job | embedding 后写 Qdrant 事件索引 | Qdrant 写入并完成 job |
+| ReportWorker | report job | 读取指定 revision 的 ReviewRecord，确定性渲染并写 Markdown | complete_report_job（lease fence 内登记 ReportRecord 并完成 job） |
 
-job 具有 pending -> processing -> completed/dead 状态、lease、heartbeat、attempts 和 retry delay。失去 lease 的 worker 不能继续提交结果；模型、embedding、Qdrant 或证据缺失不会回滚已经提交的 EventCase。
+job 具有 pending -> processing -> completed/dead 状态、lease、heartbeat、attempts 和 retry delay。失去 lease 的 worker 不能继续提交结果；模型、embedding、Qdrant、报告写入或证据缺失不会回滚已经提交的 EventCase 或 ReviewRecord。
+
+review JSON 是复核结果的结构化 artifact；SQLite `reviews` 保存不可变复核历史，`reports` 保存成功报告的模板版本、hash 和 artifact 路径。Markdown 报告是派生产物，不是新的事实源；报告失败只影响 report job，不改变 review/index 状态。报告正文由固定模板生成，不调用 LLM，并绑定 job 指定的历史 revision。
 
 ## 7. 规则与 Agent 工具
 
@@ -350,6 +365,7 @@ Review worker 使用隔离的 DeerFlow 配置，固定只读工具边界：
 | Agent SQLite 账本 | 已实现 | SQLite 是事实源，事件/证据/review/index job 可恢复 |
 | Review worker | 已实现为条件路径 | 需要启用配置、DeerFlow 配置、模型 provider 和可用证据 |
 | Index/Qdrant worker | 已实现为条件路径 | 默认关闭；需要 embedding backend 和 Qdrant |
+| Markdown report worker | 已实现 | `agent.reporting` 默认启用；按 ReviewRecord 历史 revision 确定性生成，失败独立重试/dead；不调用模型 |
 | 多版本规则发现 | 已实现 | 递归目录、front matter、rule_id + version、local Markdown 检索 |
 | 端到端真实 rule.v1 生产闭环 | 未完成/需现场验证 | 自动测试不能代替真实 RTSP、Redis、模型、证据和复核联调 |
 | 长期录像与历史回放 | 非本阶段范围 | SSV cache 是短时证据上下文，不是 NVR/WVP 替代品 |

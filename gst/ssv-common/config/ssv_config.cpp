@@ -509,7 +509,8 @@ SsvPreprocessConfig parse_preprocess(const YAML::Node &node)
 void validate_worker_common(
     const YAML::Node &node,
     std::string_view path,
-    int retry_delay_default_ms = 1000)
+    int retry_delay_default_ms = 1000,
+    bool enabled_default = false)
 {
     const auto poll_path = std::string(path) + ".poll_interval_ms";
     const auto poll_interval_ms = get_or<int>(
@@ -540,7 +541,7 @@ void validate_worker_common(
             delay_path, delay_path + " must not be negative");
     }
     static_cast<void>(get_or<bool>(
-        node, "enabled", false, std::string(path) + ".enabled"));
+        node, "enabled", enabled_default, std::string(path) + ".enabled"));
 }
 
 void validate_review_extension(const YAML::Node &node)
@@ -597,6 +598,20 @@ void validate_indexing_extension(const YAML::Node &node)
         true);
     validate_optional_string_field(
         node, "query_text_type", "agent.indexing.query_text_type");
+}
+
+void validate_reporting_extension(const YAML::Node &node)
+{
+    constexpr std::string_view path = "agent.reporting";
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "enabled",
+        "poll_interval_ms",
+        "lease_ms",
+        "max_retries",
+        "retry_delay_ms",
+    });
+    validate_worker_common(node, path, 1000, true);
 }
 
 void validate_knowledge_extension(const YAML::Node &node)
@@ -876,6 +891,8 @@ void validate_agent_extensions(
         validate_review_extension(review);
     if (const auto indexing = agent["indexing"])
         validate_indexing_extension(indexing);
+    if (const auto reporting = agent["reporting"])
+        validate_reporting_extension(reporting);
     if (const auto recording_evidence = agent["recording_evidence"])
         validate_recording_evidence_extension(recording_evidence);
     validate_recording_evidence_cache(agent, cache);
@@ -1787,6 +1804,7 @@ SsvConfig parse_and_validate(const YAML::Node &root)
                 "evidence_roots",
                 "review",
                 "indexing",
+                "reporting",
                 "recording_evidence",
                 "knowledge",
             });

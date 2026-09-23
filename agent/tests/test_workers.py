@@ -12,10 +12,17 @@ from ssv_agent.event_store import DurableJob, EventLedger, JobKind, JobState
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.prompt import build_review_prompt
 from ssv_agent.result import ReviewResult
+from ssv_agent.report import REPORT_TEMPLATE_VERSION
 from ssv_agent.knowledge.schema import Chunk, RetrievalResult
 from ssv_agent.evidence_provider import EvidenceArtifact, EvidenceExtractionError
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.workers import _LeaseHeartbeat, IndexWorker, ReviewWorker, RecordingEvidenceWorker
+from ssv_agent.workers import (
+    _LeaseHeartbeat,
+    IndexWorker,
+    RecordingEvidenceWorker,
+    ReportWorker,
+    ReviewWorker,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +57,22 @@ def _record_case(
         case = ledger.get_case("case-1")
     assert case is not None
     return case.evidence[0].evidence_id
+
+
+def _record_reviewed_case(db_path: Path, evidence_path: Path) -> str:
+    evidence_id = _record_case(db_path, evidence_path)
+    with EventLedger(db_path) as ledger:
+        job = ledger.claim_job(JobKind.REVIEW, "review-seed", lease_ms=1_000)
+        assert job is not None
+        result = ReviewResult(
+            verdict="violation",
+            confidence=0.91,
+            evidence_status="available",
+            evidence_ids=[evidence_id],
+            explanation="The registered frame supports the finding.",
+        )
+        ledger.complete_review_job(job, "review-seed", result, "result.json")
+    return evidence_id
 
 
 def _requeue_claim_for_a_stricter_retry_limit(db_path: Path, kind: JobKind) -> None:
@@ -1148,3 +1171,181 @@ def test_index_worker_run_recovers_after_transient_ledger_context_failure(monkey
             },
         )
     ]
+
+
+def test_report_worker_writes_artifact_for_the_claimed_review_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        remaining = ledger.claim_job(JobKind.REPORT, "another-worker", lease_ms=1_000)
+
+    assert report is not None
+    assert report.review_revision == review.revision == 1
+    assert report.template_version == REPORT_TEMPLATE_VERSION
+    assert report.sha256
+    assert report.size_bytes > 0
+    assert report.artifact_path
+    assert Path(report.artifact_path).is_relative_to(outputs.resolve())
+    assert "违规" in Path(report.artifact_path).read_text(encoding="utf-8")
+    assert "The registered frame supports the finding\\." in Path(
+        report.artifact_path
+    ).read_text(encoding="utf-8")
+    assert remaining is None
+
+
+def test_report_worker_retries_with_the_same_content_addressed_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    original_complete = EventLedger.complete_report_job
+    completion_calls = 0
+
+    def fail_first_completion(self, *args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if completion_calls == 1:
+            raise RuntimeError("temporary ledger failure")
+        return original_complete(self, *args, **kwargs)
+
+    monkeypatch.setattr(EventLedger, "complete_report_job", fail_first_completion)
+    written_paths: list[Path] = []
+    original_writer = workers_module.write_analysis_report
+
+    def track_writer(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        written_paths.append(artifact.path)
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", track_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+
+    assert completion_calls == 2
+    assert len(written_paths) == 2
+    assert written_paths[0] == written_paths[1]
+    assert report is not None
+    assert report.artifact_path == str(written_paths[0])
+    assert report.review_revision == 1
+    assert review.verdict == "violation"
+
+
+def test_report_worker_marks_exhausted_job_dead_without_changing_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    writer_calls = 0
+
+    def failing_writer(*_args):
+        nonlocal writer_calls
+        writer_calls += 1
+        raise RuntimeError("disk unavailable")
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", failing_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        case = ledger.get_case("case-1")
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state FROM durable_jobs WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert writer_calls == 2
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == review.verdict == "violation"
+    assert report is None
+    assert row is not None and row["state"] == JobState.DEAD.value
+
+
+def test_report_worker_does_not_complete_after_lease_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    clock = [ledger_module._now_ms()]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    original_writer = workers_module.write_analysis_report
+
+    def reclaim_during_write(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        clock[0] += 2
+        with EventLedger(db_path) as rival:
+            reclaimed = rival.claim_job(JobKind.REPORT, "report-b", lease_ms=1_000)
+        assert reclaimed is not None
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", reclaim_during_write)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-a",
+        lease_ms=1,
+        max_retries=3,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state, lease_owner, attempts FROM durable_jobs "
+            "WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert report is None
+    assert row is not None
+    assert row["state"] == JobState.PROCESSING.value
+    assert row["lease_owner"] == "report-b"
+    assert row["attempts"] == 2

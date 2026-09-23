@@ -37,7 +37,12 @@ from ssv_agent.runtime import (
     runtime_environment as _runtime_environment,
     embedding_settings as _embedding_settings,
 )
-from ssv_agent.workers import IndexWorker, RecordingEvidenceWorker, ReviewWorker
+from ssv_agent.workers import (
+    IndexWorker,
+    RecordingEvidenceWorker,
+    ReportWorker,
+    ReviewWorker,
+)
 
 logger = structlog.get_logger()
 
@@ -70,7 +75,7 @@ def _close_resource(resource: object | None) -> None:
 
 
 class AgentService:
-    """拥有 Redis ingress 与异步复核/索引 worker 的进程生命周期。"""
+    """拥有 Redis ingress 与异步持久 worker 的进程生命周期。"""
 
     def __init__(
         self,
@@ -79,6 +84,7 @@ class AgentService:
         consumer_factory: Callable[[SsvConfig], EventConsumer] = EventConsumer,
         review_worker_factory: Callable[..., ReviewWorker] = ReviewWorker,
         index_worker_factory: Callable[..., IndexWorker] = IndexWorker,
+        report_worker_factory: Callable[..., ReportWorker] = ReportWorker,
         recording_evidence_worker_factory: Callable[..., RecordingEvidenceWorker] = RecordingEvidenceWorker,
         evidence_extractor_factory: Callable[..., EvidenceExtractor] = SsvCacheEvidenceExtractor,
         client_factory: Callable[[], Any] = DeerFlowClient,
@@ -89,6 +95,7 @@ class AgentService:
         self._consumer_factory = consumer_factory
         self._review_worker_factory = review_worker_factory
         self._index_worker_factory = index_worker_factory
+        self._report_worker_factory = report_worker_factory
         self._recording_evidence_worker_factory = recording_evidence_worker_factory
         self._evidence_extractor_factory = evidence_extractor_factory
         self._client_factory = client_factory
@@ -122,6 +129,9 @@ class AgentService:
                 if self._stopping.is_set():
                     return
                 self._start_index_worker()
+                if self._stopping.is_set():
+                    return
+                self._start_report_worker()
                 if self._stopping.is_set():
                     return
                 consumer = self._create_consumer()
@@ -322,6 +332,22 @@ class AgentService:
         if self._stopping.is_set():
             return
         self._start_worker_thread("ssv-agent-index", worker.run)
+
+    def _start_report_worker(self) -> None:
+        worker_config = self._config.agent.reporting
+        if not worker_config.enabled or self._stopping.is_set():
+            return
+        worker = self._report_worker_factory(
+            ledger_factory=self._ledger_factory,
+            worker_id="ssv-report-0",
+            lease_ms=worker_config.lease_ms,
+            max_retries=worker_config.max_retries,
+            retry_delay_ms=worker_config.retry_delay_ms,
+            poll_interval_seconds=worker_config.poll_interval_ms / 1000,
+        )
+        if self._stopping.is_set():
+            return
+        self._start_worker_thread("ssv-agent-report", worker.run)
 
     def _build_embedding(self) -> Any:
         backend, model = _embedding_settings(self._config)

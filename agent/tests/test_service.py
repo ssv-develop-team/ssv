@@ -68,15 +68,23 @@ def test_agent_service_starts_and_stops_consumer_and_enabled_workers() -> None:
     consumer = FakeConsumer()
     review_worker = FakeWorker()
     index_worker = FakeWorker()
+    report_worker = FakeWorker()
     client = FakeClient()
     cfg = SsvConfig.model_validate(
-        {"agent": {"review": {"enabled": True}, "indexing": {"enabled": True}}}
+        {
+            "agent": {
+                "review": {"enabled": True},
+                "indexing": {"enabled": True},
+                "reporting": {"enabled": True},
+            }
+        }
     )
     runtime = service.AgentService(
         cfg,
         consumer_factory=lambda _: consumer,
         review_worker_factory=lambda **_: review_worker,
         index_worker_factory=lambda **_: index_worker,
+        report_worker_factory=lambda **_: report_worker,
         client_factory=lambda **_: client,
         embedding_factory=lambda *_args, **_kwargs: object(),
     )
@@ -85,11 +93,118 @@ def test_agent_service_starts_and_stops_consumer_and_enabled_workers() -> None:
     assert consumer.started.wait(1)
     assert review_worker.started.wait(1)
     assert index_worker.started.wait(1)
+    assert report_worker.started.wait(1)
 
     runtime.stop(join_timeout_seconds=1)
 
     assert consumer.stopped.is_set()
     assert client.closed is True
+
+
+def test_report_worker_factory_receives_configured_retry_and_lease_settings() -> None:
+    class FakeConsumer:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.started = Event()
+
+        def run(self, stopping: Event) -> None:
+            self.started.set()
+            stopping.wait()
+
+    observed: dict[str, object] = {}
+    worker = FakeWorker()
+    cfg = SsvConfig.model_validate(
+        {
+            "agent": {
+                "reporting": {
+                    "enabled": True,
+                    "poll_interval_ms": 250,
+                    "lease_ms": 5_000,
+                    "max_retries": 4,
+                    "retry_delay_ms": 2_000,
+                }
+            }
+        }
+    )
+
+    runtime = service.AgentService(
+        cfg,
+        consumer_factory=lambda _: FakeConsumer(),
+        report_worker_factory=lambda **kwargs: observed.update(kwargs) or worker,
+    )
+    runtime.start()
+    assert worker.started.wait(1)
+    runtime.stop(join_timeout_seconds=1)
+
+    assert observed == {
+        "ledger_factory": runtime._ledger_factory,
+        "worker_id": "ssv-report-0",
+        "lease_ms": 5_000,
+        "max_retries": 4,
+        "retry_delay_ms": 2_000,
+        "poll_interval_seconds": 0.25,
+    }
+
+
+def test_disabled_report_worker_is_not_constructed() -> None:
+    class FakeConsumer:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    factory_calls = 0
+
+    def report_worker_factory(**_kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("disabled report worker must not be constructed")
+
+    runtime = service.AgentService(
+        SsvConfig.model_validate({"agent": {"reporting": {"enabled": False}}}),
+        consumer_factory=lambda _: FakeConsumer(),
+        report_worker_factory=report_worker_factory,
+    )
+    runtime.start()
+    runtime.stop(join_timeout_seconds=1)
+
+    assert factory_calls == 0
+
+
+def test_report_worker_thread_is_joined_after_later_startup_failure() -> None:
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.started = Event()
+
+        def run(self, stopping: Event) -> None:
+            self.started.set()
+            stopping.wait()
+
+    worker = FakeWorker()
+
+    def fail_consumer_factory(_config: SsvConfig):
+        raise RuntimeError("consumer creation failed")
+
+    runtime = service.AgentService(
+        SsvConfig.model_validate({"agent": {"reporting": {"enabled": True}}}),
+        consumer_factory=fail_consumer_factory,
+        report_worker_factory=lambda **_: worker,
+    )
+
+    with pytest.raises(RuntimeError, match="consumer creation failed"):
+        runtime.start()
+    assert worker.started.wait(1)
+    runtime.stop(join_timeout_seconds=1)
+
+    assert runtime._worker_threads
+    assert all(not thread.is_alive() for thread in runtime._worker_threads)
 
 
 def test_agent_service_starts_recording_worker_before_review_worker() -> None:
@@ -113,7 +228,20 @@ def test_agent_service_starts_recording_worker_before_review_worker() -> None:
     recording = FakeWorker("recording")
     review = FakeWorker("review")
     index = FakeWorker("index")
-    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "evidence_cache": {"enabled": True, "directory": "/tmp"}, "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True}, "review": {"enabled": True}, "indexing": {"enabled": True}}})
+    report = FakeWorker("report")
+    cfg = SsvConfig.model_validate(
+        {
+            "sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}],
+            "evidence_cache": {"enabled": True, "directory": "/tmp"},
+            "agent": {
+                "evidence_roots": ["/tmp"],
+                "recording_evidence": {"enabled": True},
+                "review": {"enabled": True},
+                "indexing": {"enabled": True},
+                "reporting": {"enabled": True},
+            },
+        }
+    )
     runtime = service.AgentService(
         cfg,
         consumer_factory=lambda _: FakeConsumer(),
@@ -121,10 +249,11 @@ def test_agent_service_starts_recording_worker_before_review_worker() -> None:
         evidence_extractor_factory=lambda **_: object(),
         review_worker_factory=lambda **_: review,
         index_worker_factory=lambda **_: index,
+        report_worker_factory=lambda **_: report,
     )
     runtime.start()
     runtime.stop(join_timeout_seconds=1)
-    assert order[:3] == ["recording", "review", "index"]
+    assert order[:4] == ["recording", "review", "index", "report"]
 
 
 def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory() -> None:
@@ -139,7 +268,23 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
             return None
         def stop(self):
             return None
-    cfg = SsvConfig.model_validate({"sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}], "evidence_cache": {"enabled": True, "directory": "/tmp"}, "agent": {"evidence_roots": ["/tmp"], "recording_evidence": {"enabled": True, "poll_interval_ms": 250, "lease_ms": 5000, "max_retries": 4, "retry_delay_ms": 2000}}})
+    cfg = SsvConfig.model_validate(
+        {
+            "sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}],
+            "evidence_cache": {"enabled": True, "directory": "/tmp"},
+            "agent": {
+                "evidence_roots": ["/tmp"],
+                "recording_evidence": {
+                    "enabled": True,
+                    "poll_interval_ms": 250,
+                    "lease_ms": 5_000,
+                    "max_retries": 4,
+                    "retry_delay_ms": 2_000,
+                },
+                "reporting": {"enabled": False},
+            },
+        }
+    )
     def extractor_factory(**kwargs):
         observed["extractor"] = kwargs
         return object()
@@ -201,7 +346,10 @@ def test_builtin_consumer_factory_receives_recording_ledger(monkeypatch) -> None
         def start(self): return None
         def stop(self): return None
     monkeypatch.setattr(service, "EventConsumer", FakeConsumer)
-    runtime = service.AgentService(SsvConfig(), consumer_factory=FakeConsumer)
+    runtime = service.AgentService(
+        SsvConfig.model_validate({"agent": {"reporting": {"enabled": False}}}),
+        consumer_factory=FakeConsumer,
+    )
     runtime.start()
     runtime.stop(join_timeout_seconds=1)
     assert callable(observed["ledger_factory"])
@@ -220,7 +368,9 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
             stopping.wait()
 
     observed: dict[str, object] = {}
-    cfg = SsvConfig.model_validate({"agent": {"review": {"enabled": True}}})
+    cfg = SsvConfig.model_validate(
+        {"agent": {"review": {"enabled": True}, "reporting": {"enabled": False}}}
+    )
     runtime = service.AgentService(
         cfg,
         consumer_factory=lambda _: FakeConsumer(),
@@ -315,7 +465,14 @@ def test_review_runtime_uses_temporary_extensions_config_and_restores_environmen
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", "/operator/config.yaml")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", "/operator/extensions.json")
     runtime = service.AgentService(
-        SsvConfig.model_validate({"agent": {"review": {"enabled": True}}}),
+        SsvConfig.model_validate(
+            {
+                "agent": {
+                    "review": {"enabled": True},
+                    "reporting": {"enabled": False},
+                }
+            }
+        ),
         consumer_factory=lambda _: FakeConsumer(),
         review_worker_factory=lambda **_: FakeWorker(),
         client_factory=lambda **kwargs: observed.update(
@@ -356,7 +513,13 @@ def test_review_client_loads_isolated_rbac_configuration(monkeypatch) -> None:
     monkeypatch.setenv("SSV_AGENT_SUPPORTS_VISION", "true")
     runtime = service.AgentService(
         SsvConfig.model_validate(
-            {"agent": {"model_name": "default", "review": {"enabled": True}}}
+            {
+                "agent": {
+                    "model_name": "default",
+                    "review": {"enabled": True},
+                    "reporting": {"enabled": False},
+                }
+            }
         ),
         consumer_factory=lambda _: FakeConsumer(),
         review_worker_factory=lambda **_: FakeWorker(),
@@ -440,6 +603,7 @@ def test_indexing_uses_same_embedding_settings_as_search_environment(monkeypatch
                     "embedding_backend": "bge_m3",
                     "embedding_model": "/models/bge-m3",
                 },
+                "reporting": {"enabled": False},
                 "knowledge": {
                     "backend": "qdrant",
                     "qdrant_path": "custom/qdrant",
@@ -601,7 +765,9 @@ def test_stop_defers_resource_cleanup_until_timed_out_worker_exits() -> None:
     consumer = FakeConsumer()
     worker = BlockingWorker()
     client = FakeClient()
-    cfg = SsvConfig.model_validate({"agent": {"review": {"enabled": True}}})
+    cfg = SsvConfig.model_validate(
+        {"agent": {"review": {"enabled": True}, "reporting": {"enabled": False}}}
+    )
     runtime = service.AgentService(
         cfg,
         consumer_factory=lambda _: consumer,
@@ -655,7 +821,10 @@ def test_signal_stop_during_consumer_creation_does_not_deadlock_or_start_ingress
         runtime.request_stop()
         return consumer
 
-    runtime = service.AgentService(SsvConfig(), consumer_factory=consumer_factory)
+    runtime = service.AgentService(
+        SsvConfig.model_validate({"agent": {"reporting": {"enabled": False}}}),
+        consumer_factory=consumer_factory,
+    )
     start_thread = Thread(target=runtime.start, daemon=True)
 
     start_thread.start()

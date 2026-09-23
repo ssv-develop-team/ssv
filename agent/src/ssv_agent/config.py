@@ -67,6 +67,12 @@ class IndexWorkerConfig(WorkerConfig):
     query_text_type: str | None = None
 
 
+class ReportWorkerConfig(WorkerConfig):
+    """把已提交的复核结果整理为可追溯报告。"""
+
+    enabled: bool = True
+
+
 class AgentSourceConfig(_StrictConfigModel):
     """Agent 所需的 source 标识和录像路径来源。"""
 
@@ -145,6 +151,7 @@ class AgentConfig(_StrictConfigModel):
     dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
     review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
     indexing: IndexWorkerConfig = Field(default_factory=IndexWorkerConfig)
+    reporting: ReportWorkerConfig = Field(default_factory=ReportWorkerConfig)
     recording_evidence: RecordingEvidenceConfig = Field(default_factory=RecordingEvidenceConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
 

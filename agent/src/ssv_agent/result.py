@@ -16,6 +16,7 @@ from ssv_agent.review_context import RuleRetrievalContext
 
 
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+_SAFE_ARTIFACT_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,149}\Z")
 
 
 def _outputs_root() -> Path:
@@ -49,6 +50,10 @@ def _write_artifact(root: Path, directory: Path, filename: str, content: bytes) 
     if not resolved.is_relative_to(root):
         raise ValueError("result artifact escapes outputs root")
     if target.exists():
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("artifact target is not a regular file")
+        if target.read_bytes() != content:
+            raise FileExistsError("content-addressed artifact has conflicting contents")
         return resolved
 
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".result-", suffix=".tmp")
@@ -63,6 +68,25 @@ def _write_artifact(root: Path, directory: Path, filename: str, content: bytes) 
     if not resolved.is_relative_to(root):
         raise ValueError("result artifact escapes outputs root")
     return resolved
+
+
+def write_content_addressed_artifact(
+    event_id: str,
+    filename_prefix: str,
+    suffix: str,
+    content: bytes,
+) -> Path:
+    """在事件输出目录原子写入受限名称、内容寻址的 artifact。"""
+    if not _SAFE_ARTIFACT_PREFIX.fullmatch(filename_prefix):
+        raise ValueError("artifact filename prefix is invalid")
+    if not re.fullmatch(r"[a-z0-9]{1,12}", suffix):
+        raise ValueError("artifact suffix is invalid")
+
+    root = _outputs_root()
+    directory = _event_output_dir(root, event_id)
+    digest = hashlib.sha256(content).hexdigest()
+    filename = f"{filename_prefix}-{digest}.{suffix}"
+    return _write_artifact(root, directory, filename, content)
 
 
 class ReviewClaim(BaseModel):
@@ -221,16 +245,12 @@ def parse_review_result(text: str) -> ReviewResult:
 
 def write_result_markdown(event_id: str, text: str) -> Path:
     """原子写入内容寻址的历史 Markdown artifact。"""
-    root = _outputs_root()
     content = text.encode("utf-8")
-    directory = _event_output_dir(root, event_id)
-    digest = hashlib.sha256(content).hexdigest()
-    return _write_artifact(root, directory, f"result-{digest}.md", content)
+    return write_content_addressed_artifact(event_id, "result", "md", content)
 
 
 def write_result_json(event_id: str, result: ReviewResult) -> Path:
     """原子写入内容寻址的结构化复核结果。"""
-    root = _outputs_root()
     content = (
         json.dumps(
             result.model_dump(mode="json"),
@@ -240,6 +260,4 @@ def write_result_json(event_id: str, result: ReviewResult) -> Path:
         )
         + "\n"
     ).encode("utf-8")
-    directory = _event_output_dir(root, event_id)
-    digest = hashlib.sha256(content).hexdigest()
-    return _write_artifact(root, directory, f"result-{digest}.json", content)
+    return write_content_addressed_artifact(event_id, "result", "json", content)

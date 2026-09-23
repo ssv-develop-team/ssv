@@ -356,6 +356,12 @@ sources:
       rule_facts: {}
 agent:
   event_db_path: "data/custom-events.db"
+  reporting:
+    enabled: true
+    poll_interval_ms: 750
+    lease_ms: 8000
+    max_retries: 6
+    retry_delay_ms: 250
   indexing:
     embedding_base_url: "http://127.0.0.1:8080/v1"
     query_text_type: "query"
@@ -412,8 +418,42 @@ sources:
 agent:
   indexing:
     enabled: false
+  reporting: {}
 )yaml");
     static_cast<void>(ssv::ssv_config_load(omitted_path.string()));
+}
+
+void test_rejects_invalid_reporting_worker_settings()
+{
+    struct Case {
+        std::string_view field;
+        std::string_view value;
+        ssv::SsvConfigErrorKind kind;
+    };
+    const Case cases[] = {
+        {"poll_interval_ms", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"lease_ms", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"max_retries", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"retry_delay_ms", "-1", ssv::SsvConfigErrorKind::InvalidValue},
+        {"enabled", "\"true\"", ssv::SsvConfigErrorKind::InvalidType},
+        {"poll_interval_ms", "\"1000\"", ssv::SsvConfigErrorKind::InvalidType},
+    };
+
+    for (const auto &test_case : cases) {
+        const auto yaml = std::string(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  reporting:
+    )yaml") + std::string(test_case.field) + ": "
+            + std::string(test_case.value) + "\n";
+        expect_config_error(
+            yaml,
+            test_case.kind,
+            std::string("agent.reporting.") + std::string(test_case.field));
+    }
 }
 
 void test_evidence_cache_rejects_invalid_values()
@@ -2034,6 +2074,7 @@ int main(int argc, char **argv)
     test_loads_rtsp_encoded_passthrough_config();
     test_loads_example_config(argv[1]);
     test_accepts_shared_agent_config_fields();
+    test_rejects_invalid_reporting_worker_settings();
     test_evidence_cache_rejects_invalid_values();
     test_rejects_invalid_event_db_path();
     test_rejects_invalid_indexing_string_fields();

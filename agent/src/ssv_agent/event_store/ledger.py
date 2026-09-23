@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ssv_agent.event_episode import EpisodePolicy
     from ssv_agent.event_episode import EpisodeTransition
     from ssv_agent.evidence_provider import EvidenceArtifact
+    from ssv_agent.report import ReportArtifact
 from ssv_agent.review_context import Detection, ReviewContext
 
 
@@ -30,6 +31,7 @@ class JobKind(StrEnum):
     REVIEW = "review"
     INDEX = "index"
     EVIDENCE_EXTRACT = "evidence_extract"
+    REPORT = "report"
 
 
 class JobState(StrEnum):
@@ -159,6 +161,41 @@ class DurableJob:
     lease_expires_ms: int | None
     available_at_ms: int
     last_error: str | None
+
+
+@dataclass(frozen=True)
+class ReviewRecord:
+    """append-only 复核历史中的一个精确 revision。"""
+
+    review_id: str
+    event_id: str
+    revision: int
+    verdict: str
+    confidence: float
+    evidence_status: str
+    explanation: str
+    evidence_ids: tuple[str, ...]
+    claims: tuple[dict[str, Any], ...]
+    rule_citations: tuple[dict[str, Any], ...]
+    policy_id: str | None
+    model_id: str | None
+    result_path: str | None
+    created_ms: int
+
+
+@dataclass(frozen=True)
+class ReportRecord:
+    """已登记报告 artifact 的不可变元数据。"""
+
+    report_id: str
+    event_id: str
+    review_id: str
+    review_revision: int
+    template_version: str
+    sha256: str
+    artifact_path: str
+    size_bytes: int
+    created_ms: int
 
 
 @dataclass(frozen=True)
@@ -482,6 +519,44 @@ class EventLedger:
             evidence_window_start=(episode.evidence_window_start if episode else None),
             evidence_window_end=(episode.evidence_window_end if episode else None),
             event_phase=event.get("event_phase"),
+        )
+
+    def get_review_record(self, event_id: str, revision: int) -> ReviewRecord | None:
+        """从 append-only 历史读取指定 revision，而非当前 review 投影。"""
+        row = self._store.get_review_record(event_id, revision)
+        if row is None:
+            return None
+        return ReviewRecord(
+            review_id=row["review_id"],
+            event_id=row["event_id"],
+            revision=row["revision"],
+            verdict=row["verdict"],
+            confidence=row["confidence"],
+            evidence_status=row["evidence_status"],
+            explanation=row["explanation"],
+            evidence_ids=tuple(_json_value(row["evidence_ids_json"], [])),
+            claims=tuple(_json_value(row["claims_json"], [])),
+            rule_citations=tuple(_json_value(row["rule_citations_json"], [])),
+            policy_id=row["policy_id"],
+            model_id=row["model_id"],
+            result_path=row["result_path"],
+            created_ms=row["created_ms"],
+        )
+
+    def get_report_for_review(
+        self,
+        event_id: str,
+        review_id: str,
+    ) -> ReportRecord | None:
+        """返回指定复核版本已登记的报告 artifact 元数据。"""
+        row = self._store.get_report_for_review(event_id, review_id)
+        return self._report_record_from_row(row) if row is not None else None
+
+    def report_records_for_event(self, event_id: str) -> tuple[ReportRecord, ...]:
+        """按复核 revision 返回事件的报告元数据。"""
+        return tuple(
+            self._report_record_from_row(row)
+            for row in self._store.get_reports_for_event(event_id)
         )
 
     def get_episode(self, episode_id: str) -> EventEpisode | None:
@@ -971,7 +1046,7 @@ class EventLedger:
         result: Any,
         result_path: str,
     ) -> int:
-        """以持有者 fence 原子提交 review、投影、索引任务和 job 完成状态。"""
+        """以持有者 fence 原子提交 review、投影、派生任务和 job 完成状态。"""
         if job.kind != JobKind.REVIEW:
             raise ValueError("complete_review_job requires a review job")
 
@@ -1003,6 +1078,106 @@ class EventLedger:
             )
             self._complete_owned_job(connection, job, worker_id)
         return revision
+
+    def complete_report_job(
+        self,
+        job: DurableJob,
+        worker_id: str,
+        artifact: ReportArtifact,
+        template_version: str,
+    ) -> ReportRecord:
+        """原子登记报告元数据并完成当前 lease 持有的 report job。"""
+        if job.kind != JobKind.REPORT:
+            raise ValueError("complete_report_job requires a report job")
+        if not template_version:
+            raise ValueError("template_version must not be empty")
+
+        artifact_path = str(artifact.path)
+        sha256 = artifact.sha256
+        size_bytes = artifact.size_bytes
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+            or not artifact_path
+        ):
+            raise ValueError("report artifact metadata is invalid")
+
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            current_job = connection.execute(
+                "SELECT * FROM durable_jobs WHERE job_id = ?", (job.job_id,)
+            ).fetchone()
+            if current_job is None or (
+                current_job["kind"] != JobKind.REPORT.value
+                or current_job["entity_id"] != job.entity_id
+                or current_job["entity_revision"] != job.entity_revision
+            ):
+                raise LeaseLostError(f"lost lease for durable job {job.job_id}")
+
+            review = connection.execute(
+                "SELECT review_id FROM reviews WHERE event_id = ? AND revision = ?",
+                (job.entity_id, job.entity_revision),
+            ).fetchone()
+            if review is None:
+                raise ValueError("report job has no matching committed review")
+
+            if current_job["state"] == JobState.COMPLETED.value:
+                if job.lease_owner != worker_id or current_job["attempts"] != job.attempts:
+                    raise LeaseLostError(f"lost lease for durable job {job.job_id}")
+                previous = connection.execute(
+                    "SELECT * FROM reports WHERE event_id = ? AND review_id = ?",
+                    (job.entity_id, review["review_id"]),
+                ).fetchone()
+                if previous is None:
+                    raise LeaseLostError(f"completed report job {job.job_id} has no report record")
+                previous_record = self._report_record_from_row(previous)
+                if (
+                    previous_record.template_version != template_version
+                    or previous_record.sha256 != sha256
+                    or previous_record.artifact_path != artifact_path
+                    or previous_record.size_bytes != size_bytes
+                ):
+                    raise ValueError("report artifact conflicts with the completed report")
+                return previous_record
+
+            self._validate_report_lease(current_job, job, worker_id, now_ms)
+
+            report = ReportRecord(
+                report_id=uuid.uuid4().hex,
+                event_id=job.entity_id,
+                review_id=review["review_id"],
+                review_revision=job.entity_revision,
+                template_version=template_version,
+                sha256=sha256,
+                artifact_path=artifact_path,
+                size_bytes=size_bytes,
+                created_ms=now_ms,
+            )
+            connection.execute(
+                """
+                INSERT INTO reports (
+                    report_id, event_id, review_id, review_revision,
+                    template_version, sha256, artifact_path, size_bytes, created_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report.report_id,
+                    report.event_id,
+                    report.review_id,
+                    report.review_revision,
+                    report.template_version,
+                    report.sha256,
+                    report.artifact_path,
+                    report.size_bytes,
+                    report.created_ms,
+                ),
+            )
+            self._complete_owned_job_kind(connection, job, worker_id, JobKind.REPORT)
+        return report
 
     def complete_evidence_extract_job(
         self,
@@ -1260,20 +1435,27 @@ class EventLedger:
             claim.model_dump(mode="json") if hasattr(claim, "model_dump") else claim
             for claim in getattr(result, "claims", ())
         ]
+        rule_citations = [
+            citation.model_dump(mode="json")
+            if hasattr(citation, "model_dump")
+            else citation
+            for citation in getattr(result, "rule_citations", ())
+        ]
         self._validate_evidence_references(connection, event_id, result, evidence_ids)
         revision = event["revision"] + 1
         policy_id = getattr(result, "policy_id", None)
         model_id = getattr(result, "model_id", None)
+        review_id = uuid.uuid4().hex
         connection.execute(
             """
             INSERT INTO reviews (
                 review_id, event_id, revision, policy_id, model_id, verdict,
                 confidence, evidence_status, explanation, evidence_ids_json,
-                claims_json, result_path, created_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                claims_json, rule_citations_json, result_path, created_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                uuid.uuid4().hex,
+                review_id,
                 event_id,
                 revision,
                 policy_id,
@@ -1284,6 +1466,7 @@ class EventLedger:
                 result.explanation,
                 json.dumps(evidence_ids, ensure_ascii=False),
                 json.dumps(claims, ensure_ascii=False),
+                json.dumps(rule_citations, ensure_ascii=False),
                 result_path,
                 now_ms,
             ),
@@ -1337,6 +1520,16 @@ class EventLedger:
             """,
             (event_id, revision, now_ms, now_ms, now_ms),
         )
+        connection.execute(
+            """
+            INSERT INTO durable_jobs (
+                kind, entity_id, entity_revision, state, attempts,
+                available_at_ms, created_ms, updated_ms
+            ) VALUES ('report', ?, ?, 'pending', 0, ?, ?, ?)
+            ON CONFLICT(kind, entity_id, entity_revision) DO NOTHING
+            """,
+            (event_id, revision, now_ms, now_ms, now_ms),
+        )
         return revision
 
     @staticmethod
@@ -1364,6 +1557,20 @@ class EventLedger:
     def _validate_extract_lease(row: Any, job: DurableJob, worker_id: str, now_ms: int) -> None:
         if row is None or (
             row["kind"] != JobKind.EVIDENCE_EXTRACT.value
+            or row["entity_id"] != job.entity_id
+            or row["entity_revision"] != job.entity_revision
+            or row["state"] != JobState.PROCESSING.value
+            or row["lease_owner"] != worker_id
+            or row["attempts"] != job.attempts
+            or row["lease_expires_ms"] is None
+            or row["lease_expires_ms"] <= now_ms
+        ):
+            raise LeaseLostError(f"lost lease for durable job {job.job_id}")
+
+    @staticmethod
+    def _validate_report_lease(row: Any, job: DurableJob, worker_id: str, now_ms: int) -> None:
+        if row is None or (
+            row["kind"] != JobKind.REPORT.value
             or row["entity_id"] != job.entity_id
             or row["entity_revision"] != job.entity_revision
             or row["state"] != JobState.PROCESSING.value
@@ -1582,6 +1789,20 @@ class EventLedger:
         """返回事件实体的持久任务，保持创建顺序。"""
         rows = self._store.get_jobs_for_entity(event_id)
         return tuple(self._job_from_row(row) for row in rows)
+
+    @staticmethod
+    def _report_record_from_row(row: Any) -> ReportRecord:
+        return ReportRecord(
+            report_id=row["report_id"],
+            event_id=row["event_id"],
+            review_id=row["review_id"],
+            review_revision=row["review_revision"],
+            template_version=row["template_version"],
+            sha256=row["sha256"],
+            artifact_path=row["artifact_path"],
+            size_bytes=row["size_bytes"],
+            created_ms=row["created_ms"],
+        )
 
     @staticmethod
     def _job_from_row(row: Any) -> DurableJob:

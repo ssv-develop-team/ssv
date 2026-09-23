@@ -303,6 +303,12 @@ agent:
     retry_delay_ms: 200
     embedding_backend: "bge_m3"
     embedding_model: "/models/bge-m3"
+  reporting:
+    enabled: true
+    poll_interval_ms: 750
+    lease_ms: 8000
+    max_retries: 6
+    retry_delay_ms: 250
 """.strip(),
         encoding="utf-8",
     )
@@ -314,6 +320,30 @@ agent:
     assert cfg.agent.indexing.enabled is True
     assert cfg.agent.indexing.embedding_backend == "bge_m3"
     assert cfg.agent.indexing.embedding_model == "/models/bge-m3"
+    assert cfg.agent.reporting.enabled is True
+    assert cfg.agent.reporting.poll_interval_ms == 750
+    assert cfg.agent.reporting.lease_ms == 8000
+    assert cfg.agent.reporting.max_retries == 6
+    assert cfg.agent.reporting.retry_delay_ms == 250
+
+
+def test_reporting_worker_defaults_enabled_and_rejects_invalid_settings() -> None:
+    defaults = SsvConfig().agent.reporting
+    assert defaults.enabled is True
+    assert defaults.poll_interval_ms == 1000
+    assert defaults.lease_ms == 30_000
+    assert defaults.max_retries == 3
+    assert defaults.retry_delay_ms == 1000
+
+    for invalid in (
+        {"enabled": "true"},
+        {"poll_interval_ms": 0},
+        {"lease_ms": 0},
+        {"max_retries": 0},
+        {"retry_delay_ms": -1},
+    ):
+        with pytest.raises(ValidationError):
+            SsvConfig.model_validate({"agent": {"reporting": invalid}})
 
 
 def test_knowledge_config_has_safe_defaults_and_validates_threshold() -> None:
