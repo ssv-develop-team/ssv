@@ -320,7 +320,7 @@ class EventLedger:
         recording_evidence: RecordingEvidenceConfig | None = None,
     ) -> None:
         self._evidence_roots = _load_evidence_roots(evidence_roots)
-        self._recording_evidence = recording_evidence or RecordingEvidenceConfig()
+        self._recording_evidence = recording_evidence
         self._store = SsvEventStore(db_path)
 
     @property
@@ -427,7 +427,7 @@ class EventLedger:
         self._record_evidence(connection, event_id, context)
         if create_jobs:
             jobs_to_create: tuple[tuple[JobKind, int], ...]
-            if self._recording_evidence.enabled:
+            if self._recording_evidence is not None:
                 jobs_to_create = (
                     (
                         JobKind.EVIDENCE_EXTRACT,

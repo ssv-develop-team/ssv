@@ -72,8 +72,8 @@ def _extractor(
     evidence_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)
     return SsvCacheEvidenceExtractor(
-        RecordingEvidenceConfig(enabled=True),
-        EvidenceCacheConfig(enabled=True, directory=str(cache_root)),
+        RecordingEvidenceConfig(),
+        EvidenceCacheConfig(directory=str(cache_root)),
         [str(evidence_root)],
         runner=runner,
     )

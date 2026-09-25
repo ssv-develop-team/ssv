@@ -195,7 +195,6 @@ tracking:
     method: "sparse-opt-flow"
     downscale: 3
 evidence_cache:
-  enabled: true
   directory: "/var/lib/ssv/evidence-cache"
   segment_duration_ms: 5000
   retention_ms: 60000
@@ -262,7 +261,6 @@ agent:
     assert(config.tracking.gmc.method ==
         ssv::SsvGmcMethod::SparseOpticalFlow);
     assert(config.tracking.publish_cooldown_ms == 12000);
-    assert(config.evidence_cache.enabled);
     assert(config.evidence_cache.directory == "/var/lib/ssv/evidence-cache");
     assert(config.evidence_cache.segment_duration_ms == 5000);
     assert(config.evidence_cache.retention_ms == 60000);
@@ -1322,12 +1320,10 @@ sources:
 inference:
   enabled: false
 evidence_cache:
-  enabled: true
   directory: "/var/lib/ssv/evidence"
 agent:
   evidence_roots: ["/var/lib/ssv"]
   recording_evidence:
-    enabled: true
     poll_interval_ms: 1000
     lease_ms: 30000
     max_retries: 3
@@ -1360,7 +1356,7 @@ agent:
         "agent.recording_evidence.provider");
 }
 
-void test_rejects_recording_evidence_without_cache()
+void test_rejects_removed_recording_evidence_enabled_key()
 {
     expect_config_error(R"yaml(
 version: "2.0"
@@ -1372,7 +1368,21 @@ agent:
   recording_evidence:
     enabled: true
 )yaml",
-        ssv::SsvConfigErrorKind::InvalidValue,
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "agent.recording_evidence.enabled");
+}
+
+void test_rejects_removed_evidence_cache_enabled_key()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+evidence_cache:
+  enabled: false
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
         "evidence_cache.enabled");
 }
 
@@ -1384,12 +1394,10 @@ sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
 evidence_cache:
-  enabled: true
   directory: "/tmp/ssv-evidence-cache"
 agent:
   evidence_roots: ["/var/lib/ssv"]
-  recording_evidence:
-    enabled: true
+  recording_evidence: {}
 )yaml",
         ssv::SsvConfigErrorKind::InvalidValue,
         "evidence_cache.directory");
@@ -1406,7 +1414,6 @@ inference:
   enabled: false
 agent:
   recording_evidence:
-    enabled: false
 )yaml";
 
     for (const auto &invalid : std::array {
@@ -1450,7 +1457,6 @@ inference:
   enabled: false
 agent:
   recording_evidence:
-    enabled: true
 )yaml";
 
     for (const auto &invalid : std::array {
@@ -2107,7 +2113,8 @@ int main(int argc, char **argv)
     test_rejects_deep_unknown_key();
     test_accepts_recording_evidence_extension();
     test_rejects_recording_evidence_unknown_key();
-    test_rejects_recording_evidence_without_cache();
+    test_rejects_removed_recording_evidence_enabled_key();
+    test_rejects_removed_evidence_cache_enabled_key();
     test_rejects_recording_evidence_cache_outside_root();
     test_rejects_invalid_recording_evidence_episode_settings();
     test_rejects_recording_evidence_wrong_type();

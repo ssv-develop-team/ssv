@@ -22,6 +22,7 @@ from ssv_agent.config import SsvConfig
 from ssv_agent.embedding.registry import create_provider
 from ssv_agent.evidence_provider import EvidenceExtractor
 from ssv_agent.event_consumer import EventConsumer
+from ssv_agent.event_episode import EventEpisodeAggregator
 from ssv_agent.event_store import EventLedger
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
 from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
@@ -277,7 +278,7 @@ class AgentService:
 
     def _start_recording_evidence_worker(self) -> None:
         worker_config = self._config.agent.recording_evidence
-        if not worker_config.enabled or self._stopping.is_set():
+        if self._stopping.is_set():
             return
         extractor = self._create_evidence_extractor()
         if self._stopping.is_set():
@@ -306,7 +307,13 @@ class AgentService:
     def _create_consumer(self) -> EventConsumer:
         """让内置 consumer 使用包含 recording 策略的独立账本连接。"""
         if self._consumer_factory is EventConsumer:
-            return self._consumer_factory(self._config, ledger_factory=self._ledger_factory)
+            return self._consumer_factory(
+                self._config,
+                ledger_factory=self._ledger_factory,
+                episode_aggregator=EventEpisodeAggregator(
+                    self._config.agent.recording_evidence
+                ),
+            )
         return self._consumer_factory(self._config)
 
     def _start_index_worker(self) -> None:

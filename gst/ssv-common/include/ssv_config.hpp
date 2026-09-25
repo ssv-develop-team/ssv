@@ -244,7 +244,6 @@ struct SsvTrackingConfig {
 };
 
 struct SsvEvidenceCacheConfig {
-    bool enabled = false;
     std::string directory = "/var/lib/ssv/evidence-cache";
     int segment_duration_ms = 10000;
     int retention_ms = 120000;

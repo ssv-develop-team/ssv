@@ -24,6 +24,8 @@ _AGENT_CONFIG_KEYS = frozenset(
     {"version", "logging", "redis", "sources", "evidence_cache", "agent"}
 )
 
+_DEFAULT_EVIDENCE_DIRECTORY = "/var/lib/ssv/evidence-cache"
+
 
 class _StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -45,14 +47,19 @@ class RedisConfig(_StrictConfigModel):
     consumer_name: str | None = Field(default=None, min_length=1)
 
 
-class WorkerConfig(_StrictConfigModel):
-    """持久 worker 的领取与重试策略。"""
+class PollingWorkerConfig(_StrictConfigModel):
+    """持久轮询 worker 的领取与重试策略。"""
 
-    enabled: bool = False
     poll_interval_ms: int = Field(default=1000, gt=0)
     lease_ms: int = Field(default=30_000, gt=0)
     max_retries: int = Field(default=3, ge=1)
     retry_delay_ms: int = Field(default=1000, ge=0)
+
+
+class WorkerConfig(PollingWorkerConfig):
+    """可按部署需要启停的持久 worker 配置。"""
+
+    enabled: bool = False
 
 
 class ReviewWorkerConfig(WorkerConfig):
@@ -80,7 +87,7 @@ class AgentSourceConfig(_StrictConfigModel):
     uri: str = Field(min_length=1)
 
 
-class RecordingEvidenceConfig(WorkerConfig):
+class RecordingEvidenceConfig(PollingWorkerConfig):
     """由 Agent 持久 worker 读取 SSV cache 并生成上下文证据的配置。"""
 
     retry_delay_ms: int = Field(default=2_000, ge=0)
@@ -118,8 +125,7 @@ class KnowledgeConfig(_StrictConfigModel):
 class EvidenceCacheConfig(_StrictConfigModel):
     """由 GStreamer 生成、供 Agent 取证的短时循环缓存配置。"""
 
-    enabled: bool = False
-    directory: str = "/var/lib/ssv/evidence-cache"
+    directory: str = _DEFAULT_EVIDENCE_DIRECTORY
     segment_duration_ms: int = Field(default=10_000, ge=1_000)
     retention_ms: int = Field(default=120_000, ge=1_000)
     max_bytes_mb: int = Field(default=512, ge=1)
@@ -146,7 +152,7 @@ class AgentConfig(_StrictConfigModel):
     model_name: str | None = None
     event_db_path: str = Field(default="data/events.db", min_length=1)
     output_dir: str = Field(default="outputs", min_length=1)
-    evidence_roots: list[str] = Field(default_factory=list)
+    evidence_roots: list[str] = Field(default_factory=lambda: [_DEFAULT_EVIDENCE_DIRECTORY])
     dedup_enabled: bool = True
     dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
     review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
@@ -162,13 +168,6 @@ class AgentConfig(_StrictConfigModel):
             if not Path(root).is_absolute():
                 raise ValueError("evidence_roots entries must be absolute paths")
         return roots
-
-    @model_validator(mode="after")
-    def validate_recording_evidence(self) -> Self:
-        recording_evidence = self.recording_evidence
-        if recording_evidence.enabled and not self.evidence_roots:
-            raise ValueError("recording_evidence requires non-empty evidence_roots")
-        return self
 
 
 class SsvConfig(_StrictConfigModel):
@@ -205,13 +204,8 @@ class SsvConfig(_StrictConfigModel):
 
     @model_validator(mode="after")
     def validate_recording_evidence_cache(self) -> Self:
-        recording = self.agent.recording_evidence
-        if not recording.enabled:
-            return self
-        if not self.evidence_cache.enabled:
-            raise ValueError(
-                "recording_evidence requires evidence_cache.enabled"
-            )
+        if not self.agent.evidence_roots:
+            raise ValueError("recording_evidence requires non-empty evidence_roots")
         cache_directory = Path(self.evidence_cache.directory).resolve(strict=False)
         allowed = any(
             cache_directory == root or root in cache_directory.parents

@@ -144,7 +144,7 @@ rtspsrc -> capsfilter(application/x-rtp,H264) -> rtph264depay -> h264parse
                                                                     -> decoded-tee
 ~~~
 
-evidence_cache.enabled 时，encoded branch 持续写短时分段。分段和 sidecar 完整关闭后，Agent 才能读取。证据 cache 不依赖是否开启 display 或 inference。
+encoded branch 始终持续写短时证据分段。分段和 sidecar 完整关闭后，Agent 才能读取。证据 cache 不依赖是否开启 display 或 inference。
 
 ### 4.2 分析分支
 

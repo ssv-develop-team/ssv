@@ -226,9 +226,6 @@ public:
         , source_directory_(
               fs::path(config_.directory) / encode_path_component(source_id_))
     {
-        if (!config_.enabled)
-            throw std::invalid_argument(
-                "SsvEvidenceCache requires enabled configuration");
         if (source_id_.empty())
             throw std::invalid_argument("evidence cache source_id must not be empty");
         if (!source_context_)

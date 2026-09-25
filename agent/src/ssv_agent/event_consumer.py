@@ -64,7 +64,7 @@ class EventConsumer:
             if episode_aggregator is not None
             else (
                 EventEpisodeAggregator(config.agent.recording_evidence)
-                if config.agent.recording_evidence.enabled
+                if ledger_factory is None
                 else None
             )
         )
@@ -218,11 +218,7 @@ class EventConsumer:
             self._redis.xack(self._stream, self._group, msg_id)
             return
 
-        decision = (
-            self._deduper.decide(context)
-            if self._deduper is not None
-            else DedupDecision.RUN
-        )
+        decision = self._deduper.decide(context) if self._deduper is not None else DedupDecision.RUN
         if decision is DedupDecision.SKIP and self._episode_aggregator is None:
             logger.info(
                 "duplicate event skipped",
@@ -245,9 +241,7 @@ class EventConsumer:
                         logger.info(
                             "duplicate event merged into episode",
                             event_id=context.event_id,
-                            episode_id=(
-                                outcome.episode.episode_id if outcome.episode else None
-                            ),
+                            episode_id=(outcome.episode.episode_id if outcome.episode else None),
                         )
                 else:
                     ledger.record(context)

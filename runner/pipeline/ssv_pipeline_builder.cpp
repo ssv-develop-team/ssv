@@ -760,22 +760,18 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
         stage("rtph264depay", "h264-depay"),
         stage("h264parse", "h264-parser"),
     };
-    if (config.evidence_cache.enabled || plan.display_encoded_passthrough) {
-        topology.encoded_tee = stage("tee", "encoded-tee");
-    }
-    if (config.evidence_cache.enabled) {
-        topology.evidence_cache = PipelineBranchTopology {
-            .stages = {
-                stage("queue", "evidence-cache-queue"),
-                stage("splitmuxsink", "evidence-cache-sink"),
-            },
-            .queue_capacity = 32,
-            .leaky_downstream = true,
-            .drop_only = false,
-            .max_rate = std::nullopt,
-        };
-        topology.required_factories = {"mp4mux"};
-    }
+    topology.encoded_tee = stage("tee", "encoded-tee");
+    topology.evidence_cache = PipelineBranchTopology {
+        .stages = {
+            stage("queue", "evidence-cache-queue"),
+            stage("splitmuxsink", "evidence-cache-sink"),
+        },
+        .queue_capacity = 32,
+        .leaky_downstream = true,
+        .drop_only = false,
+        .max_rate = std::nullopt,
+    };
+    topology.required_factories = {"mp4mux"};
     if (plan.codec.decoded_path_required) {
         topology.decode_path = {
             stage(decode.decoder_factory, "h264-decoder"),

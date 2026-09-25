@@ -120,7 +120,6 @@ agent:
 
 ```yaml
 evidence_cache:
-  enabled: true
   directory: "/var/lib/ssv/evidence-cache"
   segment_duration_ms: 10000
   retention_ms: 120000
@@ -130,7 +129,6 @@ agent:
   evidence_roots:
     - "/var/lib/ssv/evidence-cache"
   recording_evidence:
-    enabled: true
     clip_before_ms: 2500
     clip_after_ms: 2500
     merge_gap_ms: 3000
@@ -139,11 +137,11 @@ agent:
     max_episode_ms: 30000
 ```
 
-`evidence_cache.directory` 必须是绝对路径，并且在 `agent.evidence_roots` 的某个根目录内；否则 Agent 拒绝启动。启用 `recording_evidence` 时，`evidence_cache.enabled` 也必须为 true。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
+`evidence_cache.directory` 必须是绝对路径，并且在 `agent.evidence_roots` 的某个根目录内；否则 Agent 拒绝启动。证据缓存和录像取证始终启用。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
 
 缓存只保留 `retention_ms` 内的分段，并受 `max_bytes_mb` 限制；它不是长期录像。缓存运行中的分段收尾或 sidecar 写入失败时，runner 的解码、检测、跟踪和 Redis 发布仍继续；Agent 会按 worker 重试策略等待窗口，最终失败则进入 `manual_review`。首次启动时若缓存目录无法创建或 GStreamer 能力缺失，runner 会报告 capability failure 并拒绝启动，避免启用后静默丢失全部证据。
 
-`recording_evidence` 与 `review`、`indexing` 共用持久 Worker 的运行参数接口。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，默认重试间隔为 2 秒；这些值可以在 `recording_evidence` 下单独调整。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
+`recording_evidence` 使用持久 Worker 的轮询、lease 和重试参数接口，但没有启停开关。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，默认重试间隔为 2 秒；这些值可以在 `recording_evidence` 下单独调整。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
 
 Agent 不再为每一条重复检测单独取证。相同 source、事件规则和 `stream_generation` 内，
 相邻 `source_pts` 观测会合并为一个 episode；`merge_gap_ms` 控制可合并间隔，

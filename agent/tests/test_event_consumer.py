@@ -99,23 +99,27 @@ def make_consumer(monkeypatch: Any) -> tuple[EventConsumer, FakeRedis]:
     return consumer, fake
 
 
-def test_default_ledger_factory_propagates_recording_evidence_config(monkeypatch: Any, tmp_path: Path) -> None:
+def test_default_ledger_factory_propagates_recording_evidence_config(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
     monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kwargs: FakeRedis())
     config = SsvConfig.model_validate(
         {
             "evidence_cache": {
-                "enabled": True,
                 "directory": str(tmp_path),
             },
             "agent": {
                 "evidence_roots": [str(tmp_path)],
-                "recording_evidence": {"enabled": True},
-            }
+                "recording_evidence": {},
+            },
         }
     )
     consumer = EventConsumer(config)
     factory = consumer._ledger_factory
-    assert getattr(factory, "keywords", {}).get("recording_evidence") == config.agent.recording_evidence
+    assert (
+        getattr(factory, "keywords", {}).get("recording_evidence")
+        == config.agent.recording_evidence
+    )
 
 
 def test_valid_event_records_before_ack(monkeypatch: Any) -> None:
@@ -157,10 +161,11 @@ def test_out_of_bounds_evidence_is_ignored_while_event_is_recorded_and_acked(
     monkeypatch.setattr("ssv_agent.event_consumer.Redis", lambda **_kwargs: fake)
     config = SsvConfig.model_validate(
         {
+            "evidence_cache": {"directory": str(root)},
             "agent": {
                 "dedup_enabled": False,
                 "evidence_roots": [str(root)],
-            }
+            },
         }
     )
     consumer = EventConsumer(config)
@@ -184,12 +189,10 @@ def test_out_of_bounds_evidence_is_ignored_while_event_is_recorded_and_acked(
     assert fake.acked == [("ssv:events", "ssv-agent", "123-0")]
     with EventLedger(db_path, evidence_roots=[str(root)]) as ledger:
         case = ledger.get_case("case-1")
-        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
-        index_job = ledger.claim_job(JobKind.INDEX, "indexer", lease_ms=1_000)
+        jobs = ledger.jobs_for_event("case-1")
     assert case is not None
     assert case.evidence == ()
-    assert review_job is not None
-    assert index_job is not None
+    assert jobs == ()
 
 
 def test_ensure_group_creates_stream_group(monkeypatch: Any) -> None:
@@ -223,7 +226,7 @@ def test_handle_event_parses_detection_and_acks(
     assert case.detections[0]["class_name"] == "person"
 
 
-def test_handle_event_acks_deterministic_duplicate_without_recording(
+def test_handle_event_acks_deterministic_duplicate_before_episode_anchor(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -254,7 +257,10 @@ def test_handle_event_acks_deterministic_duplicate_without_recording(
 
     assert fake.acked == [("ssv:events", "ssv-agent", "123-0")]
     with EventLedger(tmp_path / "events.db") as ledger:
-        assert ledger.get_case("123-0") is None
+        case = ledger.get_case("123-0")
+        jobs = ledger.jobs_for_event("123-0")
+    assert case is not None
+    assert jobs == ()
 
 
 def test_dedup_skip_updates_episode_and_terminal_event_creates_one_extract_job(
@@ -270,10 +276,10 @@ def test_dedup_skip_updates_episode_and_terminal_event_creates_one_extract_job(
     fake.keys[_track_key("ssv:agent:dedup", "camera-1", 5)] = 30_000
     config = SsvConfig.model_validate(
         {
-            "evidence_cache": {"enabled": True, "directory": str(root)},
+            "evidence_cache": {"directory": str(root)},
             "agent": {
                 "evidence_roots": [str(root)],
-                "recording_evidence": {"enabled": True},
+                "recording_evidence": {},
             },
         }
     )
@@ -287,7 +293,7 @@ def test_dedup_skip_updates_episode_and_terminal_event_creates_one_extract_job(
                 "event": json.dumps(
                     {
                         "source": "camera-1",
-                            "timestamp_ms": timestamp_ms,
+                        "timestamp_ms": timestamp_ms,
                         "frame_id": state,
                         "stream_generation": 7,
                         "source_pts": pts,
@@ -316,15 +322,13 @@ def test_dedup_skip_updates_episode_and_terminal_event_creates_one_extract_job(
         recording_evidence=config.agent.recording_evidence,
     ) as ledger:
         episode = ledger.get_episode("1-0")
-        jobs = [
-            job
-            for job in ledger.jobs_for_event("1-0")
-            if job.kind is JobKind.EVIDENCE_EXTRACT
-        ]
+        jobs = [job for job in ledger.jobs_for_event("1-0") if job.kind is JobKind.EVIDENCE_EXTRACT]
 
-    assert fake.acked == [("ssv:events", "ssv-agent", "1-0"),
-                          ("ssv:events", "ssv-agent", "2-0"),
-                          ("ssv:events", "ssv-agent", "3-0")]
+    assert fake.acked == [
+        ("ssv:events", "ssv-agent", "1-0"),
+        ("ssv:events", "ssv-agent", "2-0"),
+        ("ssv:events", "ssv-agent", "3-0"),
+    ]
     assert episode is not None
     assert episode.event_ids == ("1-0", "2-0", "3-0")
     assert len(jobs) == 1
@@ -338,7 +342,7 @@ def test_handle_event_acks_malformed_json(monkeypatch: Any) -> None:
     assert fake.acked == [("ssv:events", "ssv-agent", "123-0")]
 
 
-def test_successful_record_acks_without_waiting_for_review_worker(
+def test_successful_record_acks_without_waiting_for_evidence_worker(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -356,9 +360,10 @@ def test_successful_record_acks_without_waiting_for_review_worker(
 
     assert fake.acked == [("ssv:events", "ssv-agent", "123-0")]
     with EventLedger(tmp_path / "events.db") as ledger:
-        review_job = ledger.claim_job(JobKind.REVIEW, "test-worker", lease_ms=1_000)
-    assert review_job is not None
-    assert review_job.entity_id == "123-0"
+        case = ledger.get_case("123-0")
+        jobs = ledger.jobs_for_event("123-0")
+    assert case is not None
+    assert jobs == ()
 
 
 def test_ledger_failure_leaves_valid_message_pending(

@@ -34,6 +34,11 @@ void record_finalized(gpointer data, GObject *)
 ssv::SsvConfig make_config()
 {
     ssv::SsvConfig config;
+    config.evidence_cache.directory =
+        (std::filesystem::temp_directory_path()
+            / ("ssv-pipeline-builder-default-cache-"
+                + std::to_string(::getpid())))
+            .string();
     ssv::SsvSourceConfig source;
     source.id = "camera-01";
     source.uri = "rtsp://127.0.0.1/test";
@@ -166,7 +171,9 @@ void test_va_topology_freezes_order_backpressure_and_rate_contracts()
         "rtph264depay",
         "h264parse",
     }));
-    assert(!topology.encoded_tee);
+    assert(topology.encoded_tee);
+    assert(topology.encoded_tee->factory == "tee");
+    assert(topology.evidence_cache.has_value());
     assert(factories(topology.decode_path) == std::vector<std::string>({
         "varenderD129h264dec",
         "capsfilter",
@@ -343,10 +350,9 @@ void test_nvdec_downloads_cuda_frames_for_cpu_consumers()
             ssv::SsvMemoryKind::SystemMemory});
 }
 
-void test_evidence_cache_topology_is_optional()
+void test_evidence_cache_topology_is_mandatory()
 {
     auto config = make_config();
-    config.evidence_cache.enabled = true;
     const auto registry = make_registry();
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config, snapshot_of(registry));
@@ -502,7 +508,6 @@ void test_rtsp_encoded_passthrough_coexists_with_analysis_and_evidence()
     config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
     config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
     config.display.rtsp.encoded_passthrough = true;
-    config.evidence_cache.enabled = true;
     config.inference.enabled = true;
     config.tracking.enabled = true;
 
@@ -589,7 +594,6 @@ void test_rtsp_encoded_passthrough_builder_connects_analysis_and_evidence()
     config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
     config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
     config.display.rtsp.encoded_passthrough = true;
-    config.evidence_cache.enabled = true;
     const auto cache_root = fs::temp_directory_path()
         / ("ssv-pipeline-builder-passthrough-cache-"
            + std::to_string(::getpid()));
@@ -736,7 +740,6 @@ void test_builder_configures_evidence_cache_queue()
     config.display.enabled = false;
     config.inference.enabled = false;
     config.tracking.enabled = false;
-    config.evidence_cache.enabled = true;
     const auto cache_root = fs::temp_directory_path()
         / ("ssv-pipeline-builder-cache-" + std::to_string(::getpid()));
     std::error_code error;
@@ -906,6 +909,8 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
         "tee",
         "queue",
         "fakesink",
+        "splitmuxsink",
+        "mp4mux",
     };
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config, snapshot_of(registry));
@@ -1308,6 +1313,22 @@ void test_nvdec_decoder_disables_qos_and_discards_corrupted_frames()
     if (!registry.has_gstreamer_element("nvh264dec"))
         return;
 
+    for (const char *factory : {"nvh264dec", "cudadownload"}) {
+        auto *element = gst_element_factory_make(factory, nullptr);
+        if (element == nullptr)
+            return;
+        const bool exposes_device_selector =
+            g_object_class_find_property(
+                G_OBJECT_GET_CLASS(element), "cuda-device-id") != nullptr
+            || g_object_class_find_property(
+                G_OBJECT_GET_CLASS(element), "device-id") != nullptr
+            || g_object_class_find_property(
+                G_OBJECT_GET_CLASS(element), "gpu-id") != nullptr;
+        gst_object_unref(element);
+        if (!exposes_device_selector)
+            return;
+    }
+
     auto config = make_config();
     config.sources.front().decode.mode = ssv::SsvDecodeMode::Nvdec;
     config.sources.front().decode.device = {
@@ -1320,10 +1341,20 @@ void test_nvdec_decoder_disables_qos_and_discards_corrupted_frames()
 
     const auto plan = ssv::SsvPipelinePlan::resolve(
         config, snapshot_of(registry));
-    auto instance = ssv::SsvPipelineBuilder::build(
-        config, plan, nullptr);
+    std::optional<ssv::SsvPipelineInstance> instance;
+    try {
+        instance.emplace(ssv::SsvPipelineBuilder::build(
+            config, plan, nullptr));
+    } catch (const ssv::SsvPipelineBuilderError &error) {
+        if (std::string(error.what()).find(
+                "CUDA element does not expose its device selector")
+            != std::string::npos) {
+            return;
+        }
+        throw;
+    }
     GstElement *decoder = gst_bin_get_by_name(
-        GST_BIN(instance.pipeline()), "h264-decoder");
+        GST_BIN(instance->pipeline()), "h264-decoder");
     assert(decoder != nullptr);
 
     gboolean qos = TRUE;
@@ -1362,11 +1393,17 @@ void test_system_registry_snapshot_includes_pipeline_elements()
 
 int main(int argc, char **argv)
 {
+    const auto default_cache_root = std::filesystem::temp_directory_path()
+        / ("ssv-pipeline-builder-default-cache-"
+            + std::to_string(::getpid()));
+    std::error_code default_cache_error;
+    std::filesystem::remove_all(default_cache_root, default_cache_error);
+
     gst_init(&argc, &argv);
     test_va_topology_freezes_order_backpressure_and_rate_contracts();
     test_va_hardware_pair_keeps_frames_in_va_memory_until_encode();
     test_nvdec_downloads_cuda_frames_for_cpu_consumers();
-    test_evidence_cache_topology_is_optional();
+    test_evidence_cache_topology_is_mandatory();
     test_rtsp_topology_uses_encoded_gstreamer_output();
     test_rtsp_overlay_topology_inserts_burn_in_stage();
     test_rtsp_encoded_passthrough_topology_uses_encoded_tee();
@@ -1386,5 +1423,6 @@ int main(int argc, char **argv)
     test_pipeline_instance_classifies_message_origins();
     test_nvdec_decoder_disables_qos_and_discards_corrupted_frames();
     test_system_registry_snapshot_includes_pipeline_elements();
+    std::filesystem::remove_all(default_cache_root, default_cache_error);
     return 0;
 }

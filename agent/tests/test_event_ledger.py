@@ -38,7 +38,7 @@ def _context() -> ReviewContext:
 
 
 def _enabled_config() -> RecordingEvidenceConfig:
-    return RecordingEvidenceConfig(enabled=True, clip_after_ms=2500)
+    return RecordingEvidenceConfig(clip_after_ms=2500)
 
 
 def _artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:

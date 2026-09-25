@@ -232,10 +232,10 @@ def test_agent_service_starts_recording_worker_before_review_worker() -> None:
     cfg = SsvConfig.model_validate(
         {
             "sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}],
-            "evidence_cache": {"enabled": True, "directory": "/tmp"},
+            "evidence_cache": {"directory": "/tmp"},
             "agent": {
                 "evidence_roots": ["/tmp"],
-                "recording_evidence": {"enabled": True},
+                "recording_evidence": {},
                 "review": {"enabled": True},
                 "indexing": {"enabled": True},
                 "reporting": {"enabled": True},
@@ -271,11 +271,10 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
     cfg = SsvConfig.model_validate(
         {
             "sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}],
-            "evidence_cache": {"enabled": True, "directory": "/tmp"},
+            "evidence_cache": {"directory": "/tmp"},
             "agent": {
                 "evidence_roots": ["/tmp"],
                 "recording_evidence": {
-                    "enabled": True,
                     "poll_interval_ms": 250,
                     "lease_ms": 5_000,
                     "max_retries": 4,
@@ -307,14 +306,11 @@ def test_evidence_extractor_factory_receives_shared_cache_config(tmp_path: Path)
     cfg = SsvConfig.model_validate(
         {
             "evidence_cache": {
-                "enabled": True,
                 "directory": str(tmp_path / "cache"),
             },
             "agent": {
                 "evidence_roots": [str(tmp_path)],
-                "recording_evidence": {
-                    "enabled": True,
-                },
+                "recording_evidence": {},
             },
         }
     )

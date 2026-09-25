@@ -29,9 +29,8 @@ redis:
   consumer_name: null
 
 # SSV 自身的短时循环证据缓存；目录必须是 SSV 与 Agent 都能访问的绝对路径。
-# 该缓存不替代 WVP/NVR/MediaMTX 的长期录像。启用 Agent 取证时把目录加入 evidence_roots。
+# 该缓存不替代 WVP/NVR/MediaMTX 的长期录像；目录必须包含在 agent.evidence_roots 中。
 evidence_cache:
-  enabled: false
   directory: "/var/lib/ssv/evidence-cache"
   segment_duration_ms: 10000
   retention_ms: 120000
@@ -134,11 +133,11 @@ agent:
   dedup_cooldown_seconds: 30.0
   # Redis 中的 frame_path/clip_path 不可信；只有这些绝对根目录内的证据才能登记或被工具复制。
   # 空列表保持 fail closed，事件仍会入账但不会获得证据引用。
-  evidence_roots: []
+  evidence_roots:
+    - "/var/lib/ssv/evidence-cache"
   # - "/var/lib/ssv/evidence-cache"
-  # 启用前必须把 evidence_roots 的首项设置为实际的绝对证据目录。
+  # 默认目录已作为可信根；修改目录时必须同步修改 evidence_roots。
   recording_evidence:
-    enabled: false
     # 取证 worker 复用持久 worker 的轮询、lease 和重试配置；默认值与 review/index 一致，
     # 但取证默认重试间隔为 2 秒，避免录像分段尚未闭合时紧密重试。
     poll_interval_ms: 1000

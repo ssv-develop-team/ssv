@@ -66,7 +66,6 @@ void test_finalized_sidecar_contains_source_timing()
 
     auto source_context = std::make_shared<SsvSourceContext>("camera-01");
     ssv::SsvEvidenceCacheConfig config;
-    config.enabled = true;
     config.directory = temporary.path().string();
     config.segment_duration_ms = 1000;
     config.retention_ms = 10'000;

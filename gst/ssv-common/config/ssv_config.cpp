@@ -510,7 +510,8 @@ void validate_worker_common(
     const YAML::Node &node,
     std::string_view path,
     int retry_delay_default_ms = 1000,
-    bool enabled_default = false)
+    bool enabled_default = false,
+    bool parse_enabled = true)
 {
     const auto poll_path = std::string(path) + ".poll_interval_ms";
     const auto poll_interval_ms = get_or<int>(
@@ -540,8 +541,10 @@ void validate_worker_common(
         throw_invalid_value(
             delay_path, delay_path + " must not be negative");
     }
-    static_cast<void>(get_or<bool>(
-        node, "enabled", enabled_default, std::string(path) + ".enabled"));
+    if (parse_enabled) {
+        static_cast<void>(get_or<bool>(
+            node, "enabled", enabled_default, std::string(path) + ".enabled"));
+    }
 }
 
 void validate_review_extension(const YAML::Node &node)
@@ -677,7 +680,6 @@ void validate_recording_evidence_extension(const YAML::Node &node)
     constexpr std::string_view path = "agent.recording_evidence";
     require_map(node, path);
     reject_unknown_keys(node, path, {
-        "enabled",
         "poll_interval_ms",
         "lease_ms",
         "max_retries",
@@ -690,7 +692,7 @@ void validate_recording_evidence_extension(const YAML::Node &node)
         "max_episode_ms",
     });
 
-    validate_worker_common(node, path, 2000);
+    validate_worker_common(node, path, 2000, false, false);
     const auto clip_before_ms = get_or<int>(
         node,
         "clip_before_ms",
@@ -767,15 +769,12 @@ SsvEvidenceCacheConfig parse_evidence_cache(const YAML::Node &node)
     constexpr std::string_view path = "evidence_cache";
     require_map(node, path);
     reject_unknown_keys(node, path, {
-        "enabled",
         "directory",
         "segment_duration_ms",
         "retention_ms",
         "max_bytes_mb",
     });
 
-    cache.enabled = get_or<bool>(
-        node, "enabled", cache.enabled, "evidence_cache.enabled");
     cache.directory = get_or<std::string>(
         node, "directory", cache.directory, "evidence_cache.directory");
     if (is_blank(cache.directory)
@@ -829,27 +828,24 @@ void validate_recording_evidence_cache(
     const YAML::Node &agent,
     const SsvEvidenceCacheConfig &cache)
 {
-    const auto recording = agent["recording_evidence"];
-    if (!recording
-        || !get_or<bool>(
-            recording, "enabled", false, "agent.recording_evidence.enabled")) {
-        return;
-    }
+    const auto cache_path = std::filesystem::path(cache.directory);
+    const auto default_root =
+        std::filesystem::path("/var/lib/ssv/evidence-cache");
+    const auto evidence_roots = agent ? agent["evidence_roots"] : YAML::Node {};
 
-    if (!cache.enabled) {
+    if (!evidence_roots) {
+        if (path_is_within(cache_path, default_root))
+            return;
         throw_invalid_value(
-            "evidence_cache.enabled",
-            "recording_evidence requires evidence_cache.enabled");
+            "agent.evidence_roots",
+            "custom evidence_cache.directory requires matching agent.evidence_roots");
     }
-
-    const auto evidence_roots = agent["evidence_roots"];
-    if (!evidence_roots || evidence_roots.size() == 0) {
+    if (evidence_roots.size() == 0) {
         throw_invalid_value(
             "agent.evidence_roots",
             "recording_evidence requires non-empty evidence_roots");
     }
 
-    const auto cache_path = std::filesystem::path(cache.directory);
     for (std::size_t index = 0; index < evidence_roots.size(); ++index) {
         const auto item_path =
             std::string("agent.evidence_roots[") + std::to_string(index) + "]";
