@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -98,10 +99,16 @@ class SsvCacheEvidenceExtractor:
         temporary_dir = Path(
             tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}.")
         )
+        input_dir: Path | None = None
         try:
+            input_dir = Path(
+                tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}.inputs.")
+            )
+            pinned_segments = _pin_segments(input_dir, segments)
             artifacts = self._extract_to_temporary_dir(
                 temporary_dir,
-                segments,
+                input_dir,
+                pinned_segments,
                 window_start,
                 window_end,
                 source_pts,
@@ -113,7 +120,7 @@ class SsvCacheEvidenceExtractor:
                 generation,
                 window_start,
                 window_end,
-                segments,
+                pinned_segments,
                 artifacts,
             )
             destination = derived_parent / event_id
@@ -146,6 +153,8 @@ class SsvCacheEvidenceExtractor:
         finally:
             if temporary_dir.exists():
                 shutil.rmtree(temporary_dir, ignore_errors=True)
+            if input_dir is not None and input_dir.exists():
+                shutil.rmtree(input_dir, ignore_errors=True)
 
     def _output_root(self) -> Path:
         if not self._evidence_roots:
@@ -487,13 +496,14 @@ class SsvCacheEvidenceExtractor:
     def _extract_to_temporary_dir(
         self,
         temporary_dir: Path,
+        input_dir: Path,
         segments: tuple[_CacheSegment, ...],
         window_start: int,
         window_end: int,
         source_pts: int,
         generation: int,
     ) -> tuple[EvidenceArtifact, ...]:
-        concat_list = temporary_dir / "segments.txt"
+        concat_list = input_dir / "segments.txt"
         _write_concat_list(concat_list, segments)
         self._run_ffmpeg(
             concat_list,
@@ -748,6 +758,59 @@ def _integer_field(payload: dict[str, object], name: str) -> int | None:
 
 def _seconds(nanoseconds: int) -> str:
     return f"{nanoseconds / 1_000_000_000:.9f}"
+
+
+def _pin_segments(
+    temporary_dir: Path,
+    segments: tuple[_CacheSegment, ...],
+) -> tuple[_CacheSegment, ...]:
+    """获取窗口输入，隔离后续缓存清理对 ffmpeg 的影响。"""
+    return tuple(
+        _pin_segment(temporary_dir, segment)
+        for segment in segments
+    )
+
+
+def _pin_segment(
+    temporary_dir: Path,
+    segment: _CacheSegment,
+) -> _CacheSegment:
+    """优先用硬链接持有 inode，跨文件系统时复制 finalized 文件。"""
+    target = temporary_dir / segment.path.name
+    try:
+        os.link(segment.path, target, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise EvidenceExtractionError(
+                "evidence cache segment disappeared during acquisition",
+                retryable=True,
+            ) from exc
+        try:
+            shutil.copyfile(segment.path, target, follow_symlinks=False)
+            _fsync_file(target)
+        except (OSError, shutil.Error) as copy_error:
+            raise EvidenceExtractionError(
+                "evidence cache segment disappeared during acquisition",
+                retryable=True,
+            ) from copy_error
+
+    try:
+        details = target.lstat()
+    except OSError as exc:
+        raise EvidenceExtractionError(
+            "evidence cache segment acquisition failed",
+            retryable=True,
+        ) from exc
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        raise EvidenceExtractionError(
+            "evidence cache segment acquisition produced an unsafe file",
+            retryable=False,
+        )
+    return _CacheSegment(
+        path=target,
+        source_pts_start=segment.source_pts_start,
+        source_pts_end=segment.source_pts_end,
+    )
 
 
 def _write_concat_list(path: Path, segments: tuple[_CacheSegment, ...]) -> None:

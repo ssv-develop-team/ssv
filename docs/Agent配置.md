@@ -139,6 +139,8 @@ agent:
 
 `evidence_cache.directory` 必须是绝对路径，并且在 `agent.evidence_roots` 的某个根目录内；否则 Agent 拒绝启动。证据缓存和录像取证始终启用。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
 
+取证 worker 选中完整窗口后，会先在事件临时目录获取所有 MP4 输入：同一文件系统优先建立硬链接，跨文件系统时复制已 finalized 文件，然后才把临时路径交给 ffmpeg。获取完成后 runner 可以删除原缓存文件名，临时输入仍会保持到本次取证结束；取证成功或失败都会清理临时输入。这个保护只覆盖已经成功获取的分片，不是事件级缓存豁免。分片在获取前被清理时，worker 会按重试策略等待下一次机会，重试耗尽后进入 `manual_review`。
+
 缓存只保留 `retention_ms` 内的分段，并受 `max_bytes_mb` 限制；它不是长期录像。缓存运行中的分段收尾或 sidecar 写入失败时，runner 的解码、检测、跟踪和 Redis 发布仍继续；Agent 会按 worker 重试策略等待窗口，最终失败则进入 `manual_review`。首次启动时若缓存目录无法创建或 GStreamer 能力缺失，runner 会报告 capability failure 并拒绝启动，避免启用后静默丢失全部证据。
 
 `recording_evidence` 使用持久 Worker 的轮询、lease 和重试参数接口，但没有启停开关。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，默认重试间隔为 2 秒；这些值可以在 `recording_evidence` 下单独调整。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
