@@ -1,6 +1,6 @@
 # DeerFlow configuration for the SSV review worker.
 # Copy this file to config.yaml and keep credentials in .env.
-# The four project tools are read-only. DeerFlow adds view_image itself when
+# The five project tools are read-only. DeerFlow adds view_image itself when
 # the selected model has supports_vision enabled.
 
 config_version: 32
@@ -33,6 +33,9 @@ tools:
   - name: rule_retriever
     group: ssv_review
     use: ssv_agent.tools.rule_retriever:rule_retriever_tool
+  - name: sample_video
+    group: ssv_review
+    use: ssv_agent.tools.video_sampler:sample_video_tool
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

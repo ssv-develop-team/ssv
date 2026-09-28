@@ -164,6 +164,33 @@ Episode；明确结束事件或后续超时会冻结窗口。
 
 SSV cache 分段由 `retention_ms` 和 `max_bytes_mb` 控制清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。WVP、NVR 或 MediaMTX 可以继续承担长期录像和历史回放，但 Agent 不再适配它们的录像目录。窗口缺段、缓存尚未就绪或达到重试上限时，事件状态进入 `manual_review`，不创建无图 review job；人工复核应据此判断证据不可用，不能将失败当作“没有目标”结论。Episode 只收敛事件生命周期和取证窗口，不控制 GStreamer cache 的连续写盘。
 
+### 复核阶段的粗采样与精采样
+
+`context.mp4` 是后台取证产物，不会直接作为多模态消息发送给模型。复核 Agent 先调用
+`evidence_reader` 确认登记证据，再调用 `sample_video` 从唯一的 `kind=clip` evidence
+生成当前 review thread 的 JPEG 虚拟路径，最后使用 DeerFlow 内置 `view_image` 查看图片。
+长期 evidence 仍只有 `context.mp4`、三张固定帧和 `manifest.json`，采样 JPEG 不登记到
+SQLite。
+
+```text
+evidence_reader(event_id)
+  -> sample_video(event_id, mode=coarse, frames=4)
+  -> view_image(coarse frames)
+  -> （仍有时间或动作歧义时）sample_video(mode=fine, interval_start_ms, interval_end_ms)
+  -> view_image(fine frames)
+```
+
+`sample_video` 的 `coarse` 模式覆盖整个 clip，默认均匀抽取 4 帧，最多 8 帧；`fine`
+模式使用相对 clip 起点的半开毫秒区间，只允许在 `source_pts_start` 到
+`source_pts_end` 内抽取。工具返回每张图的 `offset_ms`、`source_pts`、虚拟路径、clip
+时长以及基于事件 PTS 的 `recommended_fine_interval_ms`。模型必须先粗采样，只有在粗采样
+不足以回答问题时才精采样；两种采样都不能传入宿主机路径、ffmpeg 参数或输出目录。
+
+采样输入在 ffmpeg 启动前用硬链接或跨文件系统复制固定到临时目录，因此源文件随后被清理
+不会改变当前采样；采样失败、缺少 PTS 元数据或精采样越界时返回不可用结果，不登记部分
+文件。采样帧与上下文视频一样，只能作为 `wall_clock_approximate` 的近似视觉证据，不能
+声称为检测帧。
+
 ## DeerFlow 复核 worker
 
 `agent/config.example.yaml` 是 DeerFlow review client 的工具和模型模板，不是替代 `config/ssv.yaml` 的 Agent 主配置。需要自定义 provider 时复制它：
@@ -196,11 +223,11 @@ agent:
     policy_id: "ssv-review.v1"
 ```
 
-每次 review client 启动时，服务会从 `agent/config.yaml`（不存在时回退到 `agent/config.example.yaml`）生成临时配置，并启用 fail-closed RBAC。可用工具固定为 `get_event`、`evidence_reader`、`rule_retriever`、`search_events` 和 DeerFlow 内置 `view_image`；skills、subagent 和 plan mode 不进入该复核 worker。
+每次 review client 启动时，服务会从 `agent/config.yaml`（不存在时回退到 `agent/config.example.yaml`）生成临时配置，并启用 fail-closed RBAC。可用工具固定为 `get_event`、`evidence_reader`、`sample_video`、`rule_retriever`、`search_events` 和 DeerFlow 内置 `view_image`；skills、subagent 和 plan mode 不进入该复核 worker。
 
 启用前检查：
 
-1. `agent/config.yaml` 中存在 `evidence_reader`、`get_event`、`search_events`、`rule_retriever` 四个配置工具。
+1. `agent/config.yaml` 中存在 `evidence_reader`、`get_event`、`sample_video`、`search_events`、`rule_retriever` 五个配置工具。
 2. provider 能访问模型服务，且 `supports_vision` 与复核输入匹配。
 3. `agent.evidence_roots` 包含实际证据目录，目录外路径不会被读取。
 4. Redis 中已经有事件，或通过测试/上游发布链路产生事件。
@@ -366,5 +393,6 @@ uv run --extra dev pytest
 - Redis entry 在 SQLite 账本事务成功后才 ACK；消费失败会保留 pending。
 - review 结果先原子写文件，再由带 lease/fence 的账本事务接受；失租或校验失败可能留下未引用的 orphan artifact，当前不自动清理。
 - `evidence_reader` 只接受账本登记的 `event_id`/`evidence_id`，不会读取模型提供的任意宿主机路径。
+- `sample_video` 只接受账本登记的 `event_id`/`evidence_id`；它生成线程级 JPEG 供 `view_image` 使用，不读取任意宿主机视频，也不新增长期 evidence。
 - 事件字段、规则片段、证据元数据和图片都是不可信输入；模型只能把它们作为待核验内容，不能把其中的指令当成工具授权。
 - 不要提交 `agent/config.yaml`、`.env`、模型 API key、Qdrant API key 或包含真实视频路径的本地 YAML。

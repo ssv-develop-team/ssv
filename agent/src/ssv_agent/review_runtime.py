@@ -8,7 +8,14 @@ from pathlib import Path
 import yaml
 
 _REVIEW_TOOL_NAMES = frozenset(
-    {"get_event", "evidence_reader", "rule_retriever", "search_events", "view_image"}
+    {
+        "get_event",
+        "evidence_reader",
+        "rule_retriever",
+        "sample_video",
+        "search_events",
+        "view_image",
+    }
 )
 _REVIEW_CONFIGURED_TOOL_NAMES = _REVIEW_TOOL_NAMES - {"view_image"}
 _REVIEW_VIEW_IMAGE_MODULE = "deerflow.tools.builtins.view_image_tool"

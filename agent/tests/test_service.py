@@ -384,6 +384,7 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
         "get_event",
         "evidence_reader",
         "rule_retriever",
+        "sample_video",
         "search_events",
     }
     assert observed["available_skills"] == set()
@@ -403,6 +404,7 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
                                 "evidence_reader",
                                 "get_event",
                                 "rule_retriever",
+                                "sample_video",
                                 "search_events",
                                 "view_image",
                             ]
@@ -531,6 +533,7 @@ def test_review_client_loads_isolated_rbac_configuration(monkeypatch) -> None:
         "get_event",
         "search_events",
         "rule_retriever",
+        "sample_video",
     ]
 
     runtime.stop(join_timeout_seconds=1)
