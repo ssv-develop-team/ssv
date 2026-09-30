@@ -107,7 +107,7 @@ Agent 是独立进程，需要时另开终端执行：
 | `./ssv build [--profile PROFILE]` | 准备依赖并编译 runner、插件和测试 |
 | `./ssv clean` | 清理 Meson 构建目录 |
 | `./ssv run [RUNNER_ARGS]` | 启动 C++ 实时链路 |
-| `./ssv inspect` | 检查 GStreamer 插件是否注册 |
+| `./ssv inspect` | 检查构建验证插件 `ssvtemplate` 是否注册 |
 | `./ssv test` | 编排 Python、C++、Agent 和契约测试 |
 | `./ssv redis start\|stop` | 启动和停止本地 Docker Redis、Qdrant |
 | `./ssv cache status\|clear` | 查看和清空 SSV 运行时缓存 |
@@ -116,17 +116,13 @@ Agent 是独立进程，需要时另开终端执行：
 | `./ssv model manifest ...` | 从原始 ONNX 和 TensorRT engine 生成 schema v2 manifest |
 | `./ssv model verify ...` | 验证安全帽 `.pt` 模型 |
 
-`run` 的 `--display`、`--headless`、`--overlay` 和 `--display-backend` 参数只覆盖本次进程的输出设置，不会改写 YAML。`--display-backend` 支持 `gtkglsink`、`gtksink` 和 `rtsp`；RTSP 发布地址仍从 `display.rtsp.location` 读取。若接收端需要直接看到检测框，设置 `display.rtsp.burn_in_overlay: true`，框会在编码前写入视频像素。
+`run` 的 `--display`、`--headless`、`--overlay` 和 `--display-backend` 参数只覆盖本次进程的输出设置，不会改写 YAML。实时配置、RTSP 拉流/分析/推流和外部 RTSP server 边界见 [运行与配置](docs/运行与配置.md)；字段级说明见 [检测前端配置](docs/检测前端配置.md)。
 
-`./ssv cache status` 查看当前配置 Stream 的 entries、consumer group pending、Agent 去重 key，以及 EventLedger SQLite 的事件和 durable job 数量。`./ssv cache clear` 直接清空 Redis Stream、`ssv:agent:dedup:*` 去重 key 和 EventLedger SQLite 运行时表；`--dry-run` 只统计、不删除。清理前应先停止 `./ssv run` 和 `./ssv agent`，否则新事件可能立即重新写入。该命令不会删除 `agent/outputs`、Qdrant、DeerFlow checkpointer、其他 Redis key 或 Docker 容器。
-
-Redis 与 SQLite 的清理分别执行，不提供跨存储原子事务。若命令返回失败，先根据输出确认两边已完成的范围，停止相关服务后重新执行 `./ssv cache clear`。
+`./ssv cache status|clear` 用于查看或清理当前运行配置的 Redis Stream、Agent 去重和 EventLedger 运行时表；详细边界见 [Agent 配置](docs/Agent配置.md)。清理前应停止 `./ssv run` 和 `./ssv agent`。
 
 ## 配置文件
 
-实时 runner 的配置搜索顺序为：显式 `--config`、`SSV_CONFIG_PATH`、项目根 `ssv.yaml`、`config/ssv.yaml`、`/etc/ssv/ssv.yaml`。示例文件不会自动参与搜索。
-
-常用临时环境变量只有 `SSV_CONFIG_PATH`、`SSV_RTSP_URL`、`REDIS_HOST`、`REDIS_PORT` 和 `GST_DEBUG`；运行参数、模型参数、显示参数和跟踪参数写入 YAML。完整字段说明见 [检测前端配置](docs/检测前端配置.md)。
+配置文件角色、搜索顺序、相对路径和临时环境变量见 [运行与配置](docs/运行与配置.md)；完整字段说明见 [检测前端配置](docs/检测前端配置.md)。
 
 ## 测试
 
@@ -138,7 +134,7 @@ Redis 与 SQLite 的清理分别执行，不提供跨存储原子事务。若命
 
 ```bash
 cd agent
---extra dev pytest
+uv run --extra dev pytest
 ```
 
 真实 RTSP、GPU、显示、模型或外部 Agent provider 的结果取决于本机环境。

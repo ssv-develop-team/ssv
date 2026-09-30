@@ -1,19 +1,12 @@
-# Site Safety Vision - YAML 运行时配置示例
-# 此文件只用于复制，不参与默认配置搜索。请复制为 config/ssv.yaml 或项目根目录 ssv.yaml 后修改，
-# 也可以通过 SSV_CONFIG_PATH 或 ./ssv run --config PATH 显式指定配置文件。
-#
-# 仅保留适合部署和临时调试的环境变量覆盖：
-#   REDIS_HOST   -> redis.host
-#   REDIS_PORT   -> redis.port
-#   SSV_RTSP_URL -> sources[0].uri
-#   GST_DEBUG    -> logging.cpp_debug_level
+# SSV 运行配置模板。
+# 复制为 config/ssv.yaml 后修改；不会自动加载本文件。
+# 配置角色、路径和 RTSP 用法见 docs/运行与配置.md。
+# 临时环境变量：REDIS_HOST、REDIS_PORT、SSV_RTSP_URL、GST_DEBUG。
 
 version: "2.0"
 
 logging:
-  # GStreamer C++ 插件的 GST_DEBUG 模式。
   cpp_debug_level: "ssv*:4"
-  # Python Agent 日志级别：DEBUG、INFO、WARNING 或 ERROR。
   python_log_level: "INFO"
 
 redis:
@@ -22,21 +15,18 @@ redis:
   db: 0
   stream_key: "ssv:events"
   consumer_group: "ssv-agent"
-  # pending entry 至少 idle 60 秒后才由 XAUTOCLAIM 重新处理。
   reclaim_idle_ms: 60000
   reclaim_batch_size: 10
-  # 留空时 Agent 为每个进程实例生成唯一 consumer 名称。
   consumer_name: null
 
-# SSV 自身的短时循环证据缓存；目录必须是 SSV 与 Agent 都能访问的绝对路径。
-# 该缓存不替代 WVP/NVR/MediaMTX 的长期录像；目录必须包含在 agent.evidence_roots 中。
+# SSV 短时证据缓存；directory 必须是 SSV 与 Agent 共享的绝对路径，且位于 evidence_roots 内。
 evidence_cache:
   directory: "/var/lib/ssv/evidence-cache"
   segment_duration_ms: 10000
   retention_ms: 120000
   max_bytes_mb: 512
 
-# 本阶段必须且只能配置一个 RTSP H.264 8-bit source。规则正文由 Agent 的规则目录管理。
+# 当前契约：一个 H.264 8-bit RTSP source。
 sources:
   - id: "camera-01"
     uri: "rtsp://localhost:8554/test"
@@ -44,51 +34,38 @@ sources:
     protocols: "tcp"
     latency_ms: 200
     decode:
-      # auto、vaapi、nvdec 或 software；显式模式不静默回退。
       mode: "auto"
-      # auto、drm:/dev/dri/renderD<N> 或 cuda:<N>。
       device: "auto"
 
 display:
   enabled: true
-  # auto、gtkglsink、gtksink 或 rtsp；显式 backend 不静默回退。
   backend: "auto"
-  # 仅 backend 为 rtsp 时使用；auto 不会因为填写该地址而自动推流。
   rtsp:
     location: "rtsp://127.0.0.1:8554/ssv"
-    # true 时将检测框、类别、置信度和 track ID 烧录进 RTSP 视频像素。
     burn_in_overlay: false
-    # true 时直接转发输入 H.264；不能与 burn_in_overlay 同时开启，且不受 display.fps 限流。
     encoded_passthrough: false
-  # drop-only 显示上限，不复制旧帧补足帧率。
   fps: 30
-  # auto、x11 或 wayland。
   gl_backend: "auto"
   overlay:
     enabled: true
     font:
       face: "regular"
       size: 12
-    # 只影响 GTK 绘制，不回写 tracker、Redis、事件或证据。
     motion_prediction:
       enabled: true
       max_horizon_ms: 300
 
 inference:
   enabled: true
-  # drop-only 分析上限；0 表示不限流，但仍不允许积压。
   analysis_fps: 15
   model:
-    # 社区提供的原始 ONNX；运行时直接读取，不生成中间模型。
     path: "models/yolov8n.onnx"
     family: "yolo"
     output_format: "yolov8"
     label_map: "config/model-labels/coco80.txt"
     preprocess:
-      # 模型语义不能从文件名或 ONNX metadata 猜测，必须显式声明。
       color_order: "rgb"
       resize: "letterbox"
-      # auto：有可用硬件 adapter 时使用，否则回退 CPU；也可显式 cpu/cuda。
       execution: "auto"
       normalization:
         scale: 0.00392156862745098
@@ -97,18 +74,14 @@ inference:
   runtime:
     type: "onnxruntime"
     providers:
-      # auto，或改为 explicit 并提供非空 order。
       mode: "auto"
     device_id: 0
     precision: "auto"
-    # auto 或正整数。
     cpu_threads: "auto"
     cache:
       enabled: true
-      # 空字符串表示使用 XDG/HOME 下的默认 ORT cache 目录。
       directory: ""
   confidence_threshold: 0.5
-  # 空字符串表示不过滤类别。
   target_class: "person"
 
 tracking:
@@ -117,10 +90,8 @@ tracking:
   track_buffer: 30
   match_threshold: 0.3
   mock_track: false
-  # ssv-pub 同一 track 的发布冷却（毫秒），0 表示关闭去重。
   publish_cooldown_ms: 30000
   gmc:
-    # sparse-opt-flow 或 none；只有 sparse-opt-flow 使用 OpenCV。
     method: "sparse-opt-flow"
     downscale: 2
 
@@ -131,28 +102,20 @@ agent:
   output_dir: "outputs"
   dedup_enabled: true
   dedup_cooldown_seconds: 30.0
-  # Redis 中的 frame_path/clip_path 不可信；只有这些绝对根目录内的证据才能登记或被工具复制。
-  # 空列表保持 fail closed，事件仍会入账但不会获得证据引用。
+  # 证据根必须是绝对路径；空列表表示 fail closed。
   evidence_roots:
     - "/var/lib/ssv/evidence-cache"
-  # - "/var/lib/ssv/evidence-cache"
-  # 默认目录已作为可信根；修改目录时必须同步修改 evidence_roots。
   recording_evidence:
-    # 取证 worker 复用持久 worker 的轮询、lease 和重试配置；默认值与 review/index 一致，
-    # 但取证默认重试间隔为 2 秒，避免录像分段尚未闭合时紧密重试。
     poll_interval_ms: 1000
     lease_ms: 30000
     max_retries: 3
     retry_delay_ms: 2000
-    # 窗口不得小于 1000：三帧固定在事件的 T-1000ms/T/T+1000ms，窗口更小会让帧落到窗口外。
     clip_before_ms: 2500
     clip_after_ms: 2500
-    # 同一 source、规则和 stream generation 内的连续检测合并为一个 episode。
     merge_gap_ms: 3000
     lost_grace_ms: 3000
     silence_timeout_ms: 30000
     max_episode_ms: 30000
-  # Redis 只在 SQLite 账本事务提交后 ACK；默认不启动外部模型。
   review:
     enabled: false
     poll_interval_ms: 1000
@@ -161,7 +124,6 @@ agent:
     retry_delay_ms: 1000
     policy_id: "ssv-review.v1"
     model_id: null
-  # 索引失败不会回滚案件或复核；默认 mock 后端可在离线测试中使用。
   indexing:
     enabled: false
     poll_interval_ms: 1000
@@ -171,18 +133,13 @@ agent:
     embedding_backend: "mock"
     embedding_model: null
     embedding_base_url: null
-    # 仅兼容服务要求用 text_type 区分查询向量时设置，例如 "query"。
     query_text_type: null
-    # 离线 BGE-M3 示例：embedding_backend: "bge_m3"
-    # embedding_model: "/opt/models/bge-m3"
-  # 报告 worker 接入后默认启用；worker 接入前，此段仅参与配置校验。
   reporting:
     enabled: true
     poll_interval_ms: 1000
     lease_ms: 30000
     max_retries: 3
     retry_delay_ms: 1000
-  # 规则默认使用本地词法检索；切换为 qdrant 前必须完成规则入库并配置真实 embedding。
   knowledge:
     backend: "local_markdown"
     rules_dir: "knowledge/rules"

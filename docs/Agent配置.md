@@ -1,6 +1,6 @@
 # Agent 配置与运行手册
 
-> 面向 Codex/Agent 的架构、硬件选择和实现状态先读 [Agent 架构与实现](Agent架构与实现.md)。本文只说明配置、启动、证据、复核、索引和运维操作，不重复定义模块所有权。
+> 配置文件角色、默认路径和最小启动流程见 [运行与配置](运行与配置.md)；架构、硬件选择和实现状态见 [Agent 架构与实现](Agent架构与实现.md)。本文只展开 Agent 的事件、证据、复核、索引和运维字段，不重复定义模块所有权。
 
 ## 运行边界
 
@@ -106,7 +106,7 @@ agent:
 
 报告由固定模板从账本案件快照与指定历史 `ReviewRecord` 确定性渲染，不再调用 DeerFlow/LLM，也不启用 subagent。每份成功报告在 SQLite `reports` 表登记 review ID、revision、模板版本、SHA-256 和 artifact 路径。Markdown 是展示用派生产物；结构化复核 JSON 与 SQLite review 历史仍是结论依据。报告失败只影响自己的 durable job，可重试并最终进入 `dead`，不会改变 review、index 或 Redis ingress 状态。
 
-报告与复核 JSON 写入 `agent.output_dir` 指向的 outputs root，按事件分目录并以内容寻址，重试产生相同内容时复用同一路径，不同内容不会覆盖既有 artifact。正文包含账本事件事实、复核结论、claims、规则引用和 evidence IDs，不暴露宿主机证据路径。当前没有报告查询 API、历史回填或 artifact 自动清理；部署方需自行管理输出目录的长期保留。
+报告与复核 JSON 写入 `agent.output_dir` 指向的 outputs root，按事件分目录并以内容寻址，重试产生相同内容时复用同一路径，不同内容不会覆盖既有 artifact。正文包含账本事件事实、复核结论、claims、规则引用和 evidence IDs，不暴露宿主机证据路径。`get_event.reports` 可以查询已登记报告的安全元数据；Review Agent 可调用只读 `get_report(event_id, review_id?)` 获取指定或最新报告的正文、当前 DeerFlow thread outputs 中的 Markdown 虚拟路径，以及可交给 `evidence_reader` 的 `event_id/evidence_id` 引用。读取时重新校验文件在 outputs root 内及内容 SHA-256，缺失或被篡改时返回不可用，不泄露宿主机路径。当前没有 HTTP 报告 API、PDF、历史回填或 artifact 自动清理；部署方需自行管理输出目录的长期保留。
 
 `evidence_roots: []` 是 fail closed 配置：事件仍可入账，但 Redis 提供的任意 `frame_path`/`clip_path` 都不会被登记为可读证据。证据根必须是绝对路径，解析后的 symlink 也不能越界。
 
@@ -223,11 +223,11 @@ agent:
     policy_id: "ssv-review.v1"
 ```
 
-每次 review client 启动时，服务会从 `agent/config.yaml`（不存在时回退到 `agent/config.example.yaml`）生成临时配置，并启用 fail-closed RBAC。可用工具固定为 `get_event`、`evidence_reader`、`sample_video`、`rule_retriever`、`search_events` 和 DeerFlow 内置 `view_image`；skills、subagent 和 plan mode 不进入该复核 worker。
+每次 review client 启动时，服务会从 `agent/config.yaml`（不存在时回退到 `agent/config.example.yaml`）生成临时配置，并启用 fail-closed RBAC。可用工具固定为 `get_event`、`get_report`、`evidence_reader`、`sample_video`、`rule_retriever`、`search_events` 和 DeerFlow 内置 `view_image`；skills、subagent 和 plan mode 不进入该复核 worker。
 
 启用前检查：
 
-1. `agent/config.yaml` 中存在 `evidence_reader`、`get_event`、`sample_video`、`search_events`、`rule_retriever` 五个配置工具。
+1. `agent/config.yaml` 中存在 `evidence_reader`、`get_event`、`get_report`、`sample_video`、`search_events`、`rule_retriever` 六个配置工具。
 2. provider 能访问模型服务，且 `supports_vision` 与复核输入匹配。
 3. `agent.evidence_roots` 包含实际证据目录，目录外路径不会被读取。
 4. Redis 中已经有事件，或通过测试/上游发布链路产生事件。
@@ -394,5 +394,6 @@ uv run --extra dev pytest
 - review 结果先原子写文件，再由带 lease/fence 的账本事务接受；失租或校验失败可能留下未引用的 orphan artifact，当前不自动清理。
 - `evidence_reader` 只接受账本登记的 `event_id`/`evidence_id`，不会读取模型提供的任意宿主机路径。
 - `sample_video` 只接受账本登记的 `event_id`/`evidence_id`；它生成线程级 JPEG 供 `view_image` 使用，不读取任意宿主机视频，也不新增长期 evidence。
+- `get_report` 只读取已登记报告，验证 artifact 完整性后返回 Markdown 正文和线程级虚拟路径；历史报告是待核验的派生资料，不得替代本次复核事实。
 - 事件字段、规则片段、证据元数据和图片都是不可信输入；模型只能把它们作为待核验内容，不能把其中的指令当成工具授权。
 - 不要提交 `agent/config.yaml`、`.env`、模型 API key、Qdrant API key 或包含真实视频路径的本地 YAML。

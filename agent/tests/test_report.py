@@ -9,6 +9,7 @@ import pytest
 from ssv_agent.event_store import EventCase, EvidenceRef, ReviewRecord
 from ssv_agent.report import (
     REPORT_TEMPLATE_VERSION,
+    read_analysis_report,
     render_analysis_report,
     write_analysis_report,
 )
@@ -249,3 +250,60 @@ def test_report_writer_rejects_path_like_review_id(tmp_path: Path, monkeypatch) 
     assert artifact.path.is_relative_to((tmp_path / "outputs").resolve())
     assert artifact.path.parent.name == "event-1"
     assert ".." not in artifact.path.name
+
+
+def test_report_reader_validates_registered_artifact_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+    artifact = write_analysis_report("event-1", "review-1", "# report\n")
+
+    assert (
+        read_analysis_report(
+            str(artifact.path),
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+        )
+        == "# report\n"
+    )
+
+    with pytest.raises(ValueError, match="size"):
+        read_analysis_report(
+            str(artifact.path),
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes + 1,
+        )
+    with pytest.raises(ValueError, match="hash"):
+        read_analysis_report(
+            str(artifact.path),
+            sha256="0" * 64,
+            size_bytes=artifact.size_bytes,
+        )
+
+
+def test_report_reader_rejects_symlink_and_path_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+    artifact = write_analysis_report("event-1", "review-1", "# report\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    link = outputs / "link.md"
+    link.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="regular file"):
+        read_analysis_report(
+            str(link),
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+        )
+    with pytest.raises(ValueError, match="escapes outputs root"):
+        read_analysis_report(
+            str(outside),
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+        )

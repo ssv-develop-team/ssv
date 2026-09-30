@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -175,6 +177,63 @@ def write_analysis_report(
         sha256=hashlib.sha256(content).hexdigest(),
         size_bytes=len(content),
     )
+
+
+def read_analysis_report(
+    artifact_path: str,
+    *,
+    sha256: str,
+    size_bytes: int,
+) -> str:
+    """读取并校验已登记的 Markdown 报告 artifact。
+
+    报告路径来自 SQLite，仍必须重新约束到当前 outputs root。读取前后只接受
+    普通文件，并用登记的大小和 SHA-256 校验内容，避免把被替换的文件展示给
+    Agent。
+    """
+    path = _validated_report_path(artifact_path)
+    if (
+        not isinstance(sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+        or not isinstance(size_bytes, int)
+        or isinstance(size_bytes, bool)
+        or size_bytes < 0
+    ):
+        raise ValueError("report metadata is invalid")
+
+    try:
+        content = path.read_bytes()
+        details = path.lstat()
+    except OSError as exc:
+        raise ValueError("report artifact is unavailable") from exc
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        raise ValueError("report artifact is not a regular file")
+    if len(content) != size_bytes:
+        raise ValueError("report artifact size does not match metadata")
+    if hashlib.sha256(content).hexdigest() != sha256:
+        raise ValueError("report artifact hash does not match metadata")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("report artifact is not valid UTF-8") from exc
+
+
+def _validated_report_path(artifact_path: str) -> Path:
+    """返回位于 outputs root 内的普通报告路径。"""
+    if not isinstance(artifact_path, str) or not artifact_path:
+        raise ValueError("report artifact path is invalid")
+    root = Path(os.getenv("SSV_OUTPUTS_DIR", "outputs")).resolve()
+    path = Path(artifact_path)
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise ValueError("report artifact is unavailable") from exc
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        raise ValueError("report artifact is not a regular file")
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError("report artifact path escapes outputs root")
+    return resolved
 
 
 def _safe_review_component(review_id: str) -> str:

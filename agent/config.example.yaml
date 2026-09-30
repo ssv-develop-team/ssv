@@ -1,7 +1,8 @@
-# DeerFlow configuration for the SSV review worker.
-# Copy this file to config.yaml and keep credentials in .env.
-# The five project tools are read-only. DeerFlow adds view_image itself when
-# the selected model has supports_vision enabled.
+# DeerFlow review worker 配置模板，不是 config/ssv.yaml 的替代品。
+# 复制为 agent/config.yaml；模型地址、名称和密钥放入 agent/.env。
+# 工具只允许读取事件、报告、证据和规则，不允许任意宿主机访问。
+# Project tools are read-only. DeerFlow adds view_image when the selected model
+# has supports_vision enabled.
 
 config_version: 32
 log_level: info
@@ -27,6 +28,9 @@ tools:
   - name: get_event
     group: ssv_review
     use: ssv_agent.tools.get_event:get_event_tool
+  - name: get_report
+    group: ssv_review
+    use: ssv_agent.tools.get_report:get_report_tool
   - name: search_events
     group: ssv_review
     use: ssv_agent.tools.search_events:search_events_tool

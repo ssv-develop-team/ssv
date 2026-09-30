@@ -382,6 +382,7 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
 
     assert {item["name"] for item in generated["tools"]} == {
         "get_event",
+        "get_report",
         "evidence_reader",
         "rule_retriever",
         "sample_video",
@@ -403,6 +404,7 @@ def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
                             "allow": [
                                 "evidence_reader",
                                 "get_event",
+                                "get_report",
                                 "rule_retriever",
                                 "sample_video",
                                 "search_events",
@@ -531,6 +533,7 @@ def test_review_client_loads_isolated_rbac_configuration(monkeypatch) -> None:
     assert [tool.name for tool in client._app_config.tools] == [
         "evidence_reader",
         "get_event",
+        "get_report",
         "search_events",
         "rule_retriever",
         "sample_video",

@@ -316,7 +316,7 @@ ReviewWorker 成功复核后，`complete_review_job()` 在同一 SQLite 事务�
 
 job 具有 pending -> processing -> completed/dead 状态、lease、heartbeat、attempts 和 retry delay。失去 lease 的 worker 不能继续提交结果；模型、embedding、Qdrant、报告写入或证据缺失不会回滚已经提交的 EventCase 或 ReviewRecord。
 
-review JSON 是复核结果的结构化 artifact；SQLite `reviews` 保存不可变复核历史，`reports` 保存成功报告的模板版本、hash 和 artifact 路径。Markdown 报告是派生产物，不是新的事实源；报告失败只影响 report job，不改变 review/index 状态。报告正文由固定模板生成，不调用 LLM，并绑定 job 指定的历史 revision。
+review JSON 是复核结果的结构化 artifact；SQLite `reviews` 保存不可变复核历史，`reports` 保存成功报告的模板版本、hash 和 artifact 路径。Markdown 报告是派生产物，不是新的事实源；报告失败只影响 report job，不改变 review/index 状态。报告正文由固定模板生成，不调用 LLM，并绑定 job 指定的历史 revision。`get_event` 只投影已登记报告的安全元数据；`get_report` 校验 artifact 完整性后返回 Markdown 正文和当前 DeerFlow thread outputs 的虚拟路径，证据仅以 `event_id/evidence_id` 引用。它不是 HTTP 下载服务，也不生成 PDF。
 
 ## 7. 规则与 Agent 工具
 
@@ -337,9 +337,11 @@ review JSON 是复核结果的结构化 artifact；SQLite `reviews` 保存不可
 Review worker 使用隔离的 DeerFlow 配置，固定只读工具边界：
 
 - get_event
+- get_report
 - evidence_reader
 - search_events
 - rule_retriever
+- sample_video
 - DeerFlow 内置 view_image
 
 模型不能直接访问 SQLite、Qdrant、任意宿主机路径或写入项目配置。证据读取只能基于账本登记的 event_id + evidence_id，并受 agent.evidence_roots 和 symlink 越界检查约束。复核结论必须能追溯到当前案件可用证据和规则引用；证据或规则不可用时应返回 uncertain，不能猜测为“没有目标”。
@@ -370,9 +372,9 @@ Review worker 使用隔离的 DeerFlow 配置，固定只读工具边界：
 | 端到端真实 rule.v1 生产闭环 | 未完成/需现场验证 | 自动测试不能代替真实 RTSP、Redis、模型、证据和复核联调 |
 | 长期录像与历史回放 | 非本阶段范围 | SSV cache 是短时证据上下文，不是 NVR/WVP 替代品 |
 
-## 9. 当前主机能力快照
+## 9. 主机能力快照（历史记录）
 
-以下是 2026-09-21 在本工作区主机上执行的只读检查，不能当作所有部署机器的结论。部署或修改依赖后必须重新检查。
+以下是 2026-09-21 在本工作区主机上执行的只读检查，不能当作所有部署机器的结论，也不是当前运行状态。部署或修改依赖后必须重新检查；当前检查命令和 RTSP 结论见 [运行与配置](运行与配置.md)。
 
 ~~~text
 GStreamer: 1.28.7
