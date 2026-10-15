@@ -24,7 +24,7 @@ public:
     {
     }
 
-    SsvHardwareCapabilities prepare_run(
+    SsvCapabilitySnapshot prepare_run(
         const SsvConfig &original_config) override
     {
         GError *gst_error = nullptr;
@@ -40,11 +40,15 @@ public:
         }
 
         const SsvSystemHardwareCapabilitiesProbe probe;
-        capabilities_ = probe.detect();
-        if (original_config.display.enabled)
+        auto capabilities = SsvCapabilitySnapshot(probe.detect());
+        // RTSP publishing is a headless output branch. GTK initialization is
+        // only needed when the resolved output will own a local window.
+        if (original_config.display.enabled
+            && original_config.display.backend
+                != SsvDisplayBackend::RtspClientSink)
             SsvDisplayWindow::initialize(
                 original_config.display.gl_backend);
-        return capabilities_;
+        return capabilities;
     }
 
     SsvRunAttemptCreation create(
@@ -58,7 +62,8 @@ public:
         std::vector<SsvEvent> events;
         if (effective_config.inference.enabled) {
             resources.service = infer::ssv_inference_service_create(
-                effective_config.inference);
+                effective_config.inference,
+                plan.inference.available_providers);
             inference_runtime_snapshot =
                 infer::ssv_inference_service_runtime_snapshot(
                     resources.service.get());
@@ -69,14 +74,10 @@ public:
         auto pipeline_instance = SsvPipelineBuilder::build(
             effective_config,
             plan,
-            capabilities_,
             resources.service.get());
-        if (effective_config.display.enabled) {
-            if (!plan.display_backend) {
-                throw SsvDisplayWindowError(
-                    "display.gtk.window",
-                    "display plan has no resolved backend");
-            }
+        if (effective_config.display.enabled
+            && plan.display_backend
+            && ssv_display_backend_requires_window(*plan.display_backend)) {
             resources.window = SsvDisplayWindow::create(
                 {
                     .source_id = plan.source_id,
@@ -106,7 +107,6 @@ public:
 
 private:
     SsvEventLog &event_log_;
-    SsvHardwareCapabilities capabilities_;
 };
 
 } // namespace

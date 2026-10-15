@@ -7,7 +7,7 @@ from pathlib import Path
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from ssv_agent.event_store import EventLedger, JobKind
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact
+from ssv_agent.evidence_provider import EvidenceArtifact
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.tools.evidence_reader import evidence_reader_tool
 
@@ -49,7 +49,7 @@ def _register_derived_context_evidence(tmp_path: Path, monkeypatch) -> list[str]
     monkeypatch.setenv("SSV_EVIDENCE_ROOTS", json.dumps([str(tmp_path)]))
     derived = tmp_path / "derived" / "case-1"
     derived.mkdir(parents=True)
-    artifacts: list[RecordingEvidenceArtifact] = []
+    artifacts: list[EvidenceArtifact] = []
     for kind, name, mime_type in (
         ("clip", "context.mp4", "video/mp4"),
         ("frame", "frame-01.jpg", "image/jpeg"),
@@ -59,7 +59,7 @@ def _register_derived_context_evidence(tmp_path: Path, monkeypatch) -> list[str]
         path = derived / name
         path.write_bytes(name.encode("utf-8"))
         artifacts.append(
-            RecordingEvidenceArtifact(
+            EvidenceArtifact(
                 kind=kind,
                 path=path,
                 mime_type=mime_type,

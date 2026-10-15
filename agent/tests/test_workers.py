@@ -12,10 +12,17 @@ from ssv_agent.event_store import DurableJob, EventLedger, JobKind, JobState
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.prompt import build_review_prompt
 from ssv_agent.result import ReviewResult
+from ssv_agent.report import REPORT_TEMPLATE_VERSION
 from ssv_agent.knowledge.schema import Chunk, RetrievalResult
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact, RecordingEvidenceError
+from ssv_agent.evidence_provider import EvidenceArtifact, EvidenceExtractionError
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.workers import _LeaseHeartbeat, IndexWorker, ReviewWorker, RecordingEvidenceWorker
+from ssv_agent.workers import (
+    _LeaseHeartbeat,
+    IndexWorker,
+    RecordingEvidenceWorker,
+    ReportWorker,
+    ReviewWorker,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +31,14 @@ def _allow_test_evidence_roots(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SSV_EVIDENCE_ROOTS", json.dumps([str(tmp_path)]))
 
 
-def _record_case(db_path: Path, evidence_path: Path) -> str:
+def _record_case(
+    db_path: Path,
+    evidence_path: Path,
+    *,
+    event_type: str | None = None,
+    rule_id: str | None = None,
+    rule_version: str | None = None,
+) -> str:
     evidence_path.write_bytes(b"frame")
     with EventLedger(db_path) as ledger:
         ledger.record(
@@ -34,12 +48,31 @@ def _record_case(db_path: Path, evidence_path: Path) -> str:
                 source="camera-1",
                 timestamp_ms=1000,
                 frame_id=4,
+                event_type=event_type,
+                rule_id=rule_id,
+                rule_version=rule_version,
                 frame_path=str(evidence_path),
             )
         )
         case = ledger.get_case("case-1")
     assert case is not None
     return case.evidence[0].evidence_id
+
+
+def _record_reviewed_case(db_path: Path, evidence_path: Path) -> str:
+    evidence_id = _record_case(db_path, evidence_path)
+    with EventLedger(db_path) as ledger:
+        job = ledger.claim_job(JobKind.REVIEW, "review-seed", lease_ms=1_000)
+        assert job is not None
+        result = ReviewResult(
+            verdict="violation",
+            confidence=0.91,
+            evidence_status="available",
+            evidence_ids=[evidence_id],
+            explanation="The registered frame supports the finding.",
+        )
+        ledger.complete_review_job(job, "review-seed", result, "result.json")
+    return evidence_id
 
 
 def _requeue_claim_for_a_stricter_retry_limit(db_path: Path, kind: JobKind) -> None:
@@ -73,14 +106,14 @@ def _record_recording_case(db_path: Path, root: Path) -> None:
         )
 
 
-def _recording_artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
+def _recording_artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:
     derived = root / "derived" / "case-1"
     derived.mkdir(parents=True)
     artifacts = []
     for kind, name, mime in [("clip", "context.mp4", "video/mp4"), ("frame", "frame-01.jpg", "image/jpeg"), ("frame", "frame-02.jpg", "image/jpeg"), ("frame", "frame-03.jpg", "image/jpeg")]:
         path = derived / name
         path.write_bytes(name.encode())
-        artifacts.append(RecordingEvidenceArtifact(kind=kind, path=path, sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(), mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
+        artifacts.append(EvidenceArtifact(kind=kind, path=path, sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(), mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
     return tuple(artifacts)
 
 
@@ -113,7 +146,7 @@ def test_recording_worker_marks_retryable_failure_and_does_not_extract_after_lim
         def extract(self, case):
             nonlocal calls
             calls += 1
-            raise RecordingEvidenceError("window unavailable", retryable=True)
+            raise EvidenceExtractionError("window unavailable", retryable=True)
 
     worker = RecordingEvidenceWorker(
         ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
@@ -129,7 +162,7 @@ def test_recording_worker_nonretryable_failure_marks_event_manual_review(tmp_pat
 
     class Extractor:
         def extract(self, case):
-            raise RecordingEvidenceError("unsafe recording input", retryable=False)
+            raise EvidenceExtractionError("unsafe recording input", retryable=False)
 
     worker = RecordingEvidenceWorker(
         ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
@@ -250,19 +283,30 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "events.db"
-    evidence_id = _record_case(db_path, tmp_path / "frame.jpg")
+    evidence_id = _record_case(
+        db_path,
+        tmp_path / "frame.jpg",
+        event_type="person_without_helmet",
+        rule_id="r1",
+        rule_version="v1",
+    )
     monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
     calls: list[str] = []
+    observed_filters: dict[str, str] = {}
 
     class Retriever:
         async def retrieve(self, query, *, top_k=5, filters=None):
             calls.append("retriever")
+            observed_filters.update(filters or {})
             return RetrievalResult(
                 query=query,
                 backend="fake",
                 chunks=[Chunk(
                     chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
-                    metadata={"source": "rules.md", "rule_id": "r1", "section": "5.2"},
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
                 )],
             )
 
@@ -275,7 +319,7 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
             "claims": [], "explanation": "规则和证据支持结论",
             "rule_citations": [{
                 "chunk_id": "chunk-1", "source": "rules.md",
-                "rule_id": "r1", "section": "5.2",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
             }],
         })
 
@@ -287,6 +331,69 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
 
     assert worker.run_once() is True
     assert calls == ["retriever", "runner"]
+    assert observed_filters == {
+        "event_type": "person_without_helmet",
+        "rule_id": "r1",
+        "rule_version": "v1",
+    }
+
+
+def test_review_worker_downgrades_invalid_rule_citation_to_uncertain(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    evidence_id = _record_case(
+        db_path,
+        tmp_path / "frame.jpg",
+        event_type="person_without_helmet",
+        rule_id="r1",
+        rule_version="v1",
+    )
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+
+    class Retriever:
+        async def retrieve(self, query, *, top_k=5, filters=None):
+            return RetrievalResult(
+                query=query,
+                backend="fake",
+                chunks=[Chunk(
+                    chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
+                )],
+            )
+
+    def runner(context, rule_context):
+        assert rule_context is not None and rule_context.available
+        return json.dumps({
+            "verdict": "violation", "confidence": 0.9,
+            "evidence_status": "available", "evidence_ids": [evidence_id],
+            "claims": [], "explanation": "模型给出了确定性结论",
+            "rule_citations": [{
+                "chunk_id": "chunk-1", "source": "wrong-rules.md",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
+            }],
+        })
+
+    worker = ReviewWorker(
+        ledger_factory=lambda: EventLedger(db_path), runner=runner,
+        rule_retriever=Retriever(), worker_id="review-test", lease_ms=1_000,
+        max_retries=2, retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        case = ledger.get_case("case-1")
+        remaining = ledger.claim_job(JobKind.REVIEW, "another-worker", lease_ms=1_000)
+
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == "uncertain"
+    assert case.review["confidence"] == 0.0
+    assert remaining is None
 
 
 def test_review_worker_refreshes_evidence_before_constructing_context(
@@ -1064,3 +1171,181 @@ def test_index_worker_run_recovers_after_transient_ledger_context_failure(monkey
             },
         )
     ]
+
+
+def test_report_worker_writes_artifact_for_the_claimed_review_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        remaining = ledger.claim_job(JobKind.REPORT, "another-worker", lease_ms=1_000)
+
+    assert report is not None
+    assert report.review_revision == review.revision == 1
+    assert report.template_version == REPORT_TEMPLATE_VERSION
+    assert report.sha256
+    assert report.size_bytes > 0
+    assert report.artifact_path
+    assert Path(report.artifact_path).is_relative_to(outputs.resolve())
+    assert "违规" in Path(report.artifact_path).read_text(encoding="utf-8")
+    assert "The registered frame supports the finding\\." in Path(
+        report.artifact_path
+    ).read_text(encoding="utf-8")
+    assert remaining is None
+
+
+def test_report_worker_retries_with_the_same_content_addressed_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    original_complete = EventLedger.complete_report_job
+    completion_calls = 0
+
+    def fail_first_completion(self, *args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if completion_calls == 1:
+            raise RuntimeError("temporary ledger failure")
+        return original_complete(self, *args, **kwargs)
+
+    monkeypatch.setattr(EventLedger, "complete_report_job", fail_first_completion)
+    written_paths: list[Path] = []
+    original_writer = workers_module.write_analysis_report
+
+    def track_writer(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        written_paths.append(artifact.path)
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", track_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+
+    assert completion_calls == 2
+    assert len(written_paths) == 2
+    assert written_paths[0] == written_paths[1]
+    assert report is not None
+    assert report.artifact_path == str(written_paths[0])
+    assert report.review_revision == 1
+    assert review.verdict == "violation"
+
+
+def test_report_worker_marks_exhausted_job_dead_without_changing_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    writer_calls = 0
+
+    def failing_writer(*_args):
+        nonlocal writer_calls
+        writer_calls += 1
+        raise RuntimeError("disk unavailable")
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", failing_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        case = ledger.get_case("case-1")
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state FROM durable_jobs WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert writer_calls == 2
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == review.verdict == "violation"
+    assert report is None
+    assert row is not None and row["state"] == JobState.DEAD.value
+
+
+def test_report_worker_does_not_complete_after_lease_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    clock = [ledger_module._now_ms()]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    original_writer = workers_module.write_analysis_report
+
+    def reclaim_during_write(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        clock[0] += 2
+        with EventLedger(db_path) as rival:
+            reclaimed = rival.claim_job(JobKind.REPORT, "report-b", lease_ms=1_000)
+        assert reclaimed is not None
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", reclaim_during_write)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-a",
+        lease_ms=1,
+        max_retries=3,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state, lease_owner, attempts FROM durable_jobs "
+            "WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert report is None
+    assert row is not None
+    assert row["state"] == JobState.PROCESSING.value
+    assert row["lease_owner"] == "report-b"
+    assert row["attempts"] == 2

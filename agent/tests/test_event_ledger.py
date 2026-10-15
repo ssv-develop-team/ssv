@@ -3,13 +3,14 @@ from __future__ import annotations
 import sqlite3
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import ssv_agent.event_store.ledger as ledger_module
 from ssv_agent.event_store import EventLedger, JobKind, LeaseLostError
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.recording_evidence import RecordingEvidenceArtifact
+from ssv_agent.evidence_provider import EvidenceArtifact
 from ssv_agent.result import ReviewResult
 from ssv_agent.review_context import ReviewContext
 
@@ -37,10 +38,10 @@ def _context() -> ReviewContext:
 
 
 def _enabled_config() -> RecordingEvidenceConfig:
-    return RecordingEvidenceConfig(enabled=True, clip_after_ms=2500)
+    return RecordingEvidenceConfig(clip_after_ms=2500)
 
 
-def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
+def _artifacts(root: Path) -> tuple[EvidenceArtifact, ...]:
     derived = root / "derived" / "evt-1"
     derived.mkdir(parents=True)
     values = [("clip", "context.mp4", "video/mp4"), ("frame", "frame-01.jpg", "image/jpeg"),
@@ -49,10 +50,39 @@ def _artifacts(root: Path) -> tuple[RecordingEvidenceArtifact, ...]:
     for kind, name, mime in values:
         path = derived / name
         path.write_bytes(name.encode())
-        result.append(RecordingEvidenceArtifact(kind=kind, path=path,
+        result.append(EvidenceArtifact(kind=kind, path=path,
             sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
             mime_type=mime, size=path.stat().st_size, mtime=path.stat().st_mtime))
     return tuple(result)
+
+
+def test_record_keeps_ingress_evidence_interval_unknown_with_event_anchor(
+    tmp_path: Path,
+) -> None:
+    frame = tmp_path / "frame.jpg"
+    clip = tmp_path / "clip.mp4"
+    frame.write_bytes(b"frame")
+    clip.write_bytes(b"clip")
+    context = _context().model_copy(
+        update={
+            "frame_path": str(frame),
+            "clip_path": str(clip),
+            "source_pts": 10_000_000_000,
+            "stream_generation": 7,
+        }
+    )
+
+    with EventLedger(tmp_path / "events.db", evidence_roots=[str(tmp_path)]) as ledger:
+        ledger.record(context)
+        case = ledger.get_case("evt-1")
+
+    assert case is not None
+    assert case.source_pts == 10_000_000_000
+    assert case.stream_generation == 7
+    assert len(case.evidence) == 2
+    assert all(item.source_pts_start is None for item in case.evidence)
+    assert all(item.source_pts_end is None for item in case.evidence)
+    assert all(item.stream_generation is None for item in case.evidence)
 
 
 def test_enabled_recording_evidence_creates_only_delayed_extract_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,8 +98,13 @@ def test_schema_migration_preserves_legacy_review_and_index_jobs(tmp_path: Path)
     with sqlite3.connect(db_path) as connection:
         connection.executescript("""
             CREATE TABLE events (event_id TEXT PRIMARY KEY, source TEXT NOT NULL,
-                timestamp_ms INTEGER NOT NULL, frame_id INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending', created_ms INTEGER NOT NULL);
+                ingress_id TEXT, timestamp_ms INTEGER NOT NULL, frame_id INTEGER NOT NULL,
+                stream_generation INTEGER, source_pts INTEGER, event_type TEXT,
+                event_phase TEXT, severity TEXT, rule_id TEXT, rule_version TEXT,
+                rule_facts_json TEXT NOT NULL DEFAULT '{}', episode_id TEXT,
+                revision INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending', verdict TEXT, confidence REAL,
+                result_path TEXT, created_ms INTEGER NOT NULL);
             CREATE TABLE durable_jobs (
                 job_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL CHECK (kind IN ('review', 'index')),
@@ -78,13 +113,272 @@ def test_schema_migration_preserves_legacy_review_and_index_jobs(tmp_path: Path)
                 attempts INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_expires_ms INTEGER,
                 available_at_ms INTEGER NOT NULL, last_error TEXT, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
                 UNIQUE (kind, entity_id, entity_revision));
-            INSERT INTO events VALUES ('legacy', 'camera', 1, 1, 'pending', 1);
-            INSERT INTO durable_jobs(kind, entity_id, entity_revision, state, available_at_ms, created_ms, updated_ms)
-                VALUES ('review', 'legacy', 0, 'pending', 0, 1, 1), ('index', 'legacy', 0, 'pending', 0, 1, 1);
+            CREATE TABLE reviews (
+                review_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                verdict TEXT NOT NULL, confidence REAL NOT NULL, evidence_status TEXT NOT NULL,
+                explanation TEXT NOT NULL, evidence_ids_json TEXT NOT NULL, claims_json TEXT NOT NULL,
+                result_path TEXT, created_ms INTEGER NOT NULL, UNIQUE (event_id, revision));
+            INSERT INTO events(event_id, source, timestamp_ms, frame_id, created_ms)
+                VALUES ('legacy', 'camera', 1, 1, 1), ('evt-1', 'camera-1', 1700000000000, 42, 1);
+            INSERT INTO reviews VALUES (
+                'legacy-review', 'legacy', 1, 'uncertain', 0.2, 'missing',
+                'legacy result', '[]', '[]', NULL, 5);
+            INSERT INTO durable_jobs(
+                job_id, kind, entity_id, entity_revision, state, attempts,
+                lease_owner, lease_expires_ms, available_at_ms, last_error,
+                created_ms, updated_ms
+            ) VALUES
+                (17, 'review', 'legacy', 0, 'processing', 2, 'reviewer', 9000, 10, NULL, 1, 2),
+                (23, 'index', 'legacy', 0, 'dead', 4, NULL, NULL, 20, 'index failed', 1, 3),
+                (31, 'review', 'legacy', 1, 'pending', 0, NULL, NULL, 30, NULL, 1, 4),
+                (37, 'index', 'legacy', 1, 'completed', 1, NULL, NULL, 40, NULL, 1, 5);
         """)
     with EventLedger(db_path) as ledger:
-        assert ledger.claim_job(JobKind.REVIEW, "r", 1000) is not None
-        assert ledger.claim_job(JobKind.INDEX, "i", 1000) is not None
+        assert [
+            (
+                job.job_id,
+                job.kind.value,
+                job.state.value,
+                job.attempts,
+                job.lease_owner,
+                job.lease_expires_ms,
+                job.available_at_ms,
+                job.last_error,
+            )
+            for job in ledger.jobs_for_event("legacy")
+        ] == [
+            (17, "review", "processing", 2, "reviewer", 9000, 10, None),
+            (23, "index", "dead", 4, None, None, 20, "index failed"),
+            (31, "review", "pending", 0, None, None, 30, None),
+            (37, "index", "completed", 1, None, None, 40, None),
+        ]
+        legacy_review = ledger.get_review_record("legacy", 1)
+        assert legacy_review is not None
+        assert legacy_review.rule_citations == ()
+        ledger.append_review(
+            "evt-1",
+            ReviewResult(
+                verdict="uncertain",
+                confidence=0.4,
+                evidence_status="missing",
+                explanation="migrated report job",
+            ),
+            "outputs/evt-1/review.json",
+        )
+        report_job = ledger.claim_job(JobKind.REPORT, "reporter", lease_ms=1_000)
+        assert report_job is not None
+        assert report_job.entity_id == "evt-1"
+
+    with sqlite3.connect(db_path) as connection:
+        timestamps = connection.execute(
+            "SELECT job_id, created_ms, updated_ms FROM durable_jobs "
+            "WHERE job_id IN (17, 23, 31, 37) ORDER BY job_id"
+        ).fetchall()
+    assert timestamps == [(17, 1, 2), (23, 1, 3), (31, 1, 4), (37, 1, 5)]
+
+
+def test_complete_review_persists_rule_citations_and_creates_report_job(
+    tmp_path: Path,
+) -> None:
+    result = ReviewResult(
+        verdict="uncertain",
+        confidence=0.4,
+        evidence_status="missing",
+        explanation="insufficient evidence",
+        rule_citations=[
+            {
+                "chunk_id": "rule-chunk-1",
+                "source": "rules/v1.md",
+                "rule_id": "helmet",
+                "rule_version": "v1",
+                "section": "4.2",
+            }
+        ],
+    )
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
+        assert review_job is not None
+        revision = ledger.complete_review_job(
+            review_job, "reviewer", result, "outputs/evt-1/review.json"
+        )
+        later = ReviewResult(
+            verdict="uncertain",
+            confidence=0.7,
+            evidence_status="missing",
+            explanation="later review",
+        )
+        ledger.append_review("evt-1", later, "outputs/evt-1/later.json")
+
+        review = ledger.get_review_record("evt-1", revision)
+        current = ledger.get_case("evt-1")
+        jobs = ledger.jobs_for_event("evt-1")
+
+    assert review is not None
+    assert review.revision == revision
+    assert review.rule_citations == (
+        {
+            "chunk_id": "rule-chunk-1",
+            "source": "rules/v1.md",
+            "rule_id": "helmet",
+            "rule_version": "v1",
+            "section": "4.2",
+        },
+    )
+    assert review.explanation == "insufficient evidence"
+    assert current is not None and current.review["explanation"] == "later review"
+    report_revisions = [
+        job.entity_revision for job in jobs if job.kind == JobKind.REPORT
+    ]
+    assert report_revisions == [revision, revision + 1]
+
+
+def test_review_and_derived_jobs_roll_back_if_report_job_creation_fails(
+    tmp_path: Path,
+) -> None:
+    result = ReviewResult(
+        verdict="uncertain",
+        confidence=0.4,
+        evidence_status="missing",
+        explanation="insufficient evidence",
+    )
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
+        assert review_job is not None
+        ledger._store._conn.execute(
+            """
+            CREATE TRIGGER reject_report_job_creation
+            BEFORE INSERT ON durable_jobs
+            WHEN NEW.kind = 'report'
+            BEGIN SELECT RAISE(ABORT, 'injected report-job failure'); END;
+            """
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="injected report-job failure"):
+            ledger.complete_review_job(review_job, "reviewer", result, "review.json")
+
+        assert ledger.get_review_record("evt-1", 1) is None
+        case = ledger.get_case("evt-1")
+        jobs_after_failure = ledger.jobs_for_event("evt-1")
+
+    assert case is not None and case.revision == 0 and case.review is None
+    assert [job.kind for job in jobs_after_failure] == [JobKind.REVIEW, JobKind.INDEX]
+    assert jobs_after_failure[0].state == ledger_module.JobState.PROCESSING
+    assert jobs_after_failure[1].state == ledger_module.JobState.PENDING
+
+
+def test_complete_report_job_registers_artifact_with_lease_fence(tmp_path: Path) -> None:
+    result = ReviewResult(
+        verdict="uncertain",
+        confidence=0.4,
+        evidence_status="missing",
+        explanation="insufficient evidence",
+    )
+    artifact = SimpleNamespace(
+        path=tmp_path / "outputs" / "evt-1" / "review-1.md",
+        sha256="a" * 64,
+        size_bytes=128,
+    )
+
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
+        assert review_job is not None
+        ledger.complete_review_job(review_job, "reviewer", result, "review.json")
+        report_job = ledger.claim_job(JobKind.REPORT, "reporter", lease_ms=1_000)
+        assert report_job is not None
+
+        report = ledger.complete_report_job(
+            report_job, "reporter", artifact, "2026-09-23.v1"
+        )
+        repeated = ledger.complete_report_job(
+            report_job, "reporter", artifact, "2026-09-23.v1"
+        )
+        stored = ledger.get_report_for_review("evt-1", report.review_id)
+        event_reports = ledger.report_records_for_event("evt-1")
+        job = next(job for job in ledger.jobs_for_event("evt-1") if job.kind == JobKind.REPORT)
+
+    assert stored is not None
+    assert repeated == report
+    assert event_reports == (report,)
+    assert report.event_id == "evt-1"
+    assert stored.sha256 == "a" * 64
+    assert stored.size_bytes == 128
+    assert job.state == ledger_module.JobState.COMPLETED
+
+    with EventLedger(tmp_path / "events.db") as reopened:
+        assert reopened.report_records_for_event("evt-1") == (report,)
+        assert next(
+            job for job in reopened.jobs_for_event("evt-1") if job.kind == JobKind.REPORT
+        ).state == ledger_module.JobState.COMPLETED
+
+
+def test_lost_report_lease_does_not_register_metadata(tmp_path: Path, monkeypatch) -> None:
+    clock = [1_000]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    result = ReviewResult(
+        verdict="uncertain",
+        confidence=0.4,
+        evidence_status="missing",
+        explanation="insufficient evidence",
+    )
+    artifact = SimpleNamespace(
+        path=tmp_path / "report.md", sha256="b" * 64, size_bytes=64
+    )
+
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
+        assert review_job is not None
+        ledger.complete_review_job(review_job, "reviewer", result, "review.json")
+        stale = ledger.claim_job(JobKind.REPORT, "reporter-a", lease_ms=1_000)
+        assert stale is not None
+        clock[0] = 2_001
+        current = ledger.claim_job(JobKind.REPORT, "reporter-b", lease_ms=1_000)
+        assert current is not None
+
+        with pytest.raises(LeaseLostError):
+            ledger.complete_report_job(stale, "reporter-a", artifact, "template-v1")
+        assert ledger.report_records_for_event("evt-1") == ()
+
+
+def test_report_metadata_and_job_completion_roll_back_together(tmp_path: Path) -> None:
+    result = ReviewResult(
+        verdict="uncertain",
+        confidence=0.4,
+        evidence_status="missing",
+        explanation="insufficient evidence",
+    )
+    artifact = SimpleNamespace(path=tmp_path / "report.md", sha256="c" * 64, size_bytes=96)
+
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=1_000)
+        assert review_job is not None
+        ledger.complete_review_job(review_job, "reviewer", result, "review.json")
+        report_job = ledger.claim_job(JobKind.REPORT, "reporter", lease_ms=1_000)
+        assert report_job is not None
+        ledger._store._conn.execute(
+            """
+            CREATE TRIGGER reject_report_job_completion
+            BEFORE UPDATE OF state ON durable_jobs
+            WHEN OLD.kind = 'report' AND NEW.state = 'completed'
+            BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;
+            """
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="injected completion failure"):
+            ledger.complete_report_job(report_job, "reporter", artifact, "template-v1")
+
+        assert ledger.report_records_for_event("evt-1") == ()
+        job = next(job for job in ledger.jobs_for_event("evt-1") if job.kind == JobKind.REPORT)
+
+    assert (job.state, job.lease_owner) == (
+        ledger_module.JobState.PROCESSING,
+        "reporter",
+    )
+
 
 
 def test_complete_evidence_extract_registers_four_refs_and_one_review(tmp_path: Path) -> None:
@@ -99,6 +393,43 @@ def test_complete_evidence_extract_registers_four_refs_and_one_review(tmp_path: 
     assert case is not None
     assert len(case.evidence) == 4
     assert review is not None
+
+
+def test_complete_evidence_extract_persists_artifact_timing(tmp_path: Path) -> None:
+    artifacts = list(_artifacts(tmp_path))
+    for index, artifact in enumerate(artifacts):
+        artifacts[index] = EvidenceArtifact(
+            kind=artifact.kind,
+            path=artifact.path,
+            sha256=artifact.sha256,
+            mime_type=artifact.mime_type,
+            size=artifact.size,
+            mtime=artifact.mtime,
+            source_pts_start=7_500_000_000,
+            source_pts_end=12_500_000_000,
+            stream_generation=7,
+        )
+
+    with EventLedger(
+        tmp_path / "events.db",
+        evidence_roots=[str(tmp_path)],
+        recording_evidence=_enabled_config(),
+    ) as ledger:
+        ledger.record(_context())
+        job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "extractor", 1000)
+        assert job is not None
+        ledger.complete_evidence_extract_job(job, "extractor", tuple(artifacts))
+        case = ledger.get_case("evt-1")
+
+    assert case is not None
+    assert {
+        (
+            item.source_pts_start,
+            item.source_pts_end,
+            item.stream_generation,
+        )
+        for item in case.evidence
+    } == {(7_500_000_000, 12_500_000_000, 7)}
 
 
 def test_complete_evidence_extract_is_idempotent(tmp_path: Path) -> None:
@@ -138,7 +469,7 @@ def test_complete_evidence_extract_rejects_path_outside_root(tmp_path: Path) -> 
     artifacts = list(_artifacts(tmp_path))
     outside = tmp_path.parent / "outside.mp4"
     outside.write_bytes(b"outside")
-    artifacts[0] = RecordingEvidenceArtifact(kind="clip", path=outside,
+    artifacts[0] = EvidenceArtifact(kind="clip", path=outside,
         sha256="x", mime_type="video/mp4", size=7, mtime=outside.stat().st_mtime)
     with EventLedger(tmp_path / "events.db", evidence_roots=[str(tmp_path)], recording_evidence=_enabled_config()) as ledger:
         ledger.record(_context())
@@ -151,7 +482,7 @@ def test_complete_evidence_extract_rejects_path_outside_root(tmp_path: Path) -> 
 def test_complete_evidence_extract_rejects_artifact_with_wrong_mime_type(tmp_path: Path) -> None:
     artifacts = list(_artifacts(tmp_path))
     clip = artifacts[0]
-    artifacts[0] = RecordingEvidenceArtifact(
+    artifacts[0] = EvidenceArtifact(
         kind=clip.kind,
         path=clip.path,
         sha256=clip.sha256,

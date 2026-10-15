@@ -118,6 +118,18 @@ void test_rejects_accelerated_memory_regressions_without_mapping_pixels()
             ssv::SsvMemoryKind::SystemMemory,
             ssv::SsvMemoryKind::SystemMemory),
         "caps memory");
+
+    const auto display_overlay = expectation(
+        ssv::SsvPipelineBoundary::DisplayOverlayInput,
+        ssv::SsvPixelFormat::Bgrx,
+        {ssv::SsvMemoryKind::SystemMemory});
+    assert_violation(
+        display_overlay,
+        observation(
+            ssv::SsvPixelFormat::Rgba,
+            ssv::SsvMemoryKind::SystemMemory,
+            ssv::SsvMemoryKind::SystemMemory),
+        "pixel format");
 }
 
 void test_requires_model_sized_rgba_system_memory_at_host_boundary()
@@ -203,7 +215,7 @@ void test_rejects_incomplete_contract_observations()
 ssv::SsvPipelinePlan make_plan(bool fallback_allowed)
 {
     ssv::SsvPipelinePlan plan;
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Vaapi,
         .device = {},
         .decoder_factory = "vah264dec",

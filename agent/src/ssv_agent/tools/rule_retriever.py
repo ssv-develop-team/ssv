@@ -33,6 +33,9 @@ def rule_retriever_tool(
     query: str,
     top_k: int = 5,
     source: str | None = None,
+    rule_id: str | None = None,
+    rule_version: str | None = None,
+    event_type: str | None = None,
 ) -> str:
     """检索安全规则片段，返回带来源的知识 chunk。
 
@@ -40,13 +43,25 @@ def rule_retriever_tool(
         query: 检索问题或事件描述。
         top_k: 最大返回片段数。
         source: 规则来源过滤（可选）。
+        rule_id: 规则标识过滤（可选）。
+        rule_version: 规则版本过滤（可选）。
+        event_type: 业务事件类型过滤（可选）。
 
     Returns:
         JSON 字符串，包含 chunks 与来源元数据。
     """
     try:
         retriever = get_retriever(_knowledge_backend())
-        filters = {"source": source} if source else None
+        filters = {
+            key: value
+            for key, value in {
+                "source": source,
+                "rule_id": rule_id,
+                "rule_version": rule_version,
+                "event_type": event_type,
+            }.items()
+            if value
+        }
         result = _run_async(retriever.retrieve(query, top_k=top_k, filters=filters))
         return result.model_dump_json()
     except Exception as exc:

@@ -16,6 +16,7 @@ std::string_view memory_name(SsvMemoryKind memory) noexcept
     switch (memory) {
     case SsvMemoryKind::SystemMemory: return "SystemMemory";
     case SsvMemoryKind::VaMemory: return "VAMemory";
+    case SsvMemoryKind::CudaMemory: return "CUDAMemory";
     case SsvMemoryKind::DmaBuf: return "DMABuf";
     case SsvMemoryKind::GlMemory: return "GLMemory";
     case SsvMemoryKind::Unknown: return "unknown";
@@ -28,9 +29,13 @@ std::string_view display_name(
 {
     if (!backend)
         return "disabled";
-    return *backend == SsvResolvedDisplayBackend::GtkGlSink
-        ? "gtkglsink"
-        : "gtksink";
+    switch (*backend) {
+    case SsvResolvedDisplayBackend::GtkGlSink: return "gtkglsink";
+    case SsvResolvedDisplayBackend::GtkSink: return "gtksink";
+    case SsvResolvedDisplayBackend::RtspClientSink:
+        return "rtspclientsink";
+    }
+    return "unknown";
 }
 
 } // namespace
@@ -56,22 +61,23 @@ SsvEvent ssv_runtime_resolved_event(
     const auto *inference = inference_runtime_snapshot
         ? &*inference_runtime_snapshot
         : nullptr;
-    const bool vaapi = plan.decode.backend == SsvDecodeBackend::Vaapi;
+    const auto &decode = plan.codec.decode;
+    const bool vaapi = decode.backend == SsvDecodeBackend::Vaapi;
     const bool gtk_gl = plan.display_backend
         == SsvResolvedDisplayBackend::GtkGlSink;
     return {
         .context = std::move(context),
         .payload = SsvRuntimeResolvedEvent {
-            .decoder = plan.decode.decoder_factory,
+            .decoder = decode.decoder_factory,
             .va_device = vaapi
-                ? plan.decode.device.value
+                ? decode.device.value
                 : "not-applicable",
             .va_driver = vaapi ? "unknown" : "not-applicable",
             .decode_memory = std::string(memory_name(
                 plan.expected_caps.decode_output.memory)),
-            .vpp = plan.decode.va_postproc_factory.empty()
+            .vpp = decode.va_postproc_factory.empty()
                 ? "disabled"
-                : plan.decode.va_postproc_factory,
+                : decode.va_postproc_factory,
             .display_backend = std::string(display_name(
                 plan.display_backend)),
             .egl_renderer = gtk_gl ? "unknown" : "not-applicable",

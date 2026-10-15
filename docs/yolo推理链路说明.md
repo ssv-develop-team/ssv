@@ -223,7 +223,7 @@ manifest 记录 engine SHA-256、原始 ONNX SHA-256、精度、TensorRT/CUDA �
 ```bash
 meson test -C build --print-errorlogs
 python -m unittest discover -s scripts/ssv_cli/tests -p 'test_*.py'
-cd agent && --extra dev pytest
+cd agent && uv run --extra dev pytest
 ```
 
 真实 RTSP、GPU Provider、TensorRT engine、显示设备和模型效果仍需要在对应环境中单独验证。

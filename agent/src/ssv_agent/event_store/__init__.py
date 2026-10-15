@@ -3,18 +3,30 @@
 from ssv_agent.event_store.schema import EventQuery
 from ssv_agent.event_store.ledger import (
     DurableJob,
+    EpisodeCloseReason,
+    EpisodeIngestOutcome,
+    EpisodeObservation,
+    EpisodeState,
+    EventEpisode,
     EventCase,
     EventLedger,
     EvidenceRef,
     JobKind,
     LeaseLostError,
     JobState,
+    ReportRecord,
     RecordOutcome,
+    ReviewRecord,
 )
 from ssv_agent.event_store.sqlite_store import SsvEventStore
 
 __all__ = [
     "DurableJob",
+    "EpisodeCloseReason",
+    "EpisodeIngestOutcome",
+    "EpisodeObservation",
+    "EpisodeState",
+    "EventEpisode",
     "EventCase",
     "EventLedger",
     "EvidenceRef",
@@ -22,6 +34,8 @@ __all__ = [
     "JobKind",
     "LeaseLostError",
     "JobState",
+    "ReportRecord",
     "RecordOutcome",
+    "ReviewRecord",
     "SsvEventStore",
 ]

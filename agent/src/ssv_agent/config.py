@@ -16,10 +16,15 @@ _CONFIG_KEYS = frozenset(
         "display",
         "inference",
         "tracking",
+        "evidence_cache",
         "agent",
     }
 )
-_AGENT_CONFIG_KEYS = frozenset({"version", "logging", "redis", "sources", "agent"})
+_AGENT_CONFIG_KEYS = frozenset(
+    {"version", "logging", "redis", "sources", "evidence_cache", "agent"}
+)
+
+_DEFAULT_EVIDENCE_DIRECTORY = "/var/lib/ssv/evidence-cache"
 
 
 class _StrictConfigModel(BaseModel):
@@ -42,14 +47,19 @@ class RedisConfig(_StrictConfigModel):
     consumer_name: str | None = Field(default=None, min_length=1)
 
 
-class WorkerConfig(_StrictConfigModel):
-    """持久 worker 的领取与重试策略。"""
+class PollingWorkerConfig(_StrictConfigModel):
+    """持久轮询 worker 的领取与重试策略。"""
 
-    enabled: bool = False
     poll_interval_ms: int = Field(default=1000, gt=0)
     lease_ms: int = Field(default=30_000, gt=0)
     max_retries: int = Field(default=3, ge=1)
     retry_delay_ms: int = Field(default=1000, ge=0)
+
+
+class WorkerConfig(PollingWorkerConfig):
+    """可按部署需要启停的持久 worker 配置。"""
+
+    enabled: bool = False
 
 
 class ReviewWorkerConfig(WorkerConfig):
@@ -64,6 +74,12 @@ class IndexWorkerConfig(WorkerConfig):
     query_text_type: str | None = None
 
 
+class ReportWorkerConfig(WorkerConfig):
+    """把已提交的复核结果整理为可追溯报告。"""
+
+    enabled: bool = True
+
+
 class AgentSourceConfig(_StrictConfigModel):
     """Agent 所需的 source 标识和录像路径来源。"""
 
@@ -71,21 +87,63 @@ class AgentSourceConfig(_StrictConfigModel):
     uri: str = Field(min_length=1)
 
 
-class RecordingEvidenceConfig(_StrictConfigModel):
-    """由 Agent 持久 worker 生成录像上下文证据的配置。"""
+class RecordingEvidenceConfig(PollingWorkerConfig):
+    """由 Agent 持久 worker 读取 SSV cache 并生成上下文证据的配置。"""
 
-    enabled: bool = False
+    retry_delay_ms: int = Field(default=2_000, ge=0)
     clip_before_ms: int = Field(default=2500, ge=1000)
     clip_after_ms: int = Field(default=2500, ge=1000)
+    merge_gap_ms: int = Field(default=3_000, gt=0)
+    lost_grace_ms: int = Field(default=3_000, ge=0)
+    silence_timeout_ms: int = Field(default=30_000, gt=0)
+    max_episode_ms: int = Field(default=30_000, gt=0)
+
+    @model_validator(mode="after")
+    def validate_episode_window(self) -> Self:
+        if self.max_episode_ms <= self.merge_gap_ms:
+            raise ValueError("recording_evidence.max_episode_ms must exceed merge_gap_ms")
+        return self
 
 
 class KnowledgeConfig(_StrictConfigModel):
     """规则知识检索与 Qdrant 投影配置。"""
 
     backend: Literal["local_markdown", "qdrant", "mock"] = "local_markdown"
+    rules_dir: str = Field(default="knowledge/rules", min_length=1)
     qdrant_path: str = Field(default="data/qdrant", min_length=1)
     qdrant_url: str | None = Field(default=None, min_length=1)
     min_score: float = Field(default=0.5, ge=-1.0, le=1.0)
+
+    @field_validator("rules_dir")
+    @classmethod
+    def validate_rules_dir(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("agent.knowledge.rules_dir must not be blank")
+        return value
+
+
+class EvidenceCacheConfig(_StrictConfigModel):
+    """由 GStreamer 生成、供 Agent 取证的短时循环缓存配置。"""
+
+    directory: str = _DEFAULT_EVIDENCE_DIRECTORY
+    segment_duration_ms: int = Field(default=10_000, ge=1_000)
+    retention_ms: int = Field(default=120_000, ge=1_000)
+    max_bytes_mb: int = Field(default=512, ge=1)
+
+    @field_validator("directory")
+    @classmethod
+    def validate_directory(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("evidence_cache.directory must be an absolute path")
+        return value
+
+    @model_validator(mode="after")
+    def validate_retention(self) -> Self:
+        if self.retention_ms < self.segment_duration_ms:
+            raise ValueError(
+                "evidence_cache.retention_ms must not be shorter than segment_duration_ms"
+            )
+        return self
 
 
 class AgentConfig(_StrictConfigModel):
@@ -94,11 +152,12 @@ class AgentConfig(_StrictConfigModel):
     model_name: str | None = None
     event_db_path: str = Field(default="data/events.db", min_length=1)
     output_dir: str = Field(default="outputs", min_length=1)
-    evidence_roots: list[str] = Field(default_factory=list)
+    evidence_roots: list[str] = Field(default_factory=lambda: [_DEFAULT_EVIDENCE_DIRECTORY])
     dedup_enabled: bool = True
     dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
     review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
     indexing: IndexWorkerConfig = Field(default_factory=IndexWorkerConfig)
+    reporting: ReportWorkerConfig = Field(default_factory=ReportWorkerConfig)
     recording_evidence: RecordingEvidenceConfig = Field(default_factory=RecordingEvidenceConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
 
@@ -110,19 +169,13 @@ class AgentConfig(_StrictConfigModel):
                 raise ValueError("evidence_roots entries must be absolute paths")
         return roots
 
-    @model_validator(mode="after")
-    def validate_recording_evidence(self) -> Self:
-        recording_evidence = self.recording_evidence
-        if recording_evidence.enabled and not self.evidence_roots:
-            raise ValueError("recording_evidence requires non-empty evidence_roots")
-        return self
-
 
 class SsvConfig(_StrictConfigModel):
     version: Literal["2.0"] = "2.0"
     logging: LoggingConfig = LoggingConfig()
     redis: RedisConfig = RedisConfig()
     sources: list[AgentSourceConfig] = Field(default_factory=list)
+    evidence_cache: EvidenceCacheConfig = Field(default_factory=EvidenceCacheConfig)
     agent: AgentConfig = AgentConfig()
 
     @model_validator(mode="before")
@@ -148,6 +201,21 @@ class SsvConfig(_StrictConfigModel):
                 for source in sources
             ]
         return agent_config
+
+    @model_validator(mode="after")
+    def validate_recording_evidence_cache(self) -> Self:
+        if not self.agent.evidence_roots:
+            raise ValueError("recording_evidence requires non-empty evidence_roots")
+        cache_directory = Path(self.evidence_cache.directory).resolve(strict=False)
+        allowed = any(
+            cache_directory == root or root in cache_directory.parents
+            for root in (Path(item).resolve(strict=False) for item in self.agent.evidence_roots)
+        )
+        if not allowed:
+            raise ValueError(
+                "recording_evidence requires evidence_cache.directory inside evidence_roots"
+            )
+        return self
 
 
 def _validate_loaded_config(data: object) -> SsvConfig:

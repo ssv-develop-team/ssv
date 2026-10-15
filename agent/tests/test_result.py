@@ -91,6 +91,31 @@ def test_result_artifacts_are_content_addressed_and_never_overwrite_each_other(
     assert first_markdown.read_text(encoding="utf-8") == LEGACY_UNCERTAIN
 
 
+def test_content_addressed_artifact_rejects_conflicting_existing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    path = write_result_markdown("case-1", LEGACY_UNCERTAIN)
+    path.write_text("modified artifact", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="conflicting contents"):
+        write_result_markdown("case-1", LEGACY_UNCERTAIN)
+
+
+def test_content_addressed_artifact_rejects_symlink_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    path = write_result_markdown("case-1", LEGACY_UNCERTAIN)
+    sibling = path.with_name("shared.md")
+    sibling.write_text(LEGACY_UNCERTAIN, encoding="utf-8")
+    path.unlink()
+    path.symlink_to(sibling)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        write_result_markdown("case-1", LEGACY_UNCERTAIN)
+
+
 @pytest.mark.parametrize(
     "event_id", [".", "..", "../../escape", "nested/event", r"nested\\event", "x" * 129]
 )
@@ -127,7 +152,8 @@ def _rule_result(**updates: object) -> ReviewResult:
         "verdict": "violation", "confidence": 0.9, "evidence_status": "available",
         "evidence_ids": ["evidence-1"], "claims": [], "explanation": "规则和证据支持结论",
         "rule_citations": [{
-            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1", "section": "5.2"
+            "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
+            "rule_version": "v1", "section": "5.2"
         }],
     }
     values.update(updates)
@@ -137,27 +163,53 @@ def _rule_result(**updates: object) -> ReviewResult:
 def test_deterministic_result_requires_rule_citation() -> None:
     context = _context(Chunk(
         chunk_id="chunk-1", content="rule", score=0.9,
-        metadata={"source": "rules.md", "rule_id": "rule-1", "section": "5.2"},
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
     ))
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(rule_citations=[]), context)
+    result = validate_rule_citations(_rule_result(rule_citations=[]), context)
+    assert result.verdict == "uncertain"
+    assert result.confidence == 0.0
+    assert result.rule_citations == []
+    assert "缺少规则引用" in result.explanation
 
 
 def test_rule_citation_must_match_retrieved_chunk_metadata() -> None:
     context = _context(Chunk(
         chunk_id="chunk-1", content="rule", score=0.9,
-        metadata={"source": "rules.md", "rule_id": "rule-1", "section": "5.2"},
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
     ))
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(rule_citations=[{
-            "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1", "section": "5.2"
-        }]), context)
+    result = validate_rule_citations(_rule_result(rule_citations=[{
+        "chunk_id": "chunk-1", "source": "other.md", "rule_id": "rule-1",
+        "rule_version": "v1", "section": "5.2"
+    }]), context)
+    assert result.verdict == "uncertain"
+    assert result.rule_citations == []
+
+
+def test_rule_citation_must_match_retrieved_rule_version() -> None:
+    context = _context(Chunk(
+        chunk_id="chunk-1", content="rule", score=0.9,
+        metadata={
+            "source": "rules.md", "rule_id": "rule-1", "rule_version": "v1", "section": "5.2"
+        },
+    ))
+    result = validate_rule_citations(_rule_result(rule_citations=[{
+        "chunk_id": "chunk-1", "source": "rules.md", "rule_id": "rule-1",
+        "rule_version": "v2", "section": "5.2"
+    }]), context)
+    assert result.verdict == "uncertain"
+    assert result.rule_citations == []
 
 
 def test_unavailable_rules_only_allow_uncertain() -> None:
     context = _context(available=False)
-    with pytest.raises(ResultParseError):
-        validate_rule_citations(_rule_result(), context)
+    downgraded = validate_rule_citations(_rule_result(), context)
+    assert downgraded.verdict == "uncertain"
+    assert downgraded.confidence == 0.0
+    assert downgraded.rule_citations == []
     uncertain = _rule_result(
         verdict="uncertain", confidence=0.4, rule_citations=[], explanation="没有可用规则依据"
     )

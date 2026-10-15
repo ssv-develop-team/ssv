@@ -15,8 +15,10 @@ enum class SsvPipelineBoundary {
     DecodeTee,
     DisplayUpload,
     DisplaySink,
+    DisplayEncodeInput,
     AnalysisGpuInput,
     AnalysisHost,
+    DisplayOverlayInput,
 };
 
 struct SsvPipelineContractExpectation {
@@ -49,6 +51,7 @@ struct SsvPipelineContractViolation {
 
 enum class SsvPipelineContractRecovery {
     Fatal,
+    FallbackMixedCodec,
     FallbackSoftware,
 };
 

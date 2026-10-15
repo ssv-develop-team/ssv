@@ -7,6 +7,7 @@
 #include "core/ssv_inference_engine.hpp"
 #include "core/ssv_inference_stats.hpp"
 #include "backends/onnxruntime/ssv_provider_resolver.hpp"
+#include "backends/onnxruntime/ssv_onnxruntime_backend.hpp"
 #include "backends/onnxruntime/ssv_session_pool.hpp"
 
 #include <exception>
@@ -258,6 +259,37 @@ private:
     std::unordered_map<std::string, PreprocessTransform> source_transforms_;
 };
 
+namespace {
+
+SsvInferenceServicePtr create_service(
+    const ssv::SsvInferenceConfig &config,
+    std::unique_ptr<InferenceBackend> backend,
+    std::shared_ptr<SsvInferenceBufferAllocator> allocator,
+    std::optional<std::span<const ssv::SsvProvider>> available_providers)
+{
+    SsvInferenceServicePtr service(SSV_INFERENCE_SERVICE(
+        g_object_new(SSV_TYPE_INFERENCE_SERVICE, nullptr)));
+    auto impl = std::make_unique<InferenceServiceImpl>(
+        std::move(backend), std::move(allocator));
+    try {
+        if (available_providers) {
+            impl->start(make_inference_config(
+                config, *available_providers));
+        } else {
+            impl->start(make_inference_config(config));
+        }
+    } catch (const SsvModelContractError &error) {
+        throw SsvInferenceServiceError(
+            "inference.model_contract", error.what());
+    } catch (const std::exception &error) {
+        throw SsvInferenceServiceError("inference.start", error.what());
+    }
+    service->impl = impl.release();
+    return service;
+}
+
+} // namespace
+
 SsvInferenceServiceError::SsvInferenceServiceError(
     std::string stage,
     std::string message)
@@ -281,7 +313,20 @@ void SsvInferenceServiceUnref::operator()(
 SsvInferenceServicePtr ssv_inference_service_create(
     const ssv::SsvInferenceConfig &config)
 {
-    return ssv_inference_service_create_with_backend(config, {});
+    return create_service(config, {}, {}, std::nullopt);
+}
+
+SsvInferenceServicePtr ssv_inference_service_create(
+    const ssv::SsvInferenceConfig &config,
+    std::span<const ssv::SsvProvider> available_providers)
+{
+    return create_service(config, {}, {}, available_providers);
+}
+
+std::vector<ssv::SsvProvider>
+ssv_inference_detect_available_providers()
+{
+    return ssv_onnxruntime_available_providers();
 }
 
 SsvInferenceServicePtr ssv_inference_service_create_with_backend(
@@ -289,20 +334,8 @@ SsvInferenceServicePtr ssv_inference_service_create_with_backend(
     std::unique_ptr<InferenceBackend> backend,
     std::shared_ptr<SsvInferenceBufferAllocator> allocator)
 {
-    SsvInferenceServicePtr service(SSV_INFERENCE_SERVICE(
-        g_object_new(SSV_TYPE_INFERENCE_SERVICE, nullptr)));
-    auto impl = std::make_unique<InferenceServiceImpl>(
-        std::move(backend), std::move(allocator));
-    try {
-        impl->start(make_inference_config(config));
-    } catch (const SsvModelContractError &error) {
-        throw SsvInferenceServiceError(
-            "inference.model_contract", error.what());
-    } catch (const std::exception &error) {
-        throw SsvInferenceServiceError("inference.start", error.what());
-    }
-    service->impl = impl.release();
-    return service;
+    return create_service(
+        config, std::move(backend), std::move(allocator), std::nullopt);
 }
 
 SsvInferenceSubmissionResult ssv_inference_service_submit(

@@ -7,10 +7,12 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ssv {
 
 class SsvPipelineBuilder;
+class SsvEvidenceCache;
 
 enum class SsvPipelineMessageOrigin {
     Other,
@@ -63,12 +65,15 @@ private:
 
 class SsvPipelineInstance final {
 public:
-    /// Takes the pipeline and optional attachment. Attachment objects must be
-    /// descendants of the pipeline.
+    /// Takes the pipeline, optional GTK attachment, and borrowed display
+    /// elements. All attachment and display elements must belong to pipeline.
     explicit SsvPipelineInstance(
         SsvPipelinePtr pipeline,
         std::optional<SsvDisplayAttachment> display_attachment = std::nullopt,
-        std::shared_ptr<SsvSourceContext> source_context = {});
+        std::shared_ptr<SsvSourceContext> source_context = {},
+        std::shared_ptr<SsvEvidenceCache> evidence_cache = {},
+        std::vector<GstElement *> display_elements = {},
+        GstElement *display_sink = nullptr);
     ~SsvPipelineInstance();
 
     SsvPipelineInstance(const SsvPipelineInstance &) = delete;
@@ -88,6 +93,8 @@ public:
     /// Classifies a borrowed message without transferring ownership.
     [[nodiscard]] SsvPipelineMessageOrigin message_origin(
         const GstMessage *message) const noexcept;
+    /// Forwards a borrowed bus message to the optional evidence cache.
+    void handle_cache_message(GstMessage *message) const noexcept;
 
     /// Releases the display attachment before releasing the pipeline.
     void reset() noexcept;
@@ -98,6 +105,10 @@ private:
     std::shared_ptr<SsvSourceContext> source_context_;
     SsvPipelinePtr pipeline_;
     std::optional<SsvDisplayAttachment> display_attachment_;
+    std::shared_ptr<SsvEvidenceCache> evidence_cache_;
+    // Borrowed children of pipeline_; cleared before pipeline_ is released.
+    std::vector<GstElement *> display_elements_;
+    GstElement *display_sink_ = nullptr;
 };
 
 } // namespace ssv

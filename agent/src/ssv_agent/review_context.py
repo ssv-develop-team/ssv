@@ -34,6 +34,7 @@ class ReviewContext(BaseModel):
     source_pts: int | None = None
     detections: list[Detection] = Field(default_factory=list)
     event_type: str | None = None
+    event_phase: str | None = None
     severity: str | None = None
     rule_id: str | None = None
     rule_version: str | None = None
@@ -57,12 +58,6 @@ class ReviewContext(BaseModel):
                     return int(payload[name])
             return None
 
-        event_type = (
-            payload.get("event_type")
-            if "event_type" in payload
-            else payload.get("type")
-        )
-
         return cls(
             event_id=str(payload.get("event_id") or entry_id),
             ingress_id=entry_id,
@@ -72,7 +67,8 @@ class ReviewContext(BaseModel):
             stream_generation=optional_int("stream_generation", "generation"),
             source_pts=optional_int("source_pts", "pts"),
             detections=detections,
-            event_type=event_type,
+            event_type=payload.get("event_type"),
+            event_phase=payload.get("event_phase"),
             severity=payload.get("severity"),
             rule_id=payload.get("rule_id"),
             rule_version=payload.get("rule_version"),

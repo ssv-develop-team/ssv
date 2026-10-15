@@ -42,7 +42,7 @@ int main()
     const auto payload = ssv_pub_build_event_payload(
         frame, 1234567890LL, event_rule);
     const auto message = nlohmann::json::parse(payload);
-    assert(message.size() == 10);
+    assert(message.size() == 12);
     assert(message["type"] == "detection");
     assert(message["source"] == "camera-01");
     assert(message["timestamp_ms"] == 1234567890LL);
@@ -53,8 +53,9 @@ int main()
     assert(message["rule_version"] == "GB/T 26860-2011");
     assert(message["rule_facts"] == nlohmann::json({
         {"helmet_required", true}, {"subject", "person"}}));
+    assert(message["source_pts"] == 5 * GST_SECOND);
+    assert(message["stream_generation"] == 9);
     assert(!message.contains("media_pts_ns"));
-    assert(!message.contains("stream_generation"));
 
     const auto &serialized = message["detections"].at(0);
     assert(serialized.size() == 7);
@@ -70,10 +71,13 @@ int main()
 
     SsvTrackedFrame default_source_frame = frame;
     default_source_frame.source_id = "pipeline-0";
+    default_source_frame.timing.pts = GST_CLOCK_TIME_NONE;
     const auto default_source_payload = nlohmann::json::parse(
         ssv_pub_build_event_payload(default_source_frame, 1234567890LL));
     assert(default_source_payload["source"] == "pipeline-0");
     assert(default_source_payload["timestamp_ms"] == 1234567890LL);
+    assert(default_source_payload["source_pts"].is_null());
+    assert(default_source_payload["stream_generation"] == 9);
 
     const std::string race_source = "pub-reset-race-test";
     auto source = ssv_meta(race_source);

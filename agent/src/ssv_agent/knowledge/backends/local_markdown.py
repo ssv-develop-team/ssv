@@ -3,46 +3,25 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
-import hashlib
 import math
+import os
 from pathlib import Path
 import re
 from typing import Any
 
+from ssv_agent.knowledge.catalog import (
+    DEFAULT_RULES_DIR,
+    discover_rule_documents,
+)
 from ssv_agent.knowledge.ingester import Ingester
 from ssv_agent.knowledge.registry import register_backend
+from ssv_agent.knowledge.rule_chunks import (
+    RulePassage,
+    rule_chunk_id,
+    split_rule_clauses,
+)
 from ssv_agent.knowledge.retriever import Retriever
 from ssv_agent.knowledge.schema import Chunk, IngestResult, RetrievalResult
-
-
-DEFAULT_KNOWLEDGE_DIR = Path(__file__).resolve().parents[4] / "knowledge"
-MAX_SECTION_LENGTH = 1200
-CLAUSE_HEADING = re.compile(
-    r"^(?:(?:#{1,6}\s*)?(?P<section>\d+(?:\.\d+){0,5})(?=\s|$)"
-    r"|(?P<heading>#{1,6})\s+(?P<title>\S.*))"
-)
-_LAYOUT_NOISE = re.compile(
-    r"^(?:#{1,6}\s+\?\s*\d+\s*\?|\d+|GB26860[—-]2011)$"
-)
-SUPPORTED_EXTENSIONS = frozenset({".md", ".txt"})
-
-
-@dataclass(frozen=True)
-class _Passage:
-    source: str
-    section: str
-    content: str
-
-
-def _read_text(path: Path) -> str:
-    data = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
 
 
 def _tokens(text: str) -> list[str]:
@@ -56,64 +35,20 @@ def _tokens(text: str) -> list[str]:
     return tokens
 
 
-def _split_large_section(section: str) -> list[str]:
-    if len(section) <= MAX_SECTION_LENGTH:
-        return [section]
-
-    chunks: list[str] = []
-    buffer = ""
-    for sentence in re.split(r"(?<=[\u3002\uff01\uff1f\uff1b!?;])", section):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if buffer and len(buffer) + len(sentence) + 1 > MAX_SECTION_LENGTH:
-            chunks.append(buffer.strip())
-            buffer = ""
-        buffer += sentence + "\n"
-    if buffer.strip():
-        chunks.append(buffer.strip())
-    return chunks
-
-
-def _split_clauses(source: str, text: str) -> list[_Passage]:
-    passages: list[_Passage] = []
-    section = "未编号"
-    section_lines: list[str] = []
-    for raw_line in text.replace("\r\n", "\n").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if _LAYOUT_NOISE.fullmatch(line):
-            continue
-        match = CLAUSE_HEADING.match(line)
-        if match and section_lines:
-            passages.extend(
-                _Passage(source, section, content)
-                for content in _split_large_section("\n".join(section_lines))
-            )
-            section_lines = []
-        if match and match.group("section"):
-            section = match.group("section")
-        elif match and match.group("title"):
-            section = match.group("title")
-        section_lines.append(line)
-    if section_lines:
-        passages.extend(
-            _Passage(source, section, content)
-            for content in _split_large_section("\n".join(section_lines))
-        )
-    return passages
-
-
 class LocalMarkdownRetriever(Retriever):
     """Read project-local regulations and retrieve the strongest matching clauses."""
 
     backend_name = "local_markdown"
 
-    def __init__(self, knowledge_dir: Path = DEFAULT_KNOWLEDGE_DIR) -> None:
-        self._knowledge_dir = knowledge_dir
-        self._fingerprint: tuple[tuple[str, int, int], ...] = ()
-        self._passages: list[_Passage] = []
+    def __init__(self, knowledge_dir: Path | None = None) -> None:
+        configured_dir = os.getenv("SSV_KNOWLEDGE_RULES_DIR")
+        self._knowledge_dir = (
+            Path(knowledge_dir)
+            if knowledge_dir is not None
+            else Path(configured_dir) if configured_dir else DEFAULT_RULES_DIR
+        )
+        self._fingerprint: tuple[tuple[str, str], ...] = ()
+        self._passages: list[RulePassage] = []
         self._term_frequencies: list[Counter[str]] = []
         self._document_frequencies: Counter[str] = Counter()
         self._average_length = 0.0
@@ -132,7 +67,11 @@ class LocalMarkdownRetriever(Retriever):
         if "安全帽" in query and "绝缘安全帽" not in query:
             query = f"{query} 绝缘安全帽"
         terms = set(_tokens(query))
-        source_filter = (filters or {}).get("source")
+        active_filters = filters or {}
+        source_filter = active_filters.get("source")
+        rule_id_filter = active_filters.get("rule_id")
+        rule_version_filter = active_filters.get("rule_version")
+        event_type_filter = active_filters.get("event_type")
         if not terms:
             return RetrievalResult(chunks=[], query=query, backend=self.backend_name)
 
@@ -149,6 +88,12 @@ class LocalMarkdownRetriever(Retriever):
         for index, frequencies in enumerate(self._term_frequencies):
             passage = self._passages[index]
             if source_filter and passage.source != source_filter:
+                continue
+            if rule_id_filter and passage.rule_id != rule_id_filter:
+                continue
+            if rule_version_filter and passage.rule_version != rule_version_filter:
+                continue
+            if event_type_filter and event_type_filter not in passage.event_types:
                 continue
             length = sum(frequencies.values())
             score = 0.0
@@ -167,16 +112,18 @@ class LocalMarkdownRetriever(Retriever):
             if score:
                 scores.append((score, index))
 
-        ranked = sorted(scores, key=lambda item: (-item[0], item[1]))[: min(top_k, 2)]
+        ranked = sorted(scores, key=lambda item: (-item[0], item[1]))[:top_k]
         chunks = [
             Chunk(
-                chunk_id=self._chunk_id(self._passages[index]),
+                chunk_id=rule_chunk_id(self._passages[index]),
                 content=self._passages[index].content,
                 score=round(score, 4),
                 metadata={
                     "source": self._passages[index].source,
-                    "rule_id": self._passages[index].section,
+                    "rule_id": self._passages[index].rule_id,
+                    "rule_version": self._passages[index].rule_version,
                     "section": self._passages[index].section,
+                    "content_hash": self._passages[index].content_hash,
                 },
             )
             for score, index in ranked
@@ -184,18 +131,17 @@ class LocalMarkdownRetriever(Retriever):
         return RetrievalResult(chunks=chunks, query=query, backend=self.backend_name)
 
     def _reload_if_changed(self) -> None:
-        paths = self._document_paths()
+        documents = discover_rule_documents(self._knowledge_dir)
         fingerprint = tuple(
-            (str(path.resolve()), path.stat().st_mtime_ns, path.stat().st_size)
-            for path in paths
+            (document.source_path, document.content_hash) for document in documents
         )
         if fingerprint == self._fingerprint:
             return
 
         passages = [
             passage
-            for path in paths
-            for passage in _split_clauses(path.name, _read_text(path))
+            for document in documents
+            for passage in split_rule_clauses(document.source_path, document.content, rule=document)
         ]
         frequencies = [Counter(_tokens(passage.content)) for passage in passages]
         self._passages = passages
@@ -207,21 +153,6 @@ class LocalMarkdownRetriever(Retriever):
             else 0.0
         )
         self._fingerprint = fingerprint
-
-    def _document_paths(self) -> list[Path]:
-        if not self._knowledge_dir.is_dir():
-            return []
-        return sorted(
-            path
-            for path in self._knowledge_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        )
-
-    @staticmethod
-    def _chunk_id(passage: _Passage) -> str:
-        digest = hashlib.sha256(passage.content.encode("utf-8")).hexdigest()[:12]
-        return f"{passage.source}:{passage.section}:{digest}"
-
 
 class LocalMarkdownIngester(Ingester):
     """Static project regulations are read from disk and are not ingested externally."""

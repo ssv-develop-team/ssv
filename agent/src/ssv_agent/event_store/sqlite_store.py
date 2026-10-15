@@ -200,6 +200,67 @@ class SsvEventStore:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_review_record(self, event_id: str, revision: int) -> dict[str, Any] | None:
+        """按事件 revision 读取 append-only 复核历史。"""
+        row = self._conn.execute(
+            "SELECT * FROM reviews WHERE event_id = ? AND revision = ?",
+            (event_id, revision),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_report_for_review(
+        self,
+        event_id: str,
+        review_id: str,
+    ) -> dict[str, Any] | None:
+        """按事件和 review ID 返回已登记报告元数据。"""
+        row = self._conn.execute(
+            "SELECT * FROM reports WHERE event_id = ? AND review_id = ?",
+            (event_id, review_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_reports_for_event(self, event_id: str) -> list[dict[str, Any]]:
+        """按 review revision 顺序返回事件的报告元数据。"""
+        rows = self._conn.execute(
+            "SELECT * FROM reports WHERE event_id = ? ORDER BY review_revision",
+            (event_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_episode(self, episode_id: str) -> dict[str, Any] | None:
+        """按 episode ID 返回生命周期原始记录。"""
+        row = self._conn.execute(
+            "SELECT * FROM episodes WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_episode_for_event(
+        self,
+        event_id: str,
+        *,
+        episode_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """按事件关联的 episode ID 查找；旧事件回退到 canonical event ID。"""
+        if episode_id is None:
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE canonical_event_id = ?",
+                (event_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE episode_id = ?", (episode_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_jobs_for_entity(self, entity_id: str) -> list[dict[str, Any]]:
+        """按实体 ID 返回持久任务，保持创建顺序。"""
+        rows = self._conn.execute(
+            "SELECT * FROM durable_jobs WHERE entity_id = ? ORDER BY job_id",
+            (entity_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def query_events(self, query: EventQuery) -> list[dict[str, Any]]:
         """按过滤条件查询事件，按时间倒序。"""
         sql = "SELECT e.* FROM events e WHERE 1=1"

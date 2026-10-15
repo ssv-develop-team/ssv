@@ -18,6 +18,7 @@ def test_prompt_limits_model_to_read_only_tools_and_json_contract() -> None:
     prompt = build_review_prompt(context)
 
     assert "get_event" in prompt
+    assert "get_report" in prompt
     assert "evidence_reader" in prompt
     assert "rule_retriever" in prompt
     assert "search_events" in prompt
@@ -44,7 +45,10 @@ def test_prompt_includes_rule_candidates_and_requires_rule_citations() -> None:
                     chunk_id="chunk-1",
                     content="必须佩戴安全帽",
                     score=0.9,
-                    metadata={"source": "rules.md", "rule_id": "r1", "section": "5.2"},
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2", "content_hash": "sha256:abc",
+                    },
                 )
             ],
         ),
@@ -54,5 +58,7 @@ def test_prompt_includes_rule_candidates_and_requires_rule_citations() -> None:
 
     assert "必须佩戴安全帽" in prompt
     assert "chunk-1" in prompt
+    assert "v1" in prompt
+    assert "sha256:abc" in prompt
     assert "rule_citations" in prompt
     assert "规则候选核验" in prompt

@@ -1,7 +1,9 @@
 #include "ssv_pipeline_instance.hpp"
 
+#include "ssv_evidence_cache.hpp"
+
+#include <algorithm>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
 
 namespace ssv {
@@ -70,10 +72,16 @@ void SsvDisplayAttachment::reset() noexcept
 SsvPipelineInstance::SsvPipelineInstance(
     SsvPipelinePtr pipeline,
     std::optional<SsvDisplayAttachment> display_attachment,
-    std::shared_ptr<SsvSourceContext> source_context)
+    std::shared_ptr<SsvSourceContext> source_context,
+    std::shared_ptr<SsvEvidenceCache> evidence_cache,
+    std::vector<GstElement *> display_elements,
+    GstElement *display_sink)
     : source_context_(std::move(source_context))
     , pipeline_(std::move(pipeline))
     , display_attachment_(std::move(display_attachment))
+    , evidence_cache_(std::move(evidence_cache))
+    , display_elements_(std::move(display_elements))
+    , display_sink_(display_sink)
 {
     if (pipeline_ == nullptr || !GST_IS_PIPELINE(pipeline_.get())) {
         throw std::invalid_argument(
@@ -89,6 +97,26 @@ SsvPipelineInstance::SsvPipelineInstance(
         throw std::invalid_argument(
             "display attachment objects must belong to its pipeline");
     }
+    if (display_elements_.empty() != (display_sink_ == nullptr)) {
+        throw std::invalid_argument(
+            "display metadata requires elements and sink together");
+    }
+    if (!display_elements_.empty()) {
+        const auto sink_in_branch = std::find(
+            display_elements_.begin(), display_elements_.end(), display_sink_);
+        if (sink_in_branch == display_elements_.end()) {
+            throw std::invalid_argument(
+                "display metadata must include its sink");
+        }
+        for (auto *element : display_elements_) {
+            if (!GST_IS_ELEMENT(element)
+                || !gst_object_has_as_ancestor(
+                    GST_OBJECT(element), GST_OBJECT(pipeline_.get()))) {
+                throw std::invalid_argument(
+                    "display branch objects must belong to its pipeline");
+            }
+        }
+    }
 }
 
 SsvPipelineInstance::~SsvPipelineInstance()
@@ -101,6 +129,9 @@ SsvPipelineInstance::SsvPipelineInstance(
     : source_context_(std::move(other.source_context_))
     , pipeline_(std::move(other.pipeline_))
     , display_attachment_(std::move(other.display_attachment_))
+    , evidence_cache_(std::move(other.evidence_cache_))
+    , display_elements_(std::move(other.display_elements_))
+    , display_sink_(std::exchange(other.display_sink_, nullptr))
 {
     other.display_attachment_.reset();
 }
@@ -130,7 +161,7 @@ std::shared_ptr<SsvSourceContext> SsvPipelineInstance::source_context()
 SsvPipelineMessageOrigin SsvPipelineInstance::message_origin(
     const GstMessage *message) const noexcept
 {
-    if (pipeline_ == nullptr || !display_attachment_ || message == nullptr
+    if (pipeline_ == nullptr || message == nullptr
         || GST_MESSAGE_SRC(message) == nullptr) {
         return SsvPipelineMessageOrigin::Other;
     }
@@ -139,21 +170,35 @@ SsvPipelineMessageOrigin SsvPipelineInstance::message_origin(
             source, GST_OBJECT(pipeline_.get()))) {
         return SsvPipelineMessageOrigin::Other;
     }
-    if (source == GST_OBJECT(display_attachment_->sink()))
+    if (display_sink_ && source == GST_OBJECT(display_sink_)) {
         return SsvPipelineMessageOrigin::DisplaySink;
+    }
+    for (auto *element : display_elements_) {
+        if (source == GST_OBJECT(element)
+            || gst_object_has_as_ancestor(source, GST_OBJECT(element))) {
+            return SsvPipelineMessageOrigin::DisplayBranch;
+        }
+    }
+    if (display_attachment_
+        && source == GST_OBJECT(display_attachment_->sink())) {
+        return SsvPipelineMessageOrigin::DisplaySink;
+    }
+    return SsvPipelineMessageOrigin::Other;
+}
 
-    gchar *path = gst_object_get_path_string(source);
-    const bool display_branch = path != nullptr
-        && std::string_view(path).find("display-") != std::string_view::npos;
-    g_free(path);
-    return display_branch
-        ? SsvPipelineMessageOrigin::DisplayBranch
-        : SsvPipelineMessageOrigin::Other;
+void SsvPipelineInstance::handle_cache_message(
+    GstMessage *message) const noexcept
+{
+    if (evidence_cache_ != nullptr)
+        evidence_cache_->handle_message(message);
 }
 
 void SsvPipelineInstance::reset() noexcept
 {
+    evidence_cache_.reset();
     display_attachment_.reset();
+    display_elements_.clear();
+    display_sink_ = nullptr;
     pipeline_.reset();
     source_context_.reset();
 }

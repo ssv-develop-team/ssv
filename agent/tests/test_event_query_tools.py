@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ssv_agent.config import RecordingEvidenceConfig
+from ssv_agent.dedup import DedupDecision
+from ssv_agent.event_episode import EventEpisodeAggregator
 from ssv_agent.event_store import EventLedger
 from ssv_agent.event_store.sqlite_store import SsvEventStore
 from ssv_agent.review_context import ReviewContext
@@ -72,6 +75,64 @@ def test_get_event_tool_returns_authoritative_case_without_host_paths(
     assert out["evidence"][0]["evidence_id"]
     assert "path" not in out["evidence"][0]
     assert str(frame) not in json.dumps(out)
+
+
+def test_get_event_tool_exposes_episode_window_without_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    monkeypatch.setenv("SSV_EVENT_DB_PATH", str(db_path))
+    config = RecordingEvidenceConfig(enabled=True)
+    aggregator = EventEpisodeAggregator(config)
+    with EventLedger(db_path, recording_evidence=config) as ledger:
+        aggregator.ingest(
+            ledger,
+            ReviewContext(
+                event_id="episode-start",
+                ingress_id="1-0",
+                source="camera-1",
+                timestamp_ms=1_000,
+                frame_id=1,
+                stream_generation=7,
+                source_pts=10_000_000_000,
+                event_type="person_without_helmet",
+            ),
+            DedupDecision.RUN,
+            now_ms=1_000,
+        )
+        aggregator.ingest(
+            ledger,
+            ReviewContext(
+                event_id="episode-end",
+                ingress_id="2-0",
+                source="camera-1",
+                timestamp_ms=2_000,
+                frame_id=2,
+                stream_generation=7,
+                source_pts=11_000_000_000,
+                event_type="person_without_helmet",
+                detections=[
+                    {
+                        "class": "person",
+                        "class_id": 0,
+                        "confidence": 0.9,
+                        "track_state": 3,
+                    }
+                ],
+            ),
+            DedupDecision.SKIP,
+            now_ms=2_000,
+        )
+
+    out = json.loads(get_event_tool.invoke({"event_id": "episode-start"}))
+
+    assert out["episode_id"] == "episode-start"
+    assert out["episode_state"] == "closed"
+    assert out["episode_close_reason"] == "dead"
+    assert out["evidence_window_start"] == 7_500_000_000
+    assert out["evidence_window_end"] == 13_500_000_000
+    assert str(tmp_path) not in json.dumps(out)
 
 
 def test_list_events_tool(tmp_path: Path, monkeypatch) -> None:

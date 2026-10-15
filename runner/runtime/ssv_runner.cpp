@@ -37,8 +37,10 @@ public:
         while (true) {
             auto effective_config =
                 fallback_state.derive_effective_config(original_config_);
-            const auto plan =
-                SsvPipelinePlan::resolve(effective_config, capabilities);
+            const auto plan = SsvPipelinePlan::resolve(
+                effective_config,
+                capabilities,
+                fallback_state.plan_options());
             SsvEventContext attempt_context {
                 .source_id = plan.source_id,
                 .run_attempt_id = next_attempt_id++,
@@ -93,6 +95,15 @@ public:
                     attempt_context,
                     attempt_result.stage,
                     attempt_result.error);
+                if (fallback_event) {
+                    event_log_.emit(std::move(*fallback_event));
+                    continue;
+                }
+
+                fallback_event = fallback_state.try_mixed_codec_fallback(
+                    plan,
+                    attempt_result,
+                    attempt_context);
                 if (fallback_event) {
                     event_log_.emit(std::move(*fallback_event));
                     continue;

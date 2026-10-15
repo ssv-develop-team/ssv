@@ -16,6 +16,7 @@ from ssv_agent.review_context import RuleRetrievalContext
 
 
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+_SAFE_ARTIFACT_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,149}\Z")
 
 
 def _outputs_root() -> Path:
@@ -49,6 +50,10 @@ def _write_artifact(root: Path, directory: Path, filename: str, content: bytes) 
     if not resolved.is_relative_to(root):
         raise ValueError("result artifact escapes outputs root")
     if target.exists():
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("artifact target is not a regular file")
+        if target.read_bytes() != content:
+            raise FileExistsError("content-addressed artifact has conflicting contents")
         return resolved
 
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".result-", suffix=".tmp")
@@ -65,6 +70,25 @@ def _write_artifact(root: Path, directory: Path, filename: str, content: bytes) 
     return resolved
 
 
+def write_content_addressed_artifact(
+    event_id: str,
+    filename_prefix: str,
+    suffix: str,
+    content: bytes,
+) -> Path:
+    """在事件输出目录原子写入受限名称、内容寻址的 artifact。"""
+    if not _SAFE_ARTIFACT_PREFIX.fullmatch(filename_prefix):
+        raise ValueError("artifact filename prefix is invalid")
+    if not re.fullmatch(r"[a-z0-9]{1,12}", suffix):
+        raise ValueError("artifact suffix is invalid")
+
+    root = _outputs_root()
+    directory = _event_output_dir(root, event_id)
+    digest = hashlib.sha256(content).hexdigest()
+    filename = f"{filename_prefix}-{digest}.{suffix}"
+    return _write_artifact(root, directory, filename, content)
+
+
 class ReviewClaim(BaseModel):
     """模型给出的可追溯陈述。"""
 
@@ -78,6 +102,7 @@ class RuleCitation(BaseModel):
     chunk_id: str = Field(min_length=1)
     source: str = Field(min_length=1)
     rule_id: str = Field(min_length=1)
+    rule_version: str = Field(min_length=1)
     section: str = Field(min_length=1)
 
 
@@ -116,13 +141,13 @@ def validate_rule_citations(
     result: ReviewResult,
     rule_context: RuleRetrievalContext,
 ) -> ReviewResult:
-    """校验确定性结论只引用本次检索得到且元数据一致的规则片段。"""
+    """校验规则引用，并在规则依据不可验证时保守降级。"""
     if result.verdict == "uncertain":
         return result
     if not rule_context.available:
-        raise ResultParseError("规则不可用时结论必须为 uncertain")
+        return _downgrade_rule_result(result, "规则检索不可用")
     if not result.rule_citations:
-        raise ResultParseError("确定性结论必须引用规则")
+        return _downgrade_rule_result(result, "确定性结论缺少规则引用")
 
     candidates = {
         chunk.chunk_id: chunk
@@ -131,15 +156,31 @@ def validate_rule_citations(
     for citation in result.rule_citations:
         chunk = candidates.get(citation.chunk_id)
         if chunk is None:
-            raise ResultParseError("规则引用的 chunk 不在本次检索结果中")
+            return _downgrade_rule_result(
+                result,
+                "规则引用的 chunk 不在本次检索结果中",
+            )
         metadata = chunk.metadata
         if (
             citation.source != metadata.get("source")
             or citation.rule_id != metadata.get("rule_id")
+            or citation.rule_version != metadata.get("rule_version")
             or citation.section != metadata.get("section")
         ):
-            raise ResultParseError("规则引用元数据与检索结果不一致")
+            return _downgrade_rule_result(result, "规则引用元数据与检索结果不一致")
     return result
+
+
+def _downgrade_rule_result(result: ReviewResult, reason: str) -> ReviewResult:
+    """移除不可验证的规则引用，并返回可持久化的保守结果。"""
+    return result.model_copy(
+        update={
+            "verdict": "uncertain",
+            "confidence": 0.0,
+            "rule_citations": [],
+            "explanation": f"规则依据不可验证，结论降级为 uncertain：{reason}",
+        }
+    )
 
 
 def parse_result_markdown(text: str) -> ReviewResult:
@@ -204,16 +245,12 @@ def parse_review_result(text: str) -> ReviewResult:
 
 def write_result_markdown(event_id: str, text: str) -> Path:
     """原子写入内容寻址的历史 Markdown artifact。"""
-    root = _outputs_root()
     content = text.encode("utf-8")
-    directory = _event_output_dir(root, event_id)
-    digest = hashlib.sha256(content).hexdigest()
-    return _write_artifact(root, directory, f"result-{digest}.md", content)
+    return write_content_addressed_artifact(event_id, "result", "md", content)
 
 
 def write_result_json(event_id: str, result: ReviewResult) -> Path:
     """原子写入内容寻址的结构化复核结果。"""
-    root = _outputs_root()
     content = (
         json.dumps(
             result.model_dump(mode="json"),
@@ -223,6 +260,4 @@ def write_result_json(event_id: str, result: ReviewResult) -> Path:
         )
         + "\n"
     ).encode("utf-8")
-    directory = _event_output_dir(root, event_id)
-    digest = hashlib.sha256(content).hexdigest()
-    return _write_artifact(root, directory, f"result-{digest}.json", content)
+    return write_content_addressed_artifact(event_id, "result", "json", content)

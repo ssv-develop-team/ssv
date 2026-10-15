@@ -10,7 +10,7 @@
 2. 每个里程碑拆成 4 个左右任务包，成员按任务包领取，尽量避免多人同时修改同一文件。
 3. 跨领域标签的接口变更必须先更新中文 spec，再进入实现。
 4. Python `./ssv` 入口统一承担构建、清理、依赖检查、本地 Redis、调试入口和测试编排；长期运行时由 C++ pipeline runner 承担。
-5. Python Agent 不进入每帧同步检测链路，只消费 Redis 中的事件和证据。
+5. Python Agent 不进入每帧同步检测链路，只消费 Redis 中的 `rule.v1` 事件和受控证据引用；证据字节通过只读工具按 ID 获取。
 
 ## 文档规则
 
@@ -29,8 +29,8 @@ spec 和 plan 使用中文；代码标识、命令、路径、配置键保持英
 | --- | --- | --- | --- |
 | T1 | 实时视频链路与运行时：输入、解码、显示、pipeline runner、运行状态 | `scripts/`、`config/`、`runner/` | YAML 配置、GStreamer pipeline、退出码、日志字段 |
 | T2 | 感知算法与元数据：YOLO 推理、后处理、检测元数据、跟踪、overlay | `gst/ssv-infer`、`gst/ssv-track`、`gst/ssv-overlay`、`gst/ssv-common`、`gst/tests` | `ssv_meta`、插件属性、测试素材 |
-| T3 | 事件与异步边界：事件判定、证据输出、Redis 消息、事件状态 | `gst/ssv-pub`、后续事件/证据模块、`config/` | 事件 schema、证据路径、Redis Streams |
-| T4 | Agent 与知识复核：事件消费、上下文构造、状态机、工具路由、模型 provider | `agent/`、后续知识库/工具模块 | Agent 输入输出、工具协议、provider 抽象 |
+| T3 | 事件与异步边界：事件判定、证据采集、Redis 消息、证据状态 | `gst/ssv-pub`、后续事件/证据模块、`config/` | 事件 schema、SSV evidence cache、Redis Streams |
+| T4 | Agent 与知识复核：事件账本、异步 worker、只读工具、模型 provider | `agent/`、后续知识库/工具模块 | Agent 输入输出、账本/job 协议、工具协议、provider 抽象 |
 | T5 | 工程集成与质量：测试矩阵、文档模板、CI、本地验证、demo 和交付检查 | `scripts/ssv_cli/`、`docs/`、CI 配置 | 测试命令、集成验收、文档和发布检查清单 |
 
 领域标签只说明任务影响范围，不绑定具体成员。一个成员可以领取跨多个领域的任务包；同一领域也可以被多人并行处理，只要文件边界、接口契约和合流顺序清楚。
@@ -60,7 +60,7 @@ spec 和 plan 使用中文；代码标识、命令、路径、配置键保持英
 已识别缺口：
 
 - 当前模型 `models/yolov8n.onnx` 是 COCO 模型，只能验证 `person` 检测链路，不能直接判断安全帽。
-- 事件判定、证据输出、完整 Agent 状态机尚未完成。
+- `rule.v1` 事件生产、媒体证据采集和生产事件到 Agent 的端到端接入尚未完成；Agent 账本、异步复核和只读工具已有基础实现，仍需接入真实事件链路。
 
 2026-07-31 增量状态：长期实时链路已迁移到 C++ runner，生产入口通过 `./ssv run` 调用
 runner；严格配置、VA/DMABuf/GL memory contract、ONNX Runtime Provider、
@@ -75,12 +75,12 @@ runner；严格配置、VA/DMABuf/GL memory contract、ONNX Runtime Provider、
 | M0 | 工程基线确认 | 已完成的构建、测试、插件、Redis、Agent 和 CLI 基线 |
 | M1 | YOLO 工程化实践与安全帽模型训练预研 | YOLO 推理链路说明、`ssv_meta` 检测契约、mock/真实模型 smoke、安全帽训练最小闭环、事件输入草案 |
 | M2 | 跟踪算法工程化实践 | 跟踪算法说明、`track_id` 契约、mock/真实跟踪 smoke、事件输入扩展 |
-| M3 | 检测跟踪结果事件消息打通 | 事件 schema、Redis Streams 消息、Agent 消费样例、字段一致性验收 |
-| M4 | 事件证据与状态层 | 证据路径、事件状态、失败降级、Agent 输入字段 |
-| M5 | Agent 输入与状态机最小闭环 | Agent 上下文、状态机、状态存储、结果回写 |
-| M6 | 工具路由与 OpenAI SDK 复核 | 工具路由、证据读取、OpenAI SDK 薄封装、视觉复核和文本解释 |
-| M7 | 规则知识与报告输出 | 规则知识输入、检索边界、规则解释、报告输出 |
-| M8 | 端到端 demo 和交付收口 | 可重复演示、运行手册、验收脚本、故障排查、发布检查清单 |
+| M3 | 规则事件消息与 Agent ingress 契约 | `rule.v1`、事件生命周期、Redis Streams 消息、Agent 消费样例、字段一致性验收 |
+| M4 | 事件证据采集与引用层 | SSV evidence cache、episode 聚合、精确 PTS 窗口、受控证据引用和采集失败降级 |
+| M5 | Agent 事件账本与可靠 ingress | `EventLedger`、Redis ACK、`ReviewContext`、持久 review/index job |
+| M6 | Agent 异步复核与只读工具 | `ReviewWorker`、结构化复核、证据读取、受控模型调用 |
+| M7 | Agent 知识索引与报告输出 | 规则/SOP、`IndexWorker`、Qdrant 检索、规则解释和报告 |
+| M8 | 端到端 replay 和交付收口 | 可重复演示、故障回放、运行手册、验收脚本、发布检查清单 |
 
 推进顺序：
 
@@ -94,22 +94,22 @@ M1 YOLO 工程化实践与安全帽模型训练预研
 M2 跟踪算法工程化实践
   |
   v
-M3 检测跟踪结果事件消息打通
+M3 规则事件消息与 Agent ingress 契约
   |
   v
-M4 事件证据与状态层
+M4 事件证据采集与引用层
   |
   v
-M5 Agent 输入与状态机最小闭环
+M5 Agent 事件账本与可靠 ingress
   |
   v
-M6 工具路由与 OpenAI SDK 复核
+M6 Agent 异步复核与只读工具
   |
   v
-M7 规则知识与报告输出
+M7 Agent 知识索引与报告输出
   |
   v
-M8 端到端 demo 和交付收口
+M8 端到端 replay 和交付收口
 ```
 
 ## M1: YOLO 工程化实践与安全帽模型训练预研
@@ -203,223 +203,245 @@ M8 端到端 demo 和交付收口
 - 完整事件判定和 Agent 复核。
 - 多路视频调度。
 
-## M3: 检测跟踪结果事件消息打通
+## M3: 规则事件消息与 Agent ingress 契约
 
-**目标**：把 M1/M2 已冻结的检测和跟踪元数据规范化为 T3 的结构化事件，并通过 Redis Streams 给 T4 提供稳定消费契约。
+**目标**：把 M1/M2 已冻结的检测和跟踪元数据规范化为 T3 的 `rule.v1` 结构化事件，并通过 Redis Streams 给 T4 提供稳定消费契约。事件必须表达规则语义和生命周期，不由每条 detection 消息直接代替。
 
 现有实现基线：
 
-- `ssvpub` 已能向 Redis Streams 发布包含 `type`、`source`、`timestamp_ms`、`frame_id`、`detections`、`bbox` 和 `track_id` 的检测消息。
+- `ssvpub` 当前只能向 Redis Streams 发布包含 `type`、`source`、`timestamp_ms`、`frame_id`、`detections`、`bbox` 和 `track_id` 的稀疏检测消息；这不是完整的 `rule.v1` 事件。
 - Python Agent 已有 Redis Streams 消费、JSON 解析、日志输出和 ACK 的最小样例。
-- 本阶段不重复实现基础发布/消费链路，重点是正式冻结 schema、补字段一致性测试和增加安全帽事件规则。
+- 本阶段不重复实现基础发布/消费链路，重点是正式冻结 schema、补稳定事件身份和生命周期、增加安全帽事件规则，并让 Agent 能区分事件语义与 publisher ingress。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M3-检测跟踪结果事件消息打通-spec.md`
-- `docs/plans/YYYY-MM-DD-M3-检测跟踪结果事件消息打通-plan.md`
+- `docs/specs/YYYY-MM-DD-M3-规则事件消息与Agent-ingress契约-spec.md`
+- `docs/plans/YYYY-MM-DD-M3-规则事件消息与Agent-ingress契约-plan.md`
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
 | A | T2/T3 | 字段交接：确认 M1 检测字段和 M2 跟踪字段进入事件层的映射关系 | 检测/跟踪到事件字段映射表 | C++ 发布字段和文档字段一致 |
-| B | T3 | 事件消息：规范化现有 Redis 消息为最小事件 schema，补齐字段类型、兼容性和错误语义 | 事件类型、严重级别、触发原因、检测列表、轨迹列表 | Redis Stream 中消息字段可被样例消费，并有字段一致性测试 |
-| C | T3 | 安全帽事件规则：定义连续命中、低置信度、检测冲突等初版规则 | 规则说明和测试入口 | 支持 mock/no-op 降级 |
+| B | T3 | 规则事件消息：规范化 Redis 消息为 `rule.v1`，补齐 `event_id`、`event_type`、`event_phase`、`rule_id`、`rule_version`、`severity`、`rule_facts` 和错误语义；真实存在时传播 `source_pts`、`stream_generation` | 规则事件 schema、兼容字段和版本策略 | Redis Stream 中消息可被 Agent 稳定解析，并有字段一致性测试 |
+| C | T3 | 安全帽事件规则：定义连续命中、低置信度、检测冲突和 `START/UPDATE/END` 生命周期 | 规则说明、事件状态转换和测试入口 | 支持 mock/no-op 降级；同一语义事件不会仅因 track ID 抖动而重复创建 |
 | D | T4/T5 | 消费与验收：对齐现有 Agent 消费样例和 M3 schema，增加 M3 集成验收 | 事件消费样例、解析测试、C++ 发布和 Python 消费字段一致性检查 | C++、CLI、Agent 基础测试通过 |
 
 冻结接口：
 
-- Redis Stream key、字段名、字段类型和错误语义。
+- Redis Stream key、字段名、字段类型、事件身份、生命周期和错误语义。
 - `detections`、`tracks` 在事件消息中的序列化格式。
-- Agent 消费事件所需的最小输入。
+- Agent 消费事件所需的最小输入，以及缺失 `source_pts`/`stream_generation` 时保持未知的规则。
 
 退出标准：
 
 - 检测/跟踪结果能形成结构化 Redis 消息。
+- 规则事件具备稳定 `event_id`，能表达 `START/UPDATE/END`，并能关联事件触发帧。
 - Agent 侧能解析消息并完成最小消费测试。
 - 后续新增证据路径和复核结果时有兼容扩展位置。
 
 非本阶段范围：
 
 - 证据文件生成。
-- 完整 Agent 状态机。
+- Agent 事件账本、异步复核和只读工具。
 - 外部通知和报告。
 
-## M4: 事件证据与状态层
+## M4: 事件证据采集与引用层
 
-**目标**：把 M3 的结构化事件扩展成 Agent 可消费的“事件 + 证据 + 状态”。本阶段只处理事件与证据层边界，不实现 Agent 状态机、工具调用或模型复核。
+**目标**：为 M3 的规则事件提供可追溯的媒体证据，并冻结 Agent 的证据引用边界。本阶段由 T3 负责采集和落盘，Agent 只接收受控引用，不实现 Agent 状态机、工具调用或模型复核。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M4-事件证据与状态层-spec.md`
-- `docs/plans/YYYY-MM-DD-M4-事件证据与状态层-plan.md`
+- `docs/specs/YYYY-MM-DD-M4-事件证据采集与引用层-spec.md`
+- `docs/plans/YYYY-MM-DD-M4-事件证据采集与引用层-plan.md`
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
-| A | T3 | 事件状态契约：定义 `pending`、`processing`、`completed`、`failed`、`manual_review` 和失败原因字段 | 事件状态字段、迁移规则、失败原因字段 | Redis 消息或状态记录中可表达状态 |
-| B | T3 | 证据输出：保存关键帧、检测框渲染图和可选短片段 | 证据目录、命名规则、路径字段 | 构造事件后能生成可访问证据路径 |
-| C | T3/T5 | 证据失败降级：处理关键帧缺失、写入失败、路径不可读 | 降级语义、错误字段、测试用例 | 证据缺失时事件仍可进入 Agent，并标记低置信度或待人工复核 |
-| D | T5 | M4 验收：构造未佩戴、低置信度、检测冲突事件样例 | 样例事件、证据样例、验收脚本 | C++/CLI 基础测试通过，证据字段可验证 |
+| A | T3 | 证据提取契约：以事件锚点关联 SSV cache，明确独立 GStreamer evidence branch、sidecar 和外部长期录像的责任边界 | `event_id`/帧锚点/时间字段映射、extractor 接口和能力约束 | 能说明采集来源、时间精度和不可用条件，不把墙上时间当媒体 PTS |
+| B | T3 | 证据采集 MVP：优先实现关键帧快照；使用 bounded queue、受控目录、临时文件和原子 rename，不能阻塞检测/跟踪 | 证据目录、命名规则、采集状态、hash 和配额策略 | 规则事件触发后可异步生成快照；队列满或写入失败不会拖垮实时链路 |
+| C | T3/T4 | Agent 引用契约：定义 `EvidenceRef`、`evidence_id`、`kind`、`mime_type`、`available`、`sha256`、可选 PTS 区间和 `stream_generation` | 证据引用 schema、ID-only 工具边界、虚拟路径适配 | Agent 只使用 `event_id + evidence_id`；不向模型暴露任意宿主机路径 |
+| D | T3/T5 | 证据失败降级与验收：覆盖文件缺失、越界路径、symlink、重启、过期和可选短片段不可用 | `requested/capturing/available/unavailable/expired` 语义、样例和验收脚本 | 事件仍可入账；Agent 能得到明确缺失原因并按策略进入 `uncertain` 或人工复核 |
 
 冻结接口：
 
-- 证据路径和文件命名规则。
-- `event_id`、`event_type`、`trigger_reason`、`severity`、`frame_path`、`clip_path`、`agent_state` 和失败原因字段。
+- `event_id`、事件触发帧、`source_pts`、`stream_generation` 和证据关联规则。
+- `EvidenceRef` 的 `evidence_id`、证据类型、状态、MIME、大小、hash 和可选时间范围。
+- Agent 只按 `event_id + evidence_id` 读取证据；宿主机路径只属于账本/取证 extractor 内部实现。
 - 证据保存失败、证据缺失和 Redis 发布失败的降级语义。
 
 退出标准：
 
-- 事件消息包含 Agent 可消费的最小证据和状态字段。
-- 证据路径可访问或明确标记缺失原因。
+- 规则事件能关联一个或多个证据引用；证据可以稍后出现，但状态变化可被观察。
+- 证据文件可访问，或明确标记 `unavailable`/`expired` 及失败原因。
 - 证据缺失、写入失败、Redis 发布失败都有明确状态和错误字段。
 
 非本阶段范围：
 
-- Agent 状态机。
+- Agent 事件账本和持久任务状态机。
 - OpenAI SDK、视觉复核和文本解释。
 - 向量检索、报告生成和通知。
-- 完整数据库表结构。
+- WVP/NVR/MediaMTX 的长期录像、历史回放和跨设备录像管理；本阶段只负责 SSV 的短时 cache。
 
-## M5: Agent 输入与状态机最小闭环
+## M5: Agent 事件账本与可靠 ingress
 
-**目标**：Agent 能消费 M4 事件，构造固定输入上下文，按自研轻量状态机完成一次 mock 复核并回写结果。本阶段不接真实模型，不实现工具路由平台。
+**目标**：Agent 将 `rule.v1` 事件可靠写入 SQLite 权威账本，并把复核和索引拆成可恢复的持久任务。本阶段不让模型调用进入 Redis 消费线程。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M5-Agent输入与状态机最小闭环-spec.md`
-- `docs/plans/YYYY-MM-DD-M5-Agent输入与状态机最小闭环-plan.md`
+- `docs/specs/YYYY-MM-DD-M5-Agent事件账本与可靠ingress-spec.md`
+- `docs/plans/YYYY-MM-DD-M5-Agent事件账本与可靠ingress-plan.md`
+
+当前实现基线：
+
+- `EventLedger` 已提供事件、检测、证据引用、revision 和 durable job 的 SQLite 封装；`evidence_roots` 对证据路径执行 fail-closed 校验。
+- `ReviewContext` 已能保留 `event_id`、规则字段、`source_pts` 和 `stream_generation` 的缺失语义；仍需与正式 `rule.v1` 生产消息对接。
+- `EventConsumer` 已按“账本事务成功后 ACK”的方向实现；生产事件生命周期、证据采集结果和回放验收仍待接入。
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
-| A | T4 | 事件解析与上下文构造：解析事件、检测框、轨迹、证据路径和触发原因 | `ReviewContext` 数据结构 | 单测覆盖完整事件、缺证据事件和坏 JSON |
-| B | T4 | 自研状态机：实现事件解析、上下文构造、策略选择、结果汇总、终态 | 状态机类、状态枚举、迁移规则 | 事件可从待消费迁移到完成、失败或待人工复核 |
-| C | T4 | 状态存储：记录步骤、工具结果占位、失败原因和最终结论 | 内存或 Redis 状态存储第一版 | 失败可追踪，不停留在处理中 |
-| D | T4/T5 | 结果回写：写回复核结论、处置建议、事件摘要和状态 | 结果 schema、回写逻辑、测试 | mock 事件可完整跑通一次 Agent 最小闭环 |
+| A | T4 | `ReviewContext` 与 `rule.v1` 映射：解析事件、检测、轨迹、规则事实和证据 ID；缺失时间线字段保持未知 | 上下文构造和兼容解析 | 单测覆盖完整事件、缺证据事件、坏 JSON 和旧消息 |
+| B | T4 | `EventConsumer` ingress：处理 Redis Stream、poison input、重复投递、pending reclaim 和 ACK 语义 | 消费循环、幂等身份和错误分类 | SQLite 写入失败不 ACK；账本提交成功后立即 ACK，不等待模型/Qdrant |
+| C | T4 | `EventLedger` 事务与持久任务：写入 EventCase/EvidenceRef，创建 review/index job，提供 lease、retry、dead 和 fencing | SQLite schema/migration、账本接口和任务状态 | 进程重启、重复消息和 worker 接管不会产生重复或乱写 |
+| D | T4/T5 | ingress 回放验收：用固定 `rule.v1` fixtures 验证事件、证据引用和任务创建 | fixture、日志字段、验收脚本 | Agent 能稳定接收可用、缺证据和时间字段未知的事件 |
 
 冻结接口：
 
-- Agent 输入上下文。
-- 状态枚举和状态迁移规则。
-- 结果回写格式。
-- 错误状态和待人工复核语义。
+- `ReviewContext`、`EventCase`、`EvidenceRef` 和 `DurableJob` 的接口。
+- Redis ACK、SQLite 事务、幂等和 pending reclaim 语义。
+- `pending -> processing -> completed/pending/dead` 的持久任务迁移规则。
+- 账本错误、证据缺失和 poison input 的错误分类。
 
 退出标准：
 
-- Agent 能从 Redis 事件构造上下文。
-- mock 状态机能完成直接确认、失败和待人工复核三类路径。
-- 结果能回写到约定位置或约定消息。
+- Agent 能从 `rule.v1` Redis 事件构造上下文并提交权威账本。
+- 有效事件在 SQLite 事务提交后 ACK；模型、embedding 或 Qdrant 故障不阻塞 ingress。
+- 重复投递只产生一个案件和每个 revision 对应的一组持久任务。
 
 非本阶段范围：
 
-- OpenAI SDK 真实调用。
-- 规则知识检索和报告生成。
+- 模型复核、只读工具和视觉输入。
+- 规则知识检索、向量索引和报告生成。
 - 外部通知和工单系统。
 
-## M6: 工具路由与 OpenAI SDK 复核
+## M6: Agent 异步复核与只读工具
 
-**目标**：把 M5 状态机中的能力调用拆成受控工具，并用 OpenAI SDK 完成第一版视觉复核和文本解释。第一版不建设多厂商 provider 平台，只保留一个窄接口，避免 SDK 调用散落在状态机里。
+**目标**：由独立 `ReviewWorker` 领取持久任务，按事件和证据引用构造复核输入，通过受控只读工具调用模型，并以结构化结果原子回写。模型不能直接访问 SQLite、Qdrant 或任意宿主机路径。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M6-工具路由与OpenAI复核-spec.md`
-- `docs/plans/YYYY-MM-DD-M6-工具路由与OpenAI复核-plan.md`
+- `docs/specs/YYYY-MM-DD-M6-Agent异步复核与只读工具-spec.md`
+- `docs/plans/YYYY-MM-DD-M6-Agent异步复核与只读工具-plan.md`
+
+当前实现基线：
+
+- `ReviewWorker`、结构化 `ReviewResult` 和证据引用校验已具备基础实现；非 `uncertain` 结论必须引用本案件当前可用证据。
+- `get_event`、`evidence_reader`、`search_events` 和 `rule_retriever` 已按只读工具方向接入；其中规则检索仍为 mock backend。
+- DeerFlow 复核资源、模型调用和工具 allowlist 已有隔离约束；仍需用真实 `rule.v1` + 采集证据完成端到端验证。
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
-| A | T4 | 工具调用路由：统一工具名、参数、调用上下文、返回结果和错误信息 | `ToolRouter` 抽象、mock 工具、错误映射 | 工具调用失败能进入失败或待人工复核 |
-| B | T4 | 证据读取工具：读取关键帧、检测框渲染图和短片段路径 | evidence reader、路径校验、缺失证据结果 | 缺失证据不伪造复核结论 |
-| C | T4 | OpenAI SDK 薄封装：封装视觉复核和文本解释调用，提供 mock client、配置项、超时和错误映射 | `OpenAIModelClient`、mock client、调用结果 schema | 单测不依赖真实 API；OpenAI 不可用时事件进入待人工复核或失败状态 |
-| D | T4/T5 | 视觉复核和文本解释流程：状态机调用证据读取、OpenAI client 和文本解释工具并汇总结果 | mock/真实可切换复核流程、M6 验收清单 | mock 流程稳定通过；真实 OpenAI 调用有环境变量和跳过策略 |
+| A | T4 | `ReviewWorker`：领取 review job、刷新证据、构造上下文、调用模型、解析结果并完成/重试任务 | worker、lease heartbeat、retry/dead 和原子提交 | Redis 消费线程不执行模型调用；worker 丢 lease 后不能追加结果 |
+| B | T4 | 只读工具：实现 `get_event`、`evidence_reader`、`search_events` 和 `view_image` 的 ID/虚拟路径边界 | 工具协议、路径校验、证据元数据和缺失结果 | 工具不能读取未登记、根外或越界 symlink 证据 |
+| C | T4 | 模型 Provider：保留窄接口，支持 mock 和 OpenAI-compatible/DeerFlow 调用，配置超时、限流和错误映射 | provider、结构化 JSON 和结果 artifact | 测试不依赖真实 API；外部服务不可用时任务可重试或进入人工复核 |
+| D | T4/T5 | 复核与引用验收：要求 claims 引用 `evidence_id`，区分 `available`、`missing` 和 `uncertain` | `ReviewResult`、review history、验收清单 | 非 `uncertain` 结论不能引用不可用证据；模型输出不能改变权限和事件事实 |
 
 冻结接口：
 
-- 工具调用协议。
-- OpenAI client 输入输出结构。
-- 视觉复核结果、文本解释结果和错误结果 schema。
-- OpenAI 超时、限流、无效响应和不可用时的状态语义。
+- 只读工具协议和 `event_id + evidence_id` 参数边界。
+- 模型 Provider 输入输出结构和结构化 `ReviewResult`。
+- `claims -> evidence_ids` 的可追溯引用规则。
+- 模型超时、限流、无效响应、证据缺失和不可用时的任务语义。
 
 退出标准：
 
-- 状态机通过工具路由调用证据读取和 OpenAI client。
-- 测试默认使用 mock client，不依赖真实 API。
-- 真实 OpenAI SDK 调用具备明确配置、超时、失败降级和本地跳过策略。
+- `ReviewWorker` 能独立完成成功、重试、dead、缺证据和丢 lease 路径。
+- 测试默认使用 mock provider，不依赖真实 API；真实模型调用有明确配置、超时、失败降级和本地跳过策略。
+- Agent 复核结果可按 `event_id` 查询，并保留结构化证据引用和 review history。
 
 非本阶段范围：
 
 - 多厂商 provider 路由平台。
-- 向量检索和规则知识库。
+- 生产级规则知识库治理。
 - 外部通知实际发送。
 
-## M7: 规则知识与报告输出
+## M7: Agent 知识索引与报告输出
 
-**目标**：接入规则解释和报告生成能力，但仍保持单机原型边界，不做完整知识平台、前端或长期事件库。
+**目标**：把版本化规则/SOP、事件索引和复核结果组织成可追溯的 Agent 上下文与报告，仍保持单机原型边界。向量库是可重建投影，SQLite 账本是事实源。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M7-规则知识与报告输出-spec.md`
-- `docs/plans/YYYY-MM-DD-M7-规则知识与报告输出-plan.md`
+- `docs/specs/YYYY-MM-DD-M7-Agent知识索引与报告输出-spec.md`
+- `docs/plans/YYYY-MM-DD-M7-Agent知识索引与报告输出-plan.md`
+
+当前实现基线：
+
+- `IndexWorker`、embedding provider、Qdrant event/rule collection 和 SQLite hydrate 查询已有基础实现。
+- embedding identity、Qdrant 失败降级和旧 revision 处理已有约束；生产规则/SOP 内容、审批和持续更新管线尚未完成。
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
-| A | T4 | 规则知识输入：整理安全规则、制度片段和历史处置样例 | 规则文档目录、加载方式、规则片段格式 | 可按事件类型取到规则片段 |
-| B | T4 | 检索边界：先实现 mock/retriever 抽象，保留 Qdrant、Milvus、pgvector 选型 | retriever 抽象、mock 检索结果 | 检索不可用时可降级并标明缺少知识上下文 |
-| C | T4 | 规则解释工具：基于事件和规则片段生成说明 | 规则解释结果 schema、来源字段 | 输出中标明规则来源 |
-| D | T4/T5 | 报告和通知内容生成：生成事件摘要、复核结论、处置建议和告警升级内容 | 报告文本或 JSON 输出、样例 | 端到端样例可生成可读报告 |
+| A | T4 | 规则知识输入：整理版本化安全规则、制度片段和历史处置样例 | 规则文档目录、版本/来源字段、加载方式 | 可按 `rule_id`/事件类型取到可追溯规则片段 |
+| B | T4 | `IndexWorker` 与检索边界：构造规范事件文本，写入可重建 Qdrant，命中后回 SQLite hydrate | embedding identity、索引任务、属性/语义检索和降级 | Qdrant 不可用时属性检索仍可工作；不把本地路径写入向量文本 |
+| C | T4 | 规则解释：基于事件事实、证据引用和规则片段生成说明 | 规则解释 schema、来源和 evidence IDs | 输出同时标明规则来源和现场证据来源 |
+| D | T4/T5 | 报告输出：生成事件摘要、复核结论、处置建议和告警升级内容 | 报告 JSON/Markdown、样例和验收清单 | 报告不补造 PTS、唯一计数或缺失证据事实 |
 
 冻结接口：
 
-- 规则片段格式。
-- 检索结果格式。
-- 规则解释结果格式。
-- 报告输出格式。
+- 规则片段格式、版本和来源字段。
+- 属性/语义检索结果格式及 SQLite hydrate 规则。
+- 规则解释结果格式和证据引用格式。
+- 报告输出格式与缺失知识/证据时的降级语义。
 
 退出标准：
 
-- Agent 可把规则片段纳入上下文和解释。
-- 检索不可用时流程可降级。
-- 输出包含复核结论、规则依据、处置建议和摘要。
+- Agent 可把版本化规则片段纳入上下文和解释，并保留来源。
+- `IndexWorker` 可重试、重建并隔离不同 embedding identity；检索不可用时流程可降级。
+- 输出包含复核结论、规则依据、现场证据引用、处置建议和摘要。
 
 非本阶段范围：
 
-- 完整知识库治理。
+- 完整知识库治理和人工审批平台。
 - 长期事件库、检索页面和统计报表。
 - 真实外部通知发送。
 
-## M8: 端到端 demo 和交付收口
+## M8: 端到端 replay 和交付收口
 
-**目标**：把 M1-M7 的能力合流成可演示、可排障、可交接的单机端到端原型。以 `./ssv run` 调用 C++ pipeline runner 作为演示和长期运行基线，收口 headless、display、Redis、Agent 和证据链路。
+**目标**：把 M1-M7 的能力合流成可演示、可排障、可交接的单机端到端原型。以 `./ssv run` 调用 C++ pipeline runner 作为演示和长期运行基线，收口 `rule.v1`、证据引用、Redis、`EventLedger`、异步复核、索引和结果链路，并用固定 fixtures 完成 replay 验收。
 
 建议文档：
 
-- `docs/specs/YYYY-MM-DD-M8-端到端Demo和交付收口-spec.md`
-- `docs/plans/YYYY-MM-DD-M8-端到端Demo和交付收口-plan.md`
+- `docs/specs/YYYY-MM-DD-M8-端到端replay和交付收口-spec.md`
+- `docs/plans/YYYY-MM-DD-M8-端到端replay和交付收口-plan.md`
 
 并行任务包：
 
 | 领取 | 领域 | 任务包 | 输出 | 验收 |
 | --- | --- | --- | --- | --- |
 | A | T1/T5 | 演示运行时：收口 `./ssv run` 的 headless/display 路径和 YAML 配置，确认 C++ pipeline runner 的退出码与日志边界 | demo 运行命令、运行时边界说明 | `./ssv run` 至少有一条路径可稳定演示 |
-| B | T2/T3 | 演示事件：可重复生成未佩戴、低置信度和检测冲突事件 | demo 配置、事件样例、证据样例 | Redis 中可看到结构化事件和证据路径 |
-| C | T4 | 演示 Agent：跑通消费、证据读取、OpenAI/mock 复核、规则解释、结果回写 | demo Agent 流程、复核结果样例 | 单命令或清晰步骤可复现 |
+| B | T2/T3 | 演示事件与证据：可重复生成未佩戴、低置信度和检测冲突的 `rule.v1` 事件，并关联可用或不可用证据 | demo 配置、事件样例、EvidenceRef 样例 | Redis 中可看到稳定 `event_id`、生命周期和证据状态，不依赖宿主机路径给 Agent |
+| C | T4 | 演示 Agent：跑通 `EventConsumer -> EventLedger -> ReviewWorker/IndexWorker -> 只读工具 -> 结果` | demo Agent 流程、复核/索引结果样例 | mock 流程和固定事件 fixtures 可重复执行 |
 | D | T5 | 交付文档：更新 README、运行手册、故障排查、测试矩阵和发布检查清单 | 交付清单和验收脚本 | 新成员可按文档复现 demo |
 
 冻结接口：
 
 - demo 配置文件和运行命令。
 - 端到端日志字段和退出码。
+- `event_id`、`evidence_id`、job/review revision 和失败状态的关联日志。
 - 交付验收清单。
 
 退出标准：
 
 - 从视频输入到检测、事件、证据、Agent 复核、规则解释、结果输出形成闭环。
+- replay 能覆盖重复事件、证据缺失、队列/写盘失败、Agent 重启、Qdrant 不可用和时间字段未知，并保留可定位的失败原因。
+- 复核结论中的每条 claim 都能回到本案件当前可用的 `evidence_id`；缺证据时不会生成确定性结论。
 - 新成员可以按 README 和运行手册复现 demo。
 - CI 和本地验证边界清楚，无法自动化的验收项有手工步骤。
 
@@ -439,11 +461,11 @@ M8 端到端 demo 和交付收口
 | 事件输入字段草案 | M1 | T3 | T4、T5 | 先冻结最小字段，M3 扩展为 Redis schema |
 | 跟踪字段和 track ID 语义 | M2 | T2 | T3、T5 | `track_id`、未跟踪默认值、跨帧稳定性预期 |
 | `ssvtrack` 基础插件属性 | M2 | T2 | T1、T3、T5 | `frame-rate`、`track-thresh`、`track-buffer`、`match-thresh`、`mock-track` |
-| Redis 事件 schema | M3 | T3 | T4、T5 | Stream key、字段名、字段类型和错误语义 |
-| 证据路径、文件命名和事件状态 | M4 | T3 | T4、T5 | Agent 必须能按路径读取证据，并识别状态和降级原因 |
-| Agent 输入上下文和状态机状态 | M5 | T4 | T3、T5 | 支持完成、失败、待人工复核 |
-| 工具调用协议和 OpenAI client 结果 | M6 | T4 | T5 | OpenAI SDK 通过窄接口接入，测试默认使用 mock client |
-| 规则解释和报告输出格式 | M7 | T4 | T5 | 包含规则来源、复核结论、处置建议和摘要 |
+| `rule.v1` Redis 事件 schema | M3 | T3 | T4、T5 | 稳定 `event_id`、`START/UPDATE/END`、规则事实、字段类型和错误语义；缺失 PTS/generation 保持未知 |
+| EvidenceExtractor 与 `EvidenceRef` | M4 | T3/T4 | T4、T5 | 以事件锚点关联 SSV cache 证据；Agent 只按 `event_id + evidence_id` 读取，并识别证据状态和降级原因 |
+| `ReviewContext`、`EventCase` 和 `DurableJob` | M5 | T4 | T3、T5 | SQLite 是事实源；Redis ACK、幂等、lease、retry 和 dead 语义明确 |
+| 只读工具与 `ReviewResult` | M6 | T4 | T5 | 工具不接收任意宿主机路径；claims 必须引用本案件可用 `evidence_id` |
+| 规则知识、索引和报告格式 | M7 | T4 | T5 | Qdrant 只作可重建投影；输出包含规则来源、复核结论、证据引用、处置建议和摘要 |
 | 端到端运行命令和验收清单 | M8 | T5 | T1、T2、T3、T4 | README 和运行手册同步 |
 
 接口一旦被后续里程碑采用，修改时必须保留兼容路径，或在对应 spec 中明确迁移方式。
