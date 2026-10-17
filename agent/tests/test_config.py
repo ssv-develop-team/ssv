@@ -83,8 +83,16 @@ def test_agent_config_evidence_roots_default_to_cache_and_requires_absolute_path
 
 
 def test_recording_evidence_requires_a_root_and_valid_window() -> None:
-    with pytest.raises(ValidationError, match="evidence_roots"):
-        SsvConfig.model_validate({"agent": {"evidence_roots": []}})
+    empty_roots = SsvConfig.model_validate({"agent": {"evidence_roots": []}})
+    assert empty_roots.agent.evidence_roots == []
+
+    with pytest.raises(ValidationError, match="matching agent.evidence_roots"):
+        SsvConfig.model_validate(
+            {
+                "evidence_cache": {"directory": "/tmp/custom-cache"},
+                "agent": {"evidence_roots": []},
+            }
+        )
 
     config = SsvConfig.model_validate(
         {
@@ -144,6 +152,13 @@ def test_recording_evidence_requires_shared_cache_inside_allowed_root() -> None:
 
     assert config.evidence_cache.directory == "/var/lib/ssv/evidence-cache"
     assert config.agent.recording_evidence == RecordingEvidenceConfig()
+
+    default_cache_without_agent_roots = SsvConfig.model_validate(
+        {"agent": {"evidence_roots": []}}
+    )
+    assert default_cache_without_agent_roots.evidence_cache.directory == (
+        "/var/lib/ssv/evidence-cache"
+    )
 
     with pytest.raises(ValidationError, match="recording_evidence"):
         SsvConfig.model_validate(
@@ -234,6 +249,33 @@ def test_recording_evidence_defaults_are_constant() -> None:
 def test_agent_sources_require_non_empty_id_and_uri(source: dict[str, str]) -> None:
     with pytest.raises(ValidationError):
         SsvConfig.model_validate({"sources": [source]})
+
+
+def test_source_ids_must_be_unique() -> None:
+    with pytest.raises(ValidationError, match=r"sources\[\]\.id values must be unique"):
+        SsvConfig.model_validate(
+            {
+                "sources": [
+                    {"id": "camera-01", "uri": "rtsp://localhost/1"},
+                    {"id": "camera-01", "uri": "rtsp://localhost/2"},
+                ]
+            }
+        )
+
+
+def test_source_configuration_rejects_wvp_channel_mapping() -> None:
+    with pytest.raises(ValidationError, match="wvp_channel_id"):
+        SsvConfig.model_validate(
+            {
+                "sources": [
+                    {
+                        "id": "camera-01",
+                        "uri": "rtsp://localhost/stream",
+                        "wvp_channel_id": "34020000001320000001",
+                    }
+                ]
+            }
+        )
 
 
 def test_redis_reclaim_settings_are_strict_and_support_an_optional_consumer_name() -> None:

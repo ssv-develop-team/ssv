@@ -82,6 +82,7 @@ class EvidenceRef:
     source_pts_start: int | None
     source_pts_end: int | None
     stream_generation: int | None
+    coverage: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -486,6 +487,7 @@ class EventLedger:
                 source_pts_start=row["source_pts_start"],
                 source_pts_end=row["source_pts_end"],
                 stream_generation=row["stream_generation"],
+                coverage=row["coverage"],
             )
             for row in stored["evidence"]
         )
@@ -1207,31 +1209,9 @@ class EventLedger:
             if len(artifacts) != 4 or kinds.count("clip") != 1 or kinds.count("frame") != 3:
                 raise ValueError("evidence extract requires exactly one clip and three frames")
             for artifact in artifacts:
-                self._validate_artifact_timing(artifact)
-                resolved = self.resolve_evidence_path(artifact.path)
-                if resolved is None or not self._artifact_metadata_matches(resolved, artifact):
-                    raise ValueError("evidence artifact path or metadata is invalid")
-                canonical = str(resolved)
-                evidence_id = _evidence_id(job.entity_id, artifact.kind, canonical)
-                connection.execute(
-                    """
-                    INSERT INTO evidence (
-                        event_id, evidence_id, kind, path, mime_type, available,
-                        size, mtime, sha256, source_pts_start, source_pts_end, stream_generation
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(event_id, kind, path) DO UPDATE SET
-                        evidence_id = excluded.evidence_id, mime_type = excluded.mime_type,
-                        available = 1, size = excluded.size, mtime = excluded.mtime,
-                        sha256 = excluded.sha256,
-                        source_pts_start = excluded.source_pts_start,
-                        source_pts_end = excluded.source_pts_end,
-                        stream_generation = excluded.stream_generation
-                    """,
-                    (job.entity_id, evidence_id, artifact.kind, canonical,
-                     artifact.mime_type, artifact.size, artifact.mtime, artifact.sha256,
-                     artifact.source_pts_start, artifact.source_pts_end,
-                     artifact.stream_generation),
-                )
+                if artifact.coverage != "exact_window":
+                    raise ValueError("complete evidence extract requires exact-window artifacts")
+                self._upsert_extracted_artifact(connection, job.entity_id, artifact)
             connection.execute(
                 """
                 INSERT INTO durable_jobs (
@@ -1243,6 +1223,84 @@ class EventLedger:
                 (job.entity_id, job.entity_revision, now_ms, now_ms, now_ms),
             )
             self._complete_owned_job_kind(connection, job, worker_id, JobKind.EVIDENCE_EXTRACT)
+
+    def complete_partial_evidence_extract_job(
+        self,
+        job: DurableJob,
+        worker_id: str,
+        artifacts: tuple["EvidenceArtifact", ...],
+    ) -> None:
+        """原子登记锚点单图，保留人工复核且不创建自动 review。"""
+        if job.kind != JobKind.EVIDENCE_EXTRACT:
+            raise ValueError("complete_partial_evidence_extract_job requires an evidence extract job")
+        if len(artifacts) != 1 or artifacts[0].kind != "frame" or artifacts[0].coverage != "anchor_only":
+            raise ValueError("partial evidence extract requires one anchor-only frame")
+        artifact = artifacts[0]
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            current = connection.execute(
+                "SELECT * FROM durable_jobs WHERE job_id = ?", (job.job_id,)
+            ).fetchone()
+            if current is not None and current["state"] == JobState.COMPLETED.value:
+                return
+            self._validate_extract_lease(current, job, worker_id, now_ms)
+            event = connection.execute(
+                "SELECT revision, source_pts, stream_generation FROM events WHERE event_id = ?",
+                (job.entity_id,),
+            ).fetchone()
+            if event is None:
+                raise KeyError(f"unknown event case: {job.entity_id}")
+            if event["revision"] != job.entity_revision:
+                raise ValueError("evidence extract job revision no longer matches the current event revision")
+            if (
+                event["source_pts"] is None
+                or event["stream_generation"] is None
+                or artifact.stream_generation != event["stream_generation"]
+                or artifact.source_pts_start is None
+                or artifact.source_pts_end is None
+                or not artifact.source_pts_start <= event["source_pts"] < artifact.source_pts_end
+            ):
+                raise ValueError("anchor image does not cover the event source PTS")
+            self._upsert_extracted_artifact(connection, job.entity_id, artifact)
+            connection.execute(
+                "UPDATE events SET status = 'manual_review' WHERE event_id = ?",
+                (job.entity_id,),
+            )
+            self._complete_owned_job_kind(connection, job, worker_id, JobKind.EVIDENCE_EXTRACT)
+
+    def _upsert_extracted_artifact(
+        self,
+        connection: Any,
+        event_id: str,
+        artifact: "EvidenceArtifact",
+    ) -> None:
+        self._validate_artifact_timing(artifact)
+        resolved = self.resolve_evidence_path(artifact.path)
+        if resolved is None or not self._artifact_metadata_matches(resolved, artifact):
+            raise ValueError("evidence artifact path or metadata is invalid")
+        canonical = str(resolved)
+        evidence_id = _evidence_id(event_id, artifact.kind, canonical)
+        connection.execute(
+            """
+            INSERT INTO evidence (
+                event_id, evidence_id, kind, path, mime_type, available,
+                size, mtime, sha256, source_pts_start, source_pts_end,
+                stream_generation, coverage
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, kind, path) DO UPDATE SET
+                evidence_id = excluded.evidence_id, mime_type = excluded.mime_type,
+                available = 1, size = excluded.size, mtime = excluded.mtime,
+                sha256 = excluded.sha256,
+                source_pts_start = excluded.source_pts_start,
+                source_pts_end = excluded.source_pts_end,
+                stream_generation = excluded.stream_generation,
+                coverage = excluded.coverage
+            """,
+            (event_id, evidence_id, artifact.kind, canonical,
+             artifact.mime_type, artifact.size, artifact.mtime, artifact.sha256,
+             artifact.source_pts_start, artifact.source_pts_end,
+             artifact.stream_generation, artifact.coverage),
+        )
 
     def fail_evidence_extract_job(
         self,

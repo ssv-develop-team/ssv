@@ -138,6 +138,7 @@ GST_START_TEST(test_source_geometry_change_resets_infer_and_tracker_generation) 
     };
 
     const auto first_generation = push_and_track(GST_SECOND, 1);
+    fail_unless(first_generation == 1);
     fail_unless(push_and_track(2 * GST_SECOND, 2) == first_generation);
     ssv::infer::ssv_inference_service_update_source_geometry(
         service.get(), source_id, 3, 2);
@@ -806,6 +807,54 @@ GST_START_TEST(test_ssvoverlay_draws_latest_detection) {
 }
 GST_END_TEST
 
+GST_START_TEST(test_leaky_analysis_queue_preserves_source_generation) {
+    GstElement *pipeline = gst_parse_launch(
+        "videotestsrc num-buffers=60 is-live=true ! "
+        "video/x-raw,format=RGBA,width=64,height=48,framerate=100/1 ! "
+        "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
+        "identity sleep-time=15000 ! "
+        "ssvinfer source-id=leaky-analysis-timeline-test mock-detect=true ! "
+        "appsink name=sink sync=false emit-signals=false",
+        nullptr);
+    fail_unless(pipeline != nullptr);
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+    fail_unless(sink != nullptr);
+    auto source = ssv_meta("leaky-analysis-timeline-test");
+    fail_unless(gst_element_set_state(pipeline, GST_STATE_PLAYING)
+        != GST_STATE_CHANGE_FAILURE);
+
+    std::uint64_t generation = 0;
+    unsigned sample_count = 0;
+    unsigned gap_count = 0;
+    GstClockTime previous_pts = GST_CLOCK_TIME_NONE;
+    while (auto *sample = gst_app_sink_try_pull_sample(
+               GST_APP_SINK(sink), 2 * GST_SECOND)) {
+        auto *buffer = gst_sample_get_buffer(sample);
+        const auto pts = GST_BUFFER_PTS(buffer);
+        if (previous_pts != GST_CLOCK_TIME_NONE) {
+            fail_unless(pts > previous_pts);
+            if (pts - previous_pts > GST_SECOND / 100)
+                ++gap_count;
+        }
+        previous_pts = pts;
+        const auto frame = source->consume_detection();
+        fail_unless(frame.result == SsvMetaResult::Consumed);
+        if (generation == 0)
+            generation = frame.frame->timing.generation;
+        fail_unless(frame.frame->timing.generation == generation);
+        ++sample_count;
+        gst_sample_unref(sample);
+    }
+    fail_unless(gst_app_sink_is_eos(GST_APP_SINK(sink)));
+    fail_unless(sample_count > 1 && sample_count < 60);
+    fail_unless(gap_count > 0);
+    fail_unless(source->stats().generation_resets == 1);
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(sink);
+    gst_object_unref(pipeline);
+}
+GST_END_TEST
+
 GST_START_TEST(test_ssvoverlay_tracks_controlled_timeline_events) {
     const char *source_id = "overlay-timeline-test";
     GstElement *pipeline = gst_parse_launch(
@@ -848,6 +897,9 @@ GST_START_TEST(test_ssvoverlay_tracks_controlled_timeline_events) {
     fail_unless(meta->generation() == initial_generation);
 
     push_and_pull(200 * GST_MSECOND, true);
+    fail_unless(meta->generation() == initial_generation);
+
+    push_and_pull(50 * GST_MSECOND, true);
     const auto discontinuity_generation = meta->generation();
     fail_unless(discontinuity_generation == initial_generation + 1);
 
@@ -910,6 +962,7 @@ static Suite *ssv_gst_suite() {
     tcase_add_test(tc, test_ssvoverlay_runs_on_bgrx_buffer);
     tcase_add_test(tc, test_ssvoverlay_draws_latest_detection);
     tcase_add_test(tc, test_ssvoverlay_tracks_controlled_timeline_events);
+    tcase_add_test(tc, test_leaky_analysis_queue_preserves_source_generation);
     suite_add_tcase(suite, tc);
     return suite;
 }

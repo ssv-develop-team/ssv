@@ -833,17 +833,12 @@ void validate_recording_evidence_cache(
         std::filesystem::path("/var/lib/ssv/evidence-cache");
     const auto evidence_roots = agent ? agent["evidence_roots"] : YAML::Node {};
 
-    if (!evidence_roots) {
+    if (!evidence_roots || evidence_roots.size() == 0) {
         if (path_is_within(cache_path, default_root))
             return;
         throw_invalid_value(
             "agent.evidence_roots",
             "custom evidence_cache.directory requires matching agent.evidence_roots");
-    }
-    if (evidence_roots.size() == 0) {
-        throw_invalid_value(
-            "agent.evidence_roots",
-            "recording_evidence requires non-empty evidence_roots");
     }
 
     for (std::size_t index = 0; index < evidence_roots.size(); ++index) {
@@ -856,6 +851,24 @@ void validate_recording_evidence_cache(
     throw_invalid_value(
         "evidence_cache.directory",
         "recording_evidence requires evidence_cache.directory inside evidence_roots");
+}
+
+void validate_web_extension(const YAML::Node &web)
+{
+    constexpr std::string_view path = "agent.web";
+    require_map(web, path);
+    reject_unknown_keys(web, path, {"host", "port"});
+    const auto host = get_or<std::string>(
+        web, "host", "127.0.0.1", "agent.web.host");
+    if (is_blank(host)) {
+        throw_invalid_value(
+            "agent.web.host", "agent.web.host must not be blank");
+    }
+    const auto port = get_or<int>(web, "port", 8765, "agent.web.port");
+    if (port < 1 || port > 65535) {
+        throw_invalid_value(
+            "agent.web.port", "agent.web.port must be between 1 and 65535");
+    }
 }
 
 void validate_agent_extensions(
@@ -883,6 +896,8 @@ void validate_agent_extensions(
             }
         }
     }
+    if (const auto web = agent["web"])
+        validate_web_extension(web);
     if (const auto review = agent["review"])
         validate_review_extension(review);
     if (const auto indexing = agent["indexing"])
@@ -1797,6 +1812,7 @@ SsvConfig parse_and_validate(const YAML::Node &root)
                 "dedup_enabled",
                 "dedup_cooldown_seconds",
                 // The Python Agent owns these shared-config extensions.
+                "web",
                 "evidence_roots",
                 "review",
                 "indexing",

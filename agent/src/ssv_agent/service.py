@@ -289,7 +289,10 @@ class AgentService:
             worker_id="ssv-recording-evidence-0",
             lease_ms=worker_config.lease_ms,
             max_retries=worker_config.max_retries,
-            retry_delay_ms=worker_config.retry_delay_ms,
+            retry_delay_ms=max(
+                worker_config.retry_delay_ms,
+                self._config.evidence_cache.segment_duration_ms,
+            ),
             poll_interval_seconds=worker_config.poll_interval_ms / 1000,
         )
         if self._stopping.is_set():

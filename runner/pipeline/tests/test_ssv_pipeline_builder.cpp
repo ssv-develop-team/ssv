@@ -88,6 +88,7 @@ ssv::SsvHardwareCapabilities make_registry()
         "rtph264pay",
         "rtspclientsink",
         "splitmuxsink",
+        "h264timestamper",
         "mp4mux",
     };
     capabilities.onnxruntime_available = true;
@@ -381,7 +382,7 @@ void test_evidence_cache_topology_is_mandatory()
     assert(topology.evidence_cache->leaky_downstream);
     assert(!topology.evidence_cache->drop_only);
     assert(factories(topology.evidence_cache->stages)
-        == std::vector<std::string>({"queue", "splitmuxsink"}));
+        == std::vector<std::string>({"queue", "h264timestamper", "splitmuxsink"}));
     assert(topology.required_factories
         == std::vector<std::string>({"mp4mux"}));
 }
@@ -532,7 +533,7 @@ void test_rtsp_encoded_passthrough_coexists_with_analysis_and_evidence()
             "rtspclientsink",
         }));
     assert(factories(topology.evidence_cache->stages)
-        == std::vector<std::string>({"queue", "splitmuxsink"}));
+        == std::vector<std::string>({"queue", "h264timestamper", "splitmuxsink"}));
     assert(factories(topology.analysis->stages)
         == std::vector<std::string>({
             "queue",
@@ -761,6 +762,7 @@ void test_builder_configures_evidence_cache_queue()
         "tee",
         "queue",
         "splitmuxsink",
+        "h264timestamper",
         "mp4mux",
         "fakesink",
     };
@@ -910,6 +912,7 @@ void test_builder_realizes_the_internal_topology_and_element_properties()
         "queue",
         "fakesink",
         "splitmuxsink",
+        "h264timestamper",
         "mp4mux",
     };
     const auto plan = ssv::SsvPipelinePlan::resolve(
