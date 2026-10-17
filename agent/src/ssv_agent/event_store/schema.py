@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_pts_start INTEGER,
     source_pts_end INTEGER,
     stream_generation INTEGER,
+    coverage TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only')),
     UNIQUE (event_id, kind, path)
 );
 
@@ -189,6 +191,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "source_pts_start": "INTEGER",
         "source_pts_end": "INTEGER",
         "stream_generation": "INTEGER",
+        "coverage": "TEXT NOT NULL DEFAULT 'unknown' CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only'))",
     },
     "review_results": {
         "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",

@@ -14,6 +14,7 @@ from ssv_agent.event_store import DurableJob, EventLedger, JobKind, LeaseLostErr
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
 from ssv_agent.embedding.provider import EmbeddingProvider
 from ssv_agent.evidence_provider import (
+    EvidenceCacheWindowUnavailable,
     EvidenceExtractionError,
     EvidenceExtractor,
 )
@@ -410,6 +411,17 @@ class RecordingEvidenceWorker(_PollingWorker):
                 return False
             heartbeat: _LeaseHeartbeat | None = None
             try:
+                if job.attempts > self._max_retries:
+                    recover = getattr(self._extractor, "existing_anchor_frame", None)
+                    if callable(recover):
+                        case = ledger.get_case(job.entity_id)
+                        if case is not None:
+                            existing = recover(case)
+                            if existing is not None:
+                                ledger.complete_partial_evidence_extract_job(
+                                    job, self._worker_id, existing,
+                                )
+                                return True
                 if _mark_exhausted_attempt_dead(
                     ledger, job, self._worker_id, self._max_retries
                 ):
@@ -425,11 +437,22 @@ class RecordingEvidenceWorker(_PollingWorker):
                 )
                 heartbeat.start()
                 heartbeat.checkpoint()
-                artifacts = self._extractor.extract(case)
+                try:
+                    artifacts = self._extractor.extract(case)
+                except EvidenceCacheWindowUnavailable:
+                    anchor = getattr(self._extractor, "extract_anchor_frame", None)
+                    if not callable(anchor) or job.attempts < self._max_retries:
+                        raise
+                    artifacts = anchor(case)
                 heartbeat.checkpoint()
                 heartbeat.stop_and_join()
                 heartbeat.checkpoint()
-                ledger.complete_evidence_extract_job(job, self._worker_id, artifacts)
+                if len(artifacts) == 1 and artifacts[0].coverage == "anchor_only":
+                    ledger.complete_partial_evidence_extract_job(
+                        job, self._worker_id, artifacts,
+                    )
+                else:
+                    ledger.complete_evidence_extract_job(job, self._worker_id, artifacts)
                 logger.info(
                     "recording evidence job completed",
                     event_id=case.event_id,

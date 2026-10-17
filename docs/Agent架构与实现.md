@@ -301,7 +301,7 @@ ReviewWorker 成功复核后，`complete_review_job()` 在同一 SQLite 事务�
 - max_episode_ms：防止异常 episode 无限增长。
 - clip_before_ms / clip_after_ms：关闭时冻结证据窗口。
 
-冻结窗口是半开区间 [source_pts_start, source_pts_end)。timestamp_ms 只用于等待 post-roll，不替代媒体 PTS。episode 关闭后生成一个 evidence_extract job，由 RecordingEvidenceWorker 调用 SsvCacheEvidenceExtractor 读取 finalized SSV cache，产出 clip、帧和 manifest。
+冻结窗口是半开区间 [source_pts_start, source_pts_end)。timestamp_ms 只用于等待 post-roll，不替代媒体 PTS。episode 关闭后生成一个 evidence_extract job，由 RecordingEvidenceWorker 调用 SsvCacheEvidenceExtractor 读取 finalized SSV cache。完整窗口产出 clip、三帧和 manifest；缓存窗口在重试耗尽后仍不完整时，若同代际有效分段覆盖事件锚点，取证器只产出一张锚点附近图片和 manifest，账本标记 `coverage=anchor_only`，事件进入 `manual_review` 且不创建自动 review。
 
 ### 6.4 Durable workers
 
@@ -309,12 +309,12 @@ ReviewWorker 成功复核后，`complete_review_job()` 在同一 SQLite 事务�
 
 | worker | 输入 | 外部副作用 | 成功提交点 |
 | --- | --- | --- | --- |
-| RecordingEvidenceWorker | evidence_extract job | 读取 SSV cache，原子生成 clip/帧/manifest | complete_evidence_extract_job |
+| RecordingEvidenceWorker | evidence_extract job | 读取 SSV cache，原子生成完整 clip/帧或锚点单图及 manifest | complete_evidence_extract_job / complete_partial_evidence_extract_job |
 | ReviewWorker | review job | 读取案件和规则，调用受控 DeerFlow/model，写 review JSON | complete_review_job |
 | IndexWorker | index job | embedding 后写 Qdrant 事件索引 | Qdrant 写入并完成 job |
 | ReportWorker | report job | 读取指定 revision 的 ReviewRecord，确定性渲染并写 Markdown | complete_report_job（lease fence 内登记 ReportRecord 并完成 job） |
 
-job 具有 pending -> processing -> completed/dead 状态、lease、heartbeat、attempts 和 retry delay。失去 lease 的 worker 不能继续提交结果；模型、embedding、Qdrant、报告写入或证据缺失不会回滚已经提交的 EventCase 或 ReviewRecord。
+job 具有 pending -> processing -> completed/dead 状态、lease、heartbeat、attempts 和 retry delay。取证 Worker 的实际 retry delay 不小于 `evidence_cache.segment_duration_ms`。失去 lease 的 worker 不能继续提交结果；模型、embedding、Qdrant、报告写入或证据缺失不会回滚已经提交的 EventCase 或 ReviewRecord。
 
 review JSON 是复核结果的结构化 artifact；SQLite `reviews` 保存不可变复核历史，`reports` 保存成功报告的模板版本、hash 和 artifact 路径。Markdown 报告是派生产物，不是新的事实源；报告失败只影响 report job，不改变 review/index 状态。报告正文由固定模板生成，不调用 LLM，并绑定 job 指定的历史 revision。`get_event` 只投影已登记报告的安全元数据；`get_report` 校验 artifact 完整性后返回 Markdown 正文和当前 DeerFlow thread outputs 的虚拟路径，证据仅以 `event_id/evidence_id` 引用。它不是 HTTP 下载服务，也不生成 PDF。
 

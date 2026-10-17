@@ -247,7 +247,8 @@ static GstFlowReturn ssv_infer_transform_ip(
                     self->inference_service, self->source_id);
             if (self->active_transform == nullptr
                 || *self->active_transform != transform) {
-                if (self->timeline != nullptr)
+                if (self->timeline != nullptr
+                    && self->active_transform != nullptr)
                     self->timeline->on_lifecycle_reset();
                 delete self->active_transform;
                 self->active_transform = new PreprocessTransform(transform);

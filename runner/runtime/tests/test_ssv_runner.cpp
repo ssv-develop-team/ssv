@@ -7,10 +7,13 @@
 #include <cassert>
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -152,6 +155,10 @@ private:
 ssv::SsvConfig make_config()
 {
     ssv::SsvConfig config;
+    config.evidence_cache.directory = (
+        std::filesystem::temp_directory_path()
+        / ("ssv-runner-test-cache-" + std::to_string(::getpid()))
+    ).string();
     ssv::SsvSourceConfig source;
     source.id = "runner-test";
     source.uri = "rtsp://127.0.0.1/test";
@@ -1041,6 +1048,12 @@ void test_unexpected_prepare_error_keeps_pipeline_start_classification()
 
 int main()
 {
+    const auto cache_root = std::filesystem::temp_directory_path()
+        / ("ssv-runner-test-cache-" + std::to_string(::getpid()));
+    std::error_code cache_error;
+    std::filesystem::remove_all(cache_root, cache_error);
+    assert(!cache_error);
+
     test_successful_run_uses_one_owned_attempt_with_id_one();
     test_auto_display_failure_retries_after_destroying_failed_attempt();
     test_auto_decode_contract_failure_retries_in_software();
@@ -1060,5 +1073,7 @@ int main()
     test_prepare_display_error_is_classified();
     test_unexpected_prepare_error_keeps_pipeline_start_classification();
     test_system_factory_prepares_rtsp_without_gtk();
+    std::filesystem::remove_all(cache_root, cache_error);
+    assert(!cache_error);
     return 0;
 }

@@ -388,9 +388,13 @@ SsvTimelineUpdate SsvTimelineCursor::on_buffer(
 
     const bool rollback = pts != GST_CLOCK_TIME_NONE &&
         last_pts_ != GST_CLOCK_TIME_NONE && pts < last_pts_;
-    if (discontinuity || rollback) {
+    const bool unanchored_discontinuity = discontinuity
+        && pts == GST_CLOCK_TIME_NONE;
+    if (unanchored_discontinuity || rollback) {
         auto update = reset_once(
-            discontinuity ? ResetKind::Discontinuity : ResetKind::PtsRollback);
+            unanchored_discontinuity
+                ? ResetKind::Discontinuity
+                : ResetKind::PtsRollback);
         if (pts != GST_CLOCK_TIME_NONE)
             last_pts_ = pts;
         return update;

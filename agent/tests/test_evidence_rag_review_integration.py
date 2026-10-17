@@ -17,7 +17,7 @@ from ssv_agent.workers import RecordingEvidenceWorker, ReviewWorker
 def _record_event(db_path: Path, root: Path) -> None:
     with EventLedger(
         db_path, evidence_roots=[str(root)],
-        recording_evidence=RecordingEvidenceConfig(enabled=True),
+        recording_evidence=RecordingEvidenceConfig(),
     ) as ledger:
         ledger.record(ReviewContext(
             event_id="evt-1", source="camera-1", timestamp_ms=1000, frame_id=1,
@@ -56,7 +56,7 @@ def _extract(db_path: Path, root: Path) -> None:
     worker = RecordingEvidenceWorker(
         ledger_factory=lambda: EventLedger(
             db_path, evidence_roots=[str(root)],
-            recording_evidence=RecordingEvidenceConfig(enabled=True),
+            recording_evidence=RecordingEvidenceConfig(),
         ),
         extractor=Extractor(), worker_id="extractor", lease_ms=1000,
         max_retries=2, retry_delay_ms=0,

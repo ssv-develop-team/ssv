@@ -123,6 +123,7 @@ public:
         , event_log_(options.event_log)
         , run_attempt_id_(options.run_attempt_id)
         , inference_stats_interval_(options.inference_stats_interval)
+        , shutdown_timeout_(options.shutdown_timeout)
         , pending_contract_boundaries_(
               required_contract_boundaries(plan_))
     {
@@ -179,6 +180,12 @@ public:
                 > G_MAXUINT) {
             throw std::invalid_argument(
                 "SsvRunAttempt inference stats interval is out of range");
+        }
+        if (shutdown_timeout_.count() <= 0
+            || static_cast<std::uint64_t>(shutdown_timeout_.count())
+                > G_MAXUINT) {
+            throw std::invalid_argument(
+                "SsvRunAttempt shutdown timeout is out of range");
         }
     }
 
@@ -241,15 +248,36 @@ public:
 
     void request_shutdown() noexcept
     {
-        if (finished_)
+        if (finished_ || shutdown_requested_)
             return;
-        finish({
-            SsvExitCode::Success,
-            SsvRunAttemptStopReason::ControlledShutdown,
-            reached_playing_,
-            {},
-            {},
-        });
+        if (!reached_playing_) {
+            finish({
+                SsvExitCode::Success,
+                SsvRunAttemptStopReason::ControlledShutdown,
+                reached_playing_,
+                {},
+                {},
+            });
+            return;
+        }
+        shutdown_requested_ = true;
+        stats_source_.reset();
+        shutdown_source_.reset(g_timeout_source_new(
+            static_cast<guint>(shutdown_timeout_.count())));
+        if (shutdown_source_ != nullptr) {
+            g_source_set_callback(
+                shutdown_source_.get(), &Impl::on_shutdown_timeout,
+                this, nullptr);
+        }
+        if (shutdown_source_ == nullptr
+            || g_source_attach(shutdown_source_.get(), context_.get()) == 0) {
+            finish_shutdown_failure("failed to attach EOS drain timeout");
+            return;
+        }
+        if (!gst_element_send_event(
+                pipeline_instance_.pipeline(), gst_event_new_eos())) {
+            finish_shutdown_failure("GStreamer pipeline rejected EOS");
+        }
     }
 
     SsvRunAttemptState state() const noexcept { return state_.load(); }
@@ -318,7 +346,9 @@ private:
             case GST_MESSAGE_EOS:
                 self.finish({
                     SsvExitCode::Success,
-                    SsvRunAttemptStopReason::EndOfStream,
+                    self.shutdown_requested_
+                        ? SsvRunAttemptStopReason::ControlledShutdown
+                        : SsvRunAttemptStopReason::EndOfStream,
                     self.reached_playing_,
                     {},
                     {},
@@ -507,14 +537,26 @@ private:
     static gboolean on_controlled_signal(gpointer user_data)
     {
         auto &self = *static_cast<Impl *>(user_data);
-        self.finish({
-            SsvExitCode::Success,
-            SsvRunAttemptStopReason::ControlledShutdown,
-            self.reached_playing_,
-            {},
-            {},
-        });
+        self.request_shutdown();
+        return G_SOURCE_CONTINUE;
+    }
+
+    static gboolean on_shutdown_timeout(gpointer user_data)
+    {
+        auto &self = *static_cast<Impl *>(user_data);
+        self.finish_shutdown_failure("timed out waiting for GStreamer EOS");
         return G_SOURCE_REMOVE;
+    }
+
+    void finish_shutdown_failure(std::string error) noexcept
+    {
+        finish({
+            SsvExitCode::RuntimeFailure,
+            SsvRunAttemptStopReason::RuntimeError,
+            reached_playing_,
+            "pipeline.shutdown",
+            std::move(error),
+        });
     }
 
     void finish(SsvRunAttemptResult result) noexcept
@@ -523,6 +565,7 @@ private:
             return;
         finished_ = true;
         result_ = std::move(result);
+        shutdown_source_.reset();
         stop_runtime_resources();
         state_.store(SsvRunAttemptState::Stopped);
         if (loop_ != nullptr)
@@ -581,6 +624,7 @@ private:
     SsvEventLog *event_log_;
     std::optional<std::uint32_t> run_attempt_id_;
     std::chrono::milliseconds inference_stats_interval_;
+    std::chrono::milliseconds shutdown_timeout_;
     std::set<SsvPipelineBoundary> pending_contract_boundaries_;
     MainContextPtr context_;
     MainLoopPtr loop_;
@@ -588,6 +632,7 @@ private:
     SourcePtr sigint_source_;
     SourcePtr sigterm_source_;
     SourcePtr stats_source_;
+    SourcePtr shutdown_source_;
     std::atomic<SsvRunAttemptState> state_ {SsvRunAttemptState::Ready};
     SsvRunAttemptResult result_ {
         SsvExitCode::Success,
@@ -599,6 +644,7 @@ private:
     bool reached_playing_ = false;
     bool runtime_resolved_emitted_ = false;
     bool finished_ = false;
+    bool shutdown_requested_ = false;
     bool runtime_resources_stopped_ = false;
 };
 

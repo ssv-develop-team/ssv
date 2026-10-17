@@ -465,6 +465,68 @@ def test_failed_evidence_extract_dead_marks_manual_review_without_review_job(tmp
     assert review is None
 
 
+def test_partial_anchor_image_is_registered_without_review_job(tmp_path: Path) -> None:
+    context = _context().model_copy(
+        update={"source_pts": 10_000_000_000, "stream_generation": 7}
+    )
+    path = tmp_path / "derived" / "evt-1" / "anchor.jpg"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"anchor-jpeg")
+    details = path.stat()
+    artifact = EvidenceArtifact(
+        kind="frame", path=path,
+        sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
+        mime_type="image/jpeg", size=details.st_size, mtime=details.st_mtime,
+        source_pts_start=9_000_000_000, source_pts_end=11_000_000_000,
+        stream_generation=7, coverage="anchor_only",
+    )
+    with EventLedger(
+        tmp_path / "events.db", evidence_roots=[str(tmp_path)],
+        recording_evidence=_enabled_config(),
+    ) as ledger:
+        ledger.record(context)
+        job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "extractor", 1000)
+        assert job is not None
+        ledger.complete_partial_evidence_extract_job(job, "extractor", (artifact,))
+        ledger.complete_partial_evidence_extract_job(job, "extractor", (artifact,))
+        case = ledger.get_case("evt-1")
+        jobs = ledger.jobs_for_event("evt-1")
+    assert case is not None and case.status == "manual_review"
+    assert [(item.kind, item.coverage) for item in case.evidence] == [
+        ("frame", "anchor_only")
+    ]
+    assert [(item.kind.value, item.state.value) for item in jobs] == [
+        ("evidence_extract", "completed")
+    ]
+
+
+def test_partial_anchor_image_rejects_mismatched_generation(tmp_path: Path) -> None:
+    context = _context().model_copy(
+        update={"source_pts": 10_000_000_000, "stream_generation": 7}
+    )
+    path = tmp_path / "anchor.jpg"
+    path.write_bytes(b"anchor-jpeg")
+    details = path.stat()
+    artifact = EvidenceArtifact(
+        kind="frame", path=path,
+        sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
+        mime_type="image/jpeg", size=details.st_size, mtime=details.st_mtime,
+        source_pts_start=9_000_000_000, source_pts_end=11_000_000_000,
+        stream_generation=8, coverage="anchor_only",
+    )
+    with EventLedger(
+        tmp_path / "events.db", evidence_roots=[str(tmp_path)],
+        recording_evidence=_enabled_config(),
+    ) as ledger:
+        ledger.record(context)
+        job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "extractor", 1000)
+        assert job is not None
+        with pytest.raises(ValueError, match="anchor"):
+            ledger.complete_partial_evidence_extract_job(job, "extractor", (artifact,))
+        case = ledger.get_case("evt-1")
+    assert case is not None and case.evidence == ()
+
+
 def test_complete_evidence_extract_rejects_path_outside_root(tmp_path: Path) -> None:
     artifacts = list(_artifacts(tmp_path))
     outside = tmp_path.parent / "outside.mp4"
@@ -693,6 +755,7 @@ def test_record_upgrades_a_preexisting_events_database(tmp_path: Path) -> None:
             CREATE TABLE events (
                 event_id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
+                channel_id TEXT,
                 timestamp_ms INTEGER NOT NULL,
                 frame_id INTEGER NOT NULL,
                 event_type TEXT,
@@ -703,6 +766,9 @@ def test_record_upgrades_a_preexisting_events_database(tmp_path: Path) -> None:
                 result_path TEXT,
                 created_ms INTEGER NOT NULL
             );
+            INSERT INTO events(
+                event_id, source, channel_id, timestamp_ms, frame_id, created_ms
+            ) VALUES ('legacy', 'legacy-camera', 'legacy-channel', 1, 1, 1);
             """
         )
 
@@ -713,6 +779,15 @@ def test_record_upgrades_a_preexisting_events_database(tmp_path: Path) -> None:
     assert outcome.created is True
     assert case is not None
     assert case.revision == 0
+    with sqlite3.connect(db_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(events)")}
+        assert "channel_id" in columns
+        assert connection.execute(
+            "SELECT channel_id FROM events WHERE event_id = 'legacy'"
+        ).fetchone() == ("legacy-channel",)
+        assert connection.execute(
+            "SELECT channel_id FROM events WHERE event_id = 'evt-1'"
+        ).fetchone() == (None,)
 
 
 def test_enqueue_all_index_jobs_requeues_completed_current_projection(tmp_path: Path) -> None:

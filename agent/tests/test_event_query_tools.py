@@ -83,7 +83,7 @@ def test_get_event_tool_exposes_episode_window_without_paths(
 ) -> None:
     db_path = tmp_path / "events.db"
     monkeypatch.setenv("SSV_EVENT_DB_PATH", str(db_path))
-    config = RecordingEvidenceConfig(enabled=True)
+    config = RecordingEvidenceConfig()
     aggregator = EventEpisodeAggregator(config)
     with EventLedger(db_path, recording_evidence=config) as ledger:
         aggregator.ingest(

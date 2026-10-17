@@ -46,11 +46,17 @@ void test_flush_discontinuity_and_pts_rollback_reset_once()
     assert(duplicate.generation == 1 && !duplicate.reset);
     assert(gap.generation == 1 && !gap.reset);
 
+    const auto dropped = cursor.on_buffer(21 * GST_SECOND, true);
+    assert(dropped.generation == 1 && !dropped.reset);
+
     const auto rollback = cursor.on_buffer(GST_SECOND, false);
     assert(rollback.generation == 2 && rollback.reset);
 
     const auto discont = cursor.on_buffer(2 * GST_SECOND, true);
-    assert(discont.generation == 3 && discont.reset);
+    assert(discont.generation == 2 && !discont.reset);
+
+    const auto unanchored = cursor.on_buffer(GST_CLOCK_TIME_NONE, true);
+    assert(unanchored.generation == 3 && unanchored.reset);
 
     const auto flush = cursor.on_flush_stop(true);
     const auto repeated_flush = cursor.on_flush_stop(true);
@@ -86,8 +92,8 @@ void test_cursor_synchronizes_to_reset_from_other_branch()
     infer.on_buffer(GST_SECOND, false);
     overlay.on_buffer(GST_SECOND, false);
 
-    const auto reset = infer.on_buffer(2 * GST_SECOND, true);
-    const auto synchronized = overlay.on_buffer(2 * GST_SECOND, true);
+    const auto reset = infer.on_buffer(500 * GST_MSECOND, true);
+    const auto synchronized = overlay.on_buffer(500 * GST_MSECOND, true);
 
     assert(reset.generation == 2 && reset.reset);
     assert(synchronized.generation == 2 && synchronized.reset);

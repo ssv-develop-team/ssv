@@ -12,7 +12,7 @@ import pytest
 
 from ssv_agent.config import EvidenceCacheConfig, RecordingEvidenceConfig
 from ssv_agent.event_store import EventCase
-from ssv_agent.evidence_provider import EvidenceExtractionError
+from ssv_agent.evidence_provider import EvidenceCacheWindowUnavailable, EvidenceExtractionError
 from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
 
 
@@ -185,6 +185,54 @@ def test_extracts_complete_same_generation_pts_window(tmp_path: Path) -> None:
     ]
     assert manifest["requested_source_pts"] == [7_500_000_000, 12_500_000_000]
     assert manifest["actual_source_pts"] == [5_000_000_000, 15_000_000_000]
+
+
+def test_extracts_anchor_image_only_after_full_window_is_unavailable(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=9_000_000_000,
+        end=11_000_000_000,
+    )
+    runner = FakeCommandRunner()
+    extractor = _extractor(evidence_root, cache_root, runner=runner)
+
+    with pytest.raises(EvidenceCacheWindowUnavailable):
+        extractor.extract(_case())
+    artifacts = extractor.extract_anchor_frame(_case())
+
+    assert len(artifacts) == 1
+    assert artifacts[0].kind == "frame"
+    assert artifacts[0].coverage == "anchor_only"
+    assert (artifacts[0].source_pts_start, artifacts[0].source_pts_end) == (
+        9_000_000_000, 11_000_000_000,
+    )
+    assert artifacts[0].path.read_bytes()
+    manifest = json.loads((artifacts[0].path.parent / "manifest.json").read_text())
+    assert manifest["time_basis"] == "source_pts_anchor"
+    assert manifest["event_source_pts"] == 10_000_000_000
+    assert manifest["inputs"] == ["segment-00000000.mp4"]
+    assert extractor.extract_anchor_frame(_case()) == artifacts
+    assert extractor.extract(_case()) == artifacts
+    assert len(runner.calls) == 1
+
+
+def test_anchor_image_rejects_wrong_generation(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=9_000_000_000,
+        end=11_000_000_000,
+        generation=8,
+    )
+
+    with pytest.raises(EvidenceExtractionError, match="anchor"):
+        _extractor(evidence_root, cache_root).extract_anchor_frame(_case())
+    assert not (evidence_root / "derived" / "event-1").exists()
 
 
 def test_extract_pins_inputs_before_cache_cleanup(tmp_path: Path) -> None:
