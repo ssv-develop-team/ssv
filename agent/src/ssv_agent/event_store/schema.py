@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS durable_jobs (
     lease_expires_ms INTEGER,
     available_at_ms INTEGER NOT NULL,
     last_error TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    failed_at_ms INTEGER,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL,
     UNIQUE (kind, entity_id, entity_revision)
@@ -204,6 +207,11 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "model_id": "TEXT",
         "rule_citations_json": "TEXT NOT NULL DEFAULT '[]'",
     },
+    "durable_jobs": {
+        "error_code": "TEXT",
+        "error_message": "TEXT",
+        "failed_at_ms": "INTEGER",
+    },
 }
 
 
@@ -231,6 +239,9 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
                     lease_expires_ms INTEGER,
                     available_at_ms INTEGER NOT NULL,
                     last_error TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    failed_at_ms INTEGER,
                     created_ms INTEGER NOT NULL,
                     updated_ms INTEGER NOT NULL,
                     UNIQUE (kind, entity_id, entity_revision)

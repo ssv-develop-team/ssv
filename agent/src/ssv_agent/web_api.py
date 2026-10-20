@@ -33,6 +33,9 @@ class AnalysisTaskResponse(BaseModel):
         "completed",
         "failed",
     ]
+    error_code: str | None
+    error_message: str | None
+    failed_at: int | None
 
 
 class EventSummary(BaseModel):

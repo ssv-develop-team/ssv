@@ -144,13 +144,16 @@ def test_schema_migration_preserves_legacy_review_and_index_jobs(tmp_path: Path)
                 job.lease_expires_ms,
                 job.available_at_ms,
                 job.last_error,
+                job.error_code,
+                job.error_message,
+                job.failed_at_ms,
             )
             for job in ledger.jobs_for_event("legacy")
         ] == [
-            (17, "review", "processing", 2, "reviewer", 9000, 10, None),
-            (23, "index", "dead", 4, None, None, 20, "index failed"),
-            (31, "review", "pending", 0, None, None, 30, None),
-            (37, "index", "completed", 1, None, None, 40, None),
+            (17, "review", "processing", 2, "reviewer", 9000, 10, None, None, None, None),
+            (23, "index", "dead", 4, None, None, 20, "index failed", None, None, None),
+            (31, "review", "pending", 0, None, None, 30, None, None, None, None),
+            (37, "index", "completed", 1, None, None, 40, None, None, None, None),
         ]
         legacy_review = ledger.get_review_record("legacy", 1)
         assert legacy_review is not None
@@ -702,12 +705,24 @@ def test_claimed_job_is_exclusive_then_retries_to_dead(tmp_path: Path) -> None:
             "model unavailable",
             max_retries=2,
             retry_delay_ms=0,
+            error_code="model_call_failed",
+            error_message="模型服务调用失败，请稍后重试或检查服务配置。",
         )
+
+        stored = ledger._store._conn.execute(
+            "SELECT error_code, error_message, failed_at_ms FROM durable_jobs "
+            "WHERE job_id = ?",
+            (retry.job_id,),
+        ).fetchone()
 
     assert blocked is None
     assert state.value == "pending"
     assert retry.attempts == 2
     assert dead.value == "dead"
+    assert stored is not None
+    assert stored["error_code"] == "model_call_failed"
+    assert stored["error_message"] == "模型服务调用失败，请稍后重试或检查服务配置。"
+    assert isinstance(stored["failed_at_ms"], int)
 
 
 def test_append_review_advances_revision_and_enqueues_current_index(tmp_path: Path) -> None:

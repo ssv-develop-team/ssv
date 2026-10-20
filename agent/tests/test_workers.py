@@ -587,6 +587,16 @@ def test_review_worker_retries_model_failure_then_marks_job_dead(tmp_path: Path)
     assert calls == 2
     assert case is not None
     assert case.review is None
+    with EventLedger(db_path) as ledger:
+        row = ledger._store._conn.execute(
+            "SELECT state, error_code, error_message, failed_at_ms FROM durable_jobs "
+            "WHERE kind = 'review' AND entity_id = 'case-1'"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == "dead"
+    assert row["error_code"] == "model_call_failed"
+    assert row["error_message"] == "模型服务调用失败，请稍后重试或检查服务配置。"
+    assert isinstance(row["failed_at_ms"], int)
 
 
 def test_review_worker_retries_invalid_json_and_unregistered_evidence(tmp_path: Path) -> None:

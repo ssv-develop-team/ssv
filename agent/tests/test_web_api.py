@@ -64,15 +64,28 @@ def _insert_job(
     state: str,
     available_at_ms: int,
     lease_expires_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    failed_at_ms: int | None = None,
 ) -> None:
     connection.execute(
         """
         INSERT INTO durable_jobs (
             kind, entity_id, entity_revision, state, attempts, lease_owner,
-            lease_expires_ms, available_at_ms, created_ms, updated_ms
-        ) VALUES (?, ?, 0, ?, 0, NULL, ?, ?, 1, 1)
+            lease_expires_ms, available_at_ms, error_code, error_message,
+            failed_at_ms, created_ms, updated_ms
+        ) VALUES (?, ?, 0, ?, 0, NULL, ?, ?, ?, ?, ?, 1, 1)
         """,
-        (kind, event_id, state, lease_expires_ms, available_at_ms),
+        (
+            kind,
+            event_id,
+            state,
+            lease_expires_ms,
+            available_at_ms,
+            error_code,
+            error_message,
+            failed_at_ms,
+        ),
     )
 
 
@@ -535,7 +548,13 @@ def test_event_detail_uses_revision_and_event_scoped_evidence_ids(seeded_api: Se
         "current_revision": 5,
         "verdict": "compliant",
         "confidence": 0.83,
-        "analysis_task": {"kind": "review", "state": "completed"},
+        "analysis_task": {
+            "kind": "review",
+            "state": "completed",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
     }
     assert [review["revision"] for review in body["review_history"]] == [2, 5]
     assert [review["review_id"] for review in body["review_history"]] == [
@@ -555,7 +574,13 @@ def test_event_detail_uses_revision_and_event_scoped_evidence_ids(seeded_api: Se
     assert no_review["current_revision"] is None
     assert no_review["verdict"] is None
     assert no_review["confidence"] is None
-    assert no_review["analysis_task"] == {"kind": None, "state": "not_scheduled"}
+    assert no_review["analysis_task"] == {
+        "kind": None,
+        "state": "not_scheduled",
+        "error_code": None,
+        "error_message": None,
+        "failed_at": None,
+    }
     evidence_ids = {item["evidence_id"] for item in body["evidence"]}
     assert "frame-valid" in evidence_ids
     assert "clip-a" in evidence_ids
@@ -649,6 +674,9 @@ def test_event_summaries_expose_durable_analysis_task_states(
         kind="review",
         state="dead",
         available_at_ms=1,
+        error_code="model_insufficient_balance",
+        error_message="模型服务余额不足，请检查模型账户余额。",
+        failed_at_ms=4999,
     )
     connection.commit()
     connection.close()
@@ -670,13 +698,55 @@ def test_event_summaries_expose_durable_analysis_task_states(
         }
 
     assert tasks == {
-        "Event-A": {"kind": "review", "state": "queued"},
-        "Event-B": {"kind": "review", "state": "processing"},
-        "Event-C": {"kind": "evidence_extract", "state": "waiting"},
-        "Event-D": {"kind": "review", "state": "lease_expired"},
-        "Event-E": {"kind": "evidence_extract", "state": "completed"},
-        "Event-F": {"kind": "review", "state": "failed"},
-        "Event-G": {"kind": None, "state": "not_scheduled"},
+        "Event-A": {
+            "kind": "review",
+            "state": "queued",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
+        "Event-B": {
+            "kind": "review",
+            "state": "processing",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
+        "Event-C": {
+            "kind": "evidence_extract",
+            "state": "waiting",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
+        "Event-D": {
+            "kind": "review",
+            "state": "lease_expired",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
+        "Event-E": {
+            "kind": "evidence_extract",
+            "state": "completed",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
+        "Event-F": {
+            "kind": "review",
+            "state": "failed",
+            "error_code": "model_insufficient_balance",
+            "error_message": "模型服务余额不足，请检查模型账户余额。",
+            "failed_at": 4999,
+        },
+        "Event-G": {
+            "kind": None,
+            "state": "not_scheduled",
+            "error_code": None,
+            "error_message": None,
+            "failed_at": None,
+        },
     }
 
 

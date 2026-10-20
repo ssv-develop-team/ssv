@@ -328,14 +328,27 @@ class ReadOnlyEventStore:
             ).fetchone()
             is not None
         )
-        job_fields = (
-            "analysis_job.kind AS analysis_job_kind, "
-            "analysis_job.state AS analysis_job_state, "
-            "analysis_job.available_at_ms AS analysis_available_at_ms, "
-            "analysis_job.lease_expires_ms AS analysis_lease_expires_ms"
+        job_columns = (
+            {row["name"] for row in connection.execute("PRAGMA table_info(durable_jobs)")}
             if has_jobs
-            else "NULL AS analysis_job_kind, NULL AS analysis_job_state, "
-            "NULL AS analysis_available_at_ms, NULL AS analysis_lease_expires_ms"
+            else set()
+        )
+
+        def job_field(column: str, alias: str) -> str:
+            if column in job_columns:
+                return f"analysis_job.{column} AS {alias}"
+            return f"NULL AS {alias}"
+
+        job_fields = ", ".join(
+            (
+                job_field("kind", "analysis_job_kind"),
+                job_field("state", "analysis_job_state"),
+                job_field("available_at_ms", "analysis_available_at_ms"),
+                job_field("lease_expires_ms", "analysis_lease_expires_ms"),
+                job_field("error_code", "analysis_error_code"),
+                job_field("error_message", "analysis_error_message"),
+                job_field("failed_at_ms", "analysis_failed_at_ms"),
+            )
         )
         job_join = (
             """
@@ -378,13 +391,25 @@ class ReadOnlyEventStore:
         """
 
     @staticmethod
-    def _analysis_task(row: sqlite3.Row) -> dict[str, str | None]:
+    def _analysis_task(row: sqlite3.Row) -> dict[str, str | int | None]:
         kind = row["analysis_job_kind"]
         state = row["analysis_job_state"]
         if kind is None or state is None:
             if row["current_revision"] is not None or row["status"] == "completed":
-                return {"kind": "review", "state": "completed"}
-            return {"kind": None, "state": "not_scheduled"}
+                return {
+                    "kind": "review",
+                    "state": "completed",
+                    "error_code": None,
+                    "error_message": None,
+                    "failed_at": None,
+                }
+            return {
+                "kind": None,
+                "state": "not_scheduled",
+                "error_code": None,
+                "error_message": None,
+                "failed_at": None,
+            }
 
         if state == "pending":
             available_at_ms = row["analysis_available_at_ms"]
@@ -406,7 +431,14 @@ class ReadOnlyEventStore:
             display_state = "failed"
         else:  # pragma: no cover - durable_jobs constrains its state values
             display_state = "failed"
-        return {"kind": kind, "state": display_state}
+        is_failed = display_state == "failed"
+        return {
+            "kind": kind,
+            "state": display_state,
+            "error_code": row["analysis_error_code"] if is_failed else None,
+            "error_message": row["analysis_error_message"] if is_failed else None,
+            "failed_at": row["analysis_failed_at_ms"] if is_failed else None,
+        }
 
     @staticmethod
     def _decode_evidence_ids(value: str) -> list[str]:

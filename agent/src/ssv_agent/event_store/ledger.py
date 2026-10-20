@@ -162,6 +162,9 @@ class DurableJob:
     lease_expires_ms: int | None
     available_at_ms: int
     last_error: str | None
+    error_code: str | None = None
+    error_message: str | None = None
+    failed_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1309,6 +1312,8 @@ class EventLedger:
         error: str,
         max_retries: int,
         retry_delay_ms: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> JobState:
         """记录取证失败；达到上限时与事件转人工复核同事务提交。"""
         if job.kind != JobKind.EVIDENCE_EXTRACT:
@@ -1316,7 +1321,7 @@ class EventLedger:
         with self._store.transaction(immediate=True) as connection:
             state = self._fail_job_in_transaction(
                 connection, job.job_id, worker_id, job.attempts,
-                error, max_retries, retry_delay_ms,
+                error, max_retries, retry_delay_ms, error_code, error_message,
             )
             if state == JobState.DEAD:
                 connection.execute(
@@ -1341,7 +1346,8 @@ class EventLedger:
                     ON CONFLICT(kind, entity_id, entity_revision) DO UPDATE SET
                         state = 'pending', lease_owner = NULL,
                         lease_expires_ms = NULL, available_at_ms = excluded.available_at_ms,
-                        last_error = NULL, updated_ms = excluded.updated_ms
+                        last_error = NULL, error_code = NULL, error_message = NULL,
+                        failed_at_ms = NULL, updated_ms = excluded.updated_ms
                     WHERE durable_jobs.state IN ('completed', 'dead')
                     """,
                     (row["event_id"], row["revision"], now_ms, now_ms, now_ms),
@@ -1423,6 +1429,7 @@ class EventLedger:
                 """
                 UPDATE durable_jobs
                 SET state = 'completed', lease_owner = NULL, lease_expires_ms = NULL,
+                    error_code = NULL, error_message = NULL, failed_at_ms = NULL,
                     updated_ms = ?
                 WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
                     AND attempts = ? AND lease_expires_ms > ?
@@ -1440,12 +1447,14 @@ class EventLedger:
         error: str,
         max_retries: int,
         retry_delay_ms: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> JobState:
         """仅允许持有未过期 lease 的 worker 记录失败或重试。"""
         with self._store.transaction(immediate=True) as connection:
             return self._fail_job_in_transaction(
                 connection, job_id, worker_id, attempts, error,
-                max_retries, retry_delay_ms,
+                max_retries, retry_delay_ms, error_code, error_message,
             )
 
     @staticmethod
@@ -1457,6 +1466,8 @@ class EventLedger:
         error: str,
         max_retries: int,
         retry_delay_ms: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> JobState:
         now_ms = _now_ms()
         row = connection.execute(
@@ -1469,11 +1480,23 @@ class EventLedger:
         next_state = JobState.DEAD if row["attempts"] >= max_retries else JobState.PENDING
         cursor = connection.execute(
             """UPDATE durable_jobs SET state = ?, lease_owner = NULL, lease_expires_ms = NULL,
-                available_at_ms = ?, last_error = ?, updated_ms = ?
+                available_at_ms = ?, last_error = ?, error_code = ?, error_message = ?,
+                failed_at_ms = ?, updated_ms = ?
                 WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
                 AND attempts = ? AND lease_expires_ms > ?""",
-            (next_state.value, now_ms + max(retry_delay_ms, 0), error, now_ms,
-             job_id, worker_id, attempts, now_ms),
+            (
+                next_state.value,
+                now_ms + max(retry_delay_ms, 0),
+                error,
+                error_code,
+                error_message,
+                now_ms,
+                now_ms,
+                job_id,
+                worker_id,
+                attempts,
+                now_ms,
+            ),
         )
         if cursor.rowcount != 1:
             raise LeaseLostError(f"lost lease for durable job {job_id}")
@@ -1658,6 +1681,7 @@ class EventLedger:
             """
             UPDATE durable_jobs
             SET state = 'completed', lease_owner = NULL, lease_expires_ms = NULL,
+                error_code = NULL, error_message = NULL, failed_at_ms = NULL,
                 updated_ms = ?
             WHERE job_id = ? AND kind = ? AND entity_id = ? AND entity_revision = ?
                 AND state = 'processing' AND lease_owner = ? AND attempts = ?
@@ -1875,4 +1899,7 @@ class EventLedger:
             lease_expires_ms=row["lease_expires_ms"],
             available_at_ms=row["available_at_ms"],
             last_error=row["last_error"],
+            error_code=row["error_code"],
+            error_message=row["error_message"],
+            failed_at_ms=row["failed_at_ms"],
         )
