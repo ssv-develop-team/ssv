@@ -764,6 +764,7 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
     topology.evidence_cache = PipelineBranchTopology {
         .stages = {
             stage("queue", "evidence-cache-queue"),
+            stage("h264timestamper", "evidence-cache-timestamp"),
             stage("splitmuxsink", "evidence-cache-sink"),
         },
         .queue_capacity = 32,

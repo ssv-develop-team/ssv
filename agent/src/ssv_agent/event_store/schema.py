@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_pts_start INTEGER,
     source_pts_end INTEGER,
     stream_generation INTEGER,
+    coverage TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only')),
     UNIQUE (event_id, kind, path)
 );
 
@@ -115,6 +117,9 @@ CREATE TABLE IF NOT EXISTS durable_jobs (
     lease_expires_ms INTEGER,
     available_at_ms INTEGER NOT NULL,
     last_error TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    failed_at_ms INTEGER,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL,
     UNIQUE (kind, entity_id, entity_revision)
@@ -189,6 +194,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "source_pts_start": "INTEGER",
         "source_pts_end": "INTEGER",
         "stream_generation": "INTEGER",
+        "coverage": "TEXT NOT NULL DEFAULT 'unknown' CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only'))",
     },
     "review_results": {
         "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -200,6 +206,11 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "policy_id": "TEXT",
         "model_id": "TEXT",
         "rule_citations_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "durable_jobs": {
+        "error_code": "TEXT",
+        "error_message": "TEXT",
+        "failed_at_ms": "INTEGER",
     },
 }
 
@@ -228,6 +239,9 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
                     lease_expires_ms INTEGER,
                     available_at_ms INTEGER NOT NULL,
                     last_error TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    failed_at_ms INTEGER,
                     created_ms INTEGER NOT NULL,
                     updated_ms INTEGER NOT NULL,
                     UNIQUE (kind, entity_id, entity_revision)

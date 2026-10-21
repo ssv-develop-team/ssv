@@ -24,6 +24,7 @@ class EvidenceArtifact:
     source_pts_start: int | None = None
     source_pts_end: int | None = None
     stream_generation: int | None = None
+    coverage: Literal["exact_window", "anchor_only"] = "exact_window"
 
 
 class EvidenceExtractionError(RuntimeError):
@@ -32,6 +33,10 @@ class EvidenceExtractionError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message)
         self.retryable = retryable
+
+
+class EvidenceCacheWindowUnavailable(EvidenceExtractionError):
+    """完整缓存窗口尚未可用；耗尽重试后可尝试锚点单图。"""
 
 
 class CommandRunner(Protocol):

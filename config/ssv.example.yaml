@@ -100,6 +100,9 @@ agent:
   max_retries: 3
   event_db_path: "data/events.db"
   output_dir: "outputs"
+  web:
+    host: "127.0.0.1"
+    port: 8765
   dedup_enabled: true
   dedup_cooldown_seconds: 30.0
   # 证据根必须是绝对路径；空列表表示 fail closed。

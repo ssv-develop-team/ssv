@@ -402,7 +402,7 @@ private:
             return;
         const auto pts = GST_BUFFER_PTS(buffer);
         const auto update = timeline_->on_buffer(
-            pts,
+            GST_BUFFER_DTS(buffer),
             GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT));
         if (pts == GST_CLOCK_TIME_NONE)
             return;
@@ -478,10 +478,34 @@ private:
         }
 
         if (metadata.generation) {
-            metadata.source_pts_start = first.pts;
-            if (last.duration != GST_CLOCK_TIME_NONE
-                && last.pts <= GST_CLOCK_TIME_NONE - last.duration) {
-                metadata.source_pts_end = last.pts + last.duration;
+            metadata.source_pts_start = std::min_element(
+                observations.begin(), observations.end(),
+                [](const auto &left, const auto &right) {
+                    return left.pts < right.pts;
+                })->pts;
+            for (const auto &observation : observations) {
+                if (observation.duration == GST_CLOCK_TIME_NONE
+                    || observation.pts
+                        >= GST_CLOCK_TIME_NONE - observation.duration) {
+                    metadata.source_pts_end.reset();
+                    break;
+                }
+                metadata.source_pts_end = std::max(
+                    metadata.source_pts_end.value_or(0),
+                    observation.pts + observation.duration);
+            }
+            if (bounds.end) {
+                std::lock_guard<std::mutex> lock(observation_mutex_);
+                const auto boundary = std::find_if(
+                    observations_.begin(), observations_.end(),
+                    [&](const auto &observation) {
+                        return observation.running_time == *bounds.end
+                            && observation.generation == *metadata.generation;
+                    });
+                if (boundary != observations_.end()
+                    && boundary->pts > *metadata.source_pts_start) {
+                    metadata.source_pts_end = boundary->pts;
+                }
             }
         }
         metadata.wall_clock_start_ms = first.wall_clock_ms;

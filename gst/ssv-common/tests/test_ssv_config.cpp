@@ -353,6 +353,9 @@ sources:
       rule_version: "v1"
       rule_facts: {}
 agent:
+  web:
+    host: "127.0.0.1"
+    port: 8765
   event_db_path: "data/custom-events.db"
   reporting:
     enabled: true
@@ -364,7 +367,8 @@ agent:
     embedding_base_url: "http://127.0.0.1:8080/v1"
     query_text_type: "query"
 )yaml");
-    static_cast<void>(ssv::ssv_config_load(valid_path.string()));
+    const auto config = ssv::ssv_config_load(valid_path.string());
+    assert(config.sources.front().id == "camera-01");
 
     const auto empty_query_path = environment.write(
         "empty-query-text-type.yaml", R"yaml(
@@ -419,6 +423,28 @@ agent:
   reporting: {}
 )yaml");
     static_cast<void>(ssv::ssv_config_load(omitted_path.string()));
+
+    expect_config_error(
+        R"yaml(version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    wvp_channel_id: "34020000001320000001"
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "sources[0].wvp_channel_id");
+
+    expect_config_error(
+        R"yaml(version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  web:
+    host: "  "
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "agent.web.host");
 }
 
 void test_rejects_invalid_reporting_worker_settings()
@@ -1403,6 +1429,39 @@ agent:
         "evidence_cache.directory");
 }
 
+void test_allows_empty_evidence_roots_with_default_cache()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("empty-evidence-roots.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  evidence_roots: []
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+
+    assert(config.evidence_cache.directory == "/var/lib/ssv/evidence-cache");
+}
+
+void test_rejects_custom_cache_with_empty_evidence_roots()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+evidence_cache:
+  directory: "/tmp/ssv-evidence-cache"
+agent:
+  evidence_roots: []
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "agent.evidence_roots");
+}
+
 void test_rejects_invalid_recording_evidence_episode_settings()
 {
     const std::string_view common = R"yaml(
@@ -2116,6 +2175,8 @@ int main(int argc, char **argv)
     test_rejects_removed_recording_evidence_enabled_key();
     test_rejects_removed_evidence_cache_enabled_key();
     test_rejects_recording_evidence_cache_outside_root();
+    test_allows_empty_evidence_roots_with_default_cache();
+    test_rejects_custom_cache_with_empty_evidence_roots();
     test_rejects_invalid_recording_evidence_episode_settings();
     test_rejects_recording_evidence_wrong_type();
     test_rejects_invalid_recording_evidence_worker_settings();

@@ -50,7 +50,7 @@ uv run python -m ssv_agent
 
 ## 主运行配置
 
-Agent 读取与 runner 共用的 `config/ssv.yaml`，拥有其中的 `version`、`logging`、`redis`、最小化的 `sources`（仅 `id`/`uri`）和 `agent` 配置段；复制模板：
+Agent 读取与 runner 共用的 `config/ssv.yaml`，拥有其中的 `version`、`logging`、`redis`、最小化的 `sources`（`id`、`uri`）和 `agent` 配置段；复制模板：
 
 ```bash
 cp config/ssv.example.yaml config/ssv.yaml
@@ -108,11 +108,67 @@ agent:
 
 报告与复核 JSON 写入 `agent.output_dir` 指向的 outputs root，按事件分目录并以内容寻址，重试产生相同内容时复用同一路径，不同内容不会覆盖既有 artifact。正文包含账本事件事实、复核结论、claims、规则引用和 evidence IDs，不暴露宿主机证据路径。`get_event.reports` 可以查询已登记报告的安全元数据；Review Agent 可调用只读 `get_report(event_id, review_id?)` 获取指定或最新报告的正文、当前 DeerFlow thread outputs 中的 Markdown 虚拟路径，以及可交给 `evidence_reader` 的 `event_id/evidence_id` 引用。读取时重新校验文件在 outputs root 内及内容 SHA-256，缺失或被篡改时返回不可用，不泄露宿主机路径。当前没有 HTTP 报告 API、PDF、历史回填或 artifact 自动清理；部署方需自行管理输出目录的长期保留。
 
-`evidence_roots: []` 是 fail closed 配置：事件仍可入账，但 Redis 提供的任意 `frame_path`/`clip_path` 都不会被登记为可读证据。证据根必须是绝对路径，解析后的 symlink 也不能越界。
+`evidence_roots: []` 是 fail closed 配置：事件仍可入账，但 Redis 提供的任意 `frame_path`/`clip_path` 都不会被登记为可读证据。证据根必须是绝对路径，解析后的 symlink 也不能越界。空列表时，runner 仍可使用默认 evidence cache；这不会把该目录加入 Agent 的证据允许根。
+
+## 只读 Web API
+
+Web API 独立读取 SQLite EventLedger，不启动 Redis consumer 或 Agent worker。事件中的 `source`
+是 SSV 配置的 `sources[].id`，用于标识 SSV 输入源；它不表示 WVP 通道编码。若 WVP 页面需要
+关联通道，由 WVP 适配层或 BFF 维护映射，不要求普通 SSV 部署在共享 source 配置中填写 WVP 字段。
+
+可在两个终端分别运行：
+
+```bash
+./ssv agent --config config/ssv.yaml
+```
+
+```bash
+cd agent
+uv run python -m ssv_agent web --config ../config/ssv.yaml
+```
+
+监听地址由 `agent.web.host` 和 `agent.web.port` 控制，默认 `127.0.0.1:8765`。Web API 不负责提供
+WVP 通道目录；事件查询通过 `query` 对 event ID、source 和 event type 做文本子串搜索，并支持
+工作流状态和分页：
+
+```http
+GET /api/v1/events?query=camera-01&status=pending&page=1&page_size=20
+```
+
+事件摘要保留原始 `source`，并返回工作流状态和 Agent 持久任务状态：
+
+```json
+{
+  "event_id": "event-123",
+  "source": "camera-01",
+  "status": "pending",
+  "analysis_task": {"kind": "review", "state": "queued"}
+}
+```
+
+工作流 `status` 的含义如下：
+
+- `pending`：事件已入账，事件流程尚未结束；不表示 worker 当前正在执行。
+- `manual_review`：自动取证失败，或只保留锚点证据而未创建自动复核任务，需要人工跟进。
+- `completed`：复核结果已持久化；不表示结论一定合规，也不表示人工已经处理。
+
+`analysis_task` 来自 SQLite `durable_jobs` 中最近的 `review` 或 `evidence_extract` 任务：`waiting` 表示
+`available_at_ms` 尚未到，可能在等待首轮取证的 post-roll 窗口或失败后的退避时间；`queued` 表示已到可领取时间；
+`processing` 表示账本中有未过期租约；`lease_expired` 表示租约已过期；`completed` 和 `failed` 分别对应任务完成
+和进入 dead 状态。若没有匹配任务但已有复核 revision 或事件状态为 `completed`，返回 `review/completed`；其他
+未安排这些任务的事件返回 `kind: null, state: not_scheduled`。`processing` 反映持久任务租约，不保证某个操作系统线程
+此刻仍在工作。
+
+当前 EventLedger 和 Web API 只包含历史事件、复核结论及 Agent 持久任务状态，不提供 SSV 实时推理帧、当前运行阶段
+或逐帧检测状态。若页面中的“当前分析”指实时推理，后端还需要 runner 侧的运行状态/遥测接口；WVP 通道关联由外部
+适配层提供，不属于共享 SSV 配置。
+
+只读 Web 服务使用 SQLite `mode=ro`，不执行迁移、不读取 Redis，也不接受客户端文件路径。图片仍通过事件 ID 与证据 ID
+的账本关联读取。
 
 ## 录像上下文证据
 
-启用 `agent.recording_evidence` 后，Agent 只从 SSV GStreamer pipeline 的短时 cache 读取事件上下文，生成一个 clip 和三张帧，取证完成后才创建视觉复核任务。这里不再配置取证 provider，也不读取外部录像服务的目录。
+启用 `agent.recording_evidence` 后，Agent 只从 SSV GStreamer pipeline 的短时 cache 读取事件上下文。完整窗口生成一个 clip 和三张帧，取证完成后才创建视觉复核任务；完整窗口缺失且重试耗尽时，同代际有效分段若覆盖事件锚点，可降级留存一张附近图片并保持 `manual_review`，不创建自动复核任务。这里不再配置取证 provider，也不读取外部录像服务的目录。
 
 ### SSV cache 取证
 
@@ -137,13 +193,13 @@ agent:
     max_episode_ms: 30000
 ```
 
-`evidence_cache.directory` 必须是绝对路径，并且在 `agent.evidence_roots` 的某个根目录内；否则 Agent 拒绝启动。证据缓存和录像取证始终启用。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
+`evidence_cache.directory` 必须是绝对路径。`agent.evidence_roots` 非空时，缓存目录必须位于允许根内；列表为空时，只接受默认 `/var/lib/ssv/evidence-cache` 根目录本身或其子目录。这个默认目录例外只允许 runner 创建短时缓存，不会开放 Agent 读取 Redis 任意路径或发布派生证据。证据缓存和录像取证始终启用。runner 为每个 source 创建独立目录，分段和 sidecar 只有在分段完整关闭且元数据包含同一 `stream_generation`、`source_pts_start`、`source_pts_end` 时才可被 Agent 使用。Agent 通过临时目录和原子 rename 发布派生证据，读取中的分段不会被当作完整窗口。
 
 取证 worker 选中完整窗口后，会先在事件临时目录获取所有 MP4 输入：同一文件系统优先建立硬链接，跨文件系统时复制已 finalized 文件，然后才把临时路径交给 ffmpeg。获取完成后 runner 可以删除原缓存文件名，临时输入仍会保持到本次取证结束；取证成功或失败都会清理临时输入。这个保护只覆盖已经成功获取的分片，不是事件级缓存豁免。分片在获取前被清理时，worker 会按重试策略等待下一次机会，重试耗尽后进入 `manual_review`。
 
 缓存只保留 `retention_ms` 内的分段，并受 `max_bytes_mb` 限制；它不是长期录像。缓存运行中的分段收尾或 sidecar 写入失败时，runner 的解码、检测、跟踪和 Redis 发布仍继续；Agent 会按 worker 重试策略等待窗口，最终失败则进入 `manual_review`。首次启动时若缓存目录无法创建或 GStreamer 能力缺失，runner 会报告 capability failure 并拒绝启动，避免启用后静默丢失全部证据。
 
-`recording_evidence` 使用持久 Worker 的轮询、lease 和重试参数接口，但没有启停开关。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，默认重试间隔为 2 秒；这些值可以在 `recording_evidence` 下单独调整。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
+`recording_evidence` 使用持久 Worker 的轮询、lease 和重试参数接口，但没有启停开关。录像取证默认轮询 1 秒、lease 30 秒、最多重试 3 次，配置的默认重试间隔为 2 秒；实际重试间隔取 `recording_evidence.retry_delay_ms` 与 `evidence_cache.segment_duration_ms` 中的较大值，避免缓存分段尚未 finalized 就耗尽重试。窗口字段只控制录像上下文范围，不再承担 Worker 调度配置。
 
 Agent 不再为每一条重复检测单独取证。相同 source、事件规则和 `stream_generation` 内，
 相邻 `source_pts` 观测会合并为一个 episode；`merge_gap_ms` 控制可合并间隔，
@@ -162,7 +218,7 @@ Episode；明确结束事件或后续超时会冻结窗口。
 事件时间点的 `T-1000ms`、`T`、`T+1000ms`；episode 元数据和冻结窗口会随 `get_event` 的
 可读投影返回。`timestamp_ms` 只用于等待 post-roll，不替代媒体 PTS。
 
-SSV cache 分段由 `retention_ms` 和 `max_bytes_mb` 控制清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。WVP、NVR 或 MediaMTX 可以继续承担长期录像和历史回放，但 Agent 不再适配它们的录像目录。窗口缺段、缓存尚未就绪或达到重试上限时，事件状态进入 `manual_review`，不创建无图 review job；人工复核应据此判断证据不可用，不能将失败当作“没有目标”结论。Episode 只收敛事件生命周期和取证窗口，不控制 GStreamer cache 的连续写盘。
+SSV cache 分段由 `retention_ms` 和 `max_bytes_mb` 控制清理；Agent 派生的 clip、帧和 manifest 不在本阶段自动删除，需由部署方制定长期保留策略。WVP、NVR 或 MediaMTX 可以继续承担长期录像和历史回放，但 Agent 不再适配它们的录像目录。完整窗口缺段、缓存尚未就绪或达到重试上限时，不会把缩短片段登记为完整证据。若锚点所在的 finalized 分段可用，Worker 仅登记一张 `coverage=anchor_only` 图片，事件保持 `manual_review`，不创建自动 review job；锚点也缺失时仍是无证据人工复核。人工复核不能将失败当作“没有目标”结论。Episode 只收敛事件生命周期和取证窗口，不控制 GStreamer cache 的连续写盘。
 
 ### 复核阶段的粗采样与精采样
 

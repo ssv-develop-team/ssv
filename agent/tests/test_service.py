@@ -297,8 +297,42 @@ def test_recording_factory_receives_config_and_builtin_consumer_ledger_factory()
     worker_args = observed["worker"]
     assert worker_args["lease_ms"] == cfg.agent.recording_evidence.lease_ms == 5_000
     assert worker_args["max_retries"] == cfg.agent.recording_evidence.max_retries == 4
-    assert worker_args["retry_delay_ms"] == cfg.agent.recording_evidence.retry_delay_ms == 2_000
+    assert worker_args["retry_delay_ms"] == cfg.evidence_cache.segment_duration_ms == 10_000
+    assert cfg.agent.recording_evidence.retry_delay_ms == 2_000
     assert worker_args["poll_interval_seconds"] == 0.25
+
+
+def test_recording_factory_preserves_longer_explicit_retry_delay(tmp_path: Path) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeWorker:
+        def run(self, stopping: Event) -> None:
+            stopping.wait()
+
+    cfg = SsvConfig.model_validate({
+        "sources": [{"id": "camera-1", "uri": "rtsp://host/stream"}],
+        "evidence_cache": {
+            "directory": str(tmp_path), "segment_duration_ms": 2_000,
+        },
+        "agent": {
+            "evidence_roots": [str(tmp_path)],
+            "recording_evidence": {"retry_delay_ms": 5_000},
+            "reporting": {"enabled": False},
+        },
+    })
+
+    def worker_factory(**kwargs):
+        observed.update(kwargs)
+        return FakeWorker()
+
+    runtime = service.AgentService(
+        cfg,
+        recording_evidence_worker_factory=worker_factory,
+        evidence_extractor_factory=lambda **_: object(),
+    )
+    runtime._start_recording_evidence_worker()
+    runtime.stop(join_timeout_seconds=1)
+    assert observed["retry_delay_ms"] == 5_000
 
 
 def test_evidence_extractor_factory_receives_shared_cache_config(tmp_path: Path) -> None:
@@ -337,8 +371,9 @@ def test_evidence_extractor_factory_receives_shared_cache_config(tmp_path: Path)
 def test_builtin_consumer_factory_receives_recording_ledger(monkeypatch) -> None:
     observed: dict[str, object] = {}
     class FakeConsumer:
-        def __init__(self, config, ledger_factory=None):
+        def __init__(self, config, ledger_factory=None, episode_aggregator=None):
             observed["ledger_factory"] = ledger_factory
+            observed["episode_aggregator"] = episode_aggregator
         def start(self): return None
         def stop(self): return None
     monkeypatch.setattr(service, "EventConsumer", FakeConsumer)
@@ -349,6 +384,7 @@ def test_builtin_consumer_factory_receives_recording_ledger(monkeypatch) -> None
     runtime.start()
     runtime.stop(join_timeout_seconds=1)
     assert callable(observed["ledger_factory"])
+    assert observed["episode_aggregator"] is not None
 
 
 def test_review_client_is_constructed_with_only_read_only_event_tools() -> None:
@@ -598,6 +634,7 @@ def test_indexing_uses_same_embedding_settings_as_search_environment(monkeypatch
     monkeypatch.delenv("SSV_KNOWLEDGE_MIN_SCORE", raising=False)
     cfg = SsvConfig.model_validate(
         {
+            "evidence_cache": {"directory": "/configured/evidence"},
             "agent": {
                 "evidence_roots": ["/configured/evidence"],
                 "indexing": {

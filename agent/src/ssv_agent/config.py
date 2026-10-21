@@ -81,10 +81,24 @@ class ReportWorkerConfig(WorkerConfig):
 
 
 class AgentSourceConfig(_StrictConfigModel):
-    """Agent 所需的 source 标识和录像路径来源。"""
+    """Agent 所需的 source 身份和录像路径来源。"""
 
     id: str = Field(min_length=1)
     uri: str = Field(min_length=1)
+
+
+class AgentWebConfig(_StrictConfigModel):
+    """独立只读 Web API 的监听地址。"""
+
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: int = Field(default=8765, ge=1, le=65535)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("agent.web.host must not be blank")
+        return value
 
 
 class RecordingEvidenceConfig(PollingWorkerConfig):
@@ -153,6 +167,7 @@ class AgentConfig(_StrictConfigModel):
     event_db_path: str = Field(default="data/events.db", min_length=1)
     output_dir: str = Field(default="outputs", min_length=1)
     evidence_roots: list[str] = Field(default_factory=lambda: [_DEFAULT_EVIDENCE_DIRECTORY])
+    web: AgentWebConfig = Field(default_factory=AgentWebConfig)
     dedup_enabled: bool = True
     dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
     review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
@@ -190,10 +205,13 @@ class SsvConfig(_StrictConfigModel):
                 raise ValueError(f"unknown configuration key: {key}")
 
         # The Agent owns only these sections. Runner-only source fields are not part of
-        # the Agent config contract, so retain only the identity and RTSP URI it needs.
+        # the Agent config contract, so retain only source identity and RTSP URI.
         agent_config = {key: item for key, item in value.items() if key in _AGENT_CONFIG_KEYS}
         sources = value.get("sources")
         if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict) and "wvp_channel_id" in source:
+                    raise ValueError("unknown configuration key: sources[].wvp_channel_id")
             agent_config["sources"] = [
                 {key: source.get(key) for key in ("id", "uri")}
                 if isinstance(source, dict)
@@ -204,9 +222,14 @@ class SsvConfig(_StrictConfigModel):
 
     @model_validator(mode="after")
     def validate_recording_evidence_cache(self) -> Self:
-        if not self.agent.evidence_roots:
-            raise ValueError("recording_evidence requires non-empty evidence_roots")
         cache_directory = Path(self.evidence_cache.directory).resolve(strict=False)
+        if not self.agent.evidence_roots:
+            default_root = Path(_DEFAULT_EVIDENCE_DIRECTORY).resolve(strict=False)
+            if cache_directory == default_root or default_root in cache_directory.parents:
+                return self
+            raise ValueError(
+                "custom evidence_cache.directory requires matching agent.evidence_roots"
+            )
         allowed = any(
             cache_directory == root or root in cache_directory.parents
             for root in (Path(item).resolve(strict=False) for item in self.agent.evidence_roots)
@@ -215,6 +238,13 @@ class SsvConfig(_StrictConfigModel):
             raise ValueError(
                 "recording_evidence requires evidence_cache.directory inside evidence_roots"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_source_ids(self) -> Self:
+        source_ids = [source.id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("sources[].id values must be unique")
         return self
 
 
