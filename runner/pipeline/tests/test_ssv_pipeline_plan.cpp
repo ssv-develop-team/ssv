@@ -317,11 +317,11 @@ void test_rtsp_hardware_codec_pair_is_bound_to_the_decode_device()
     assert(plan.codec.encode->device.value == "/dev/dri/renderD129");
     assert(plan.codec.encode->encoder_factory == "varenderD129h264enc");
     assert(plan.codec.encode->input_memory == ssv::SsvMemoryKind::VaMemory);
-    assert(plan.expected_caps.display_encode_input
+    assert((plan.expected_caps.display_encode_input
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::Nv12,
             ssv::SsvMemoryKind::VaMemory,
-        });
+        }));
 }
 
 void test_rtsp_auto_hardware_codec_pair_uses_default_device()
@@ -379,11 +379,11 @@ void test_rtsp_missing_hardware_encoder_keeps_hardware_decode_as_mixed()
     assert(plan.codec.fallbacks.front().from
         == ssv::SsvCodecPath::HardwarePair);
     assert(plan.codec.fallbacks.front().to == ssv::SsvCodecPath::Mixed);
-    assert(plan.expected_caps.display_encode_input
+    assert((plan.expected_caps.display_encode_input
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::I420,
             ssv::SsvMemoryKind::SystemMemory,
-        });
+        }));
 }
 
 void test_rtsp_cuda_codec_pair_uses_one_cuda_device()
@@ -440,16 +440,16 @@ void test_rtsp_overlay_forces_system_memory_mixed_path()
     assert(plan.codec.path == ssv::SsvCodecPath::Mixed);
     assert(plan.codec.encode->backend == ssv::SsvEncodeBackend::Software);
     assert(plan.codec.encode->encoder_factory == "openh264enc");
-    assert(plan.expected_caps.display_overlay_input
+    assert((plan.expected_caps.display_overlay_input
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::Bgrx,
             ssv::SsvMemoryKind::SystemMemory,
-        });
-    assert(plan.expected_caps.display_encode_input
+        }));
+    assert((plan.expected_caps.display_encode_input
         == ssv::SsvVideoCaps {
             ssv::SsvPixelFormat::I420,
             ssv::SsvMemoryKind::SystemMemory,
-        });
+        }));
 }
 
 void test_inference_plan_is_independent_from_codec_plan()
@@ -468,11 +468,11 @@ void test_inference_plan_is_independent_from_codec_plan()
 
     assert(plan.inference.backend
         == ssv::SsvInferenceBackend::OnnxRuntime);
-    assert(plan.inference.available_providers
+    assert((plan.inference.available_providers
         == std::vector<ssv::SsvProvider> {
             ssv::SsvProvider::OpenVino,
             ssv::SsvProvider::Cpu,
-        });
+        }));
     assert(plan.codec.path == ssv::SsvCodecPath::DecodeOnly);
     assert(plan.codec.encode == std::nullopt);
 }
