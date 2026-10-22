@@ -2,6 +2,9 @@
 
 from ssv_agent.event_store.schema import EventQuery
 from ssv_agent.event_store.ledger import (
+    ArtifactKind,
+    ArtifactRecord,
+    ArtifactUploadJob,
     DurableJob,
     EpisodeCloseReason,
     EpisodeIngestOutcome,
@@ -17,10 +20,15 @@ from ssv_agent.event_store.ledger import (
     ReportRecord,
     RecordOutcome,
     ReviewRecord,
+    StagedArtifact,
+    StorageBackend,
 )
 from ssv_agent.event_store.sqlite_store import SsvEventStore
 
 __all__ = [
+    "ArtifactKind",
+    "ArtifactRecord",
+    "ArtifactUploadJob",
     "DurableJob",
     "EpisodeCloseReason",
     "EpisodeIngestOutcome",
@@ -38,4 +46,6 @@ __all__ = [
     "RecordOutcome",
     "ReviewRecord",
     "SsvEventStore",
+    "StagedArtifact",
+    "StorageBackend",
 ]

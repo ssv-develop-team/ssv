@@ -217,3 +217,67 @@ def test_evidence_reader_copies_all_registered_context_frames_and_clip(
         item["virtual_path"].startswith(f"{VIRTUAL_PATH_PREFIX}/outputs/")
         for item in payload["found"]
     )
+
+
+def test_evidence_reader_uses_registered_image_artifact_after_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import io
+    from contextlib import contextmanager
+
+    from ssv_agent.config import ArtifactStorageConfig
+
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "secret")
+    storage = ArtifactStorageConfig(backend="minio")
+    db_path = tmp_path / "events.db"
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_EVENT_DB_PATH", str(db_path))
+    monkeypatch.setenv("SSV_EVIDENCE_ROOTS", json.dumps([str(tmp_path)]))
+    _fake_thread_data(monkeypatch, tmp_path)
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"png-bytes")
+
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(tmp_path)],
+        artifact_storage=storage,
+        outputs_dir=outputs,
+    ) as ledger:
+        ledger.record(
+            ReviewContext(
+                event_id="case-1",
+                source="camera-1",
+                timestamp_ms=1000,
+                frame_id=1,
+                frame_path=str(frame),
+            )
+        )
+        case = ledger.get_case("case-1")
+        assert case is not None
+        evidence_id = case.evidence[0].evidence_id
+        artifact = ledger.get_artifact_for_evidence("case-1", evidence_id)
+        assert artifact is not None and artifact.staging_path is not None
+        Path(artifact.staging_path).unlink()
+        job = ledger.claim_artifact_upload_job("uploader", lease_ms=30_000)
+        assert job is not None
+        ledger.complete_artifact_upload_job(job, "uploader")
+        ledger.mark_artifact_cleaned(artifact.artifact_id)
+
+    class FakeReader:
+        @contextmanager
+        def open(self, artifact_id: str):
+            yield io.BytesIO(b"png-bytes")
+
+    monkeypatch.setattr(
+        "ssv_agent.tools.evidence_reader.create_artifact_reader",
+        lambda _ledger, _config: FakeReader(),
+    )
+
+    payload = json.loads(evidence_reader_tool.func(None, "case-1"))
+
+    assert payload["available"] is True
+    assert payload["found"][0]["evidence_id"] == evidence_id
+    copied = Path(payload["view_image_path"].replace(f"{VIRTUAL_PATH_PREFIX}/outputs/", ""))
+    assert (tmp_path / "outputs" / copied).read_bytes() == b"png-bytes"

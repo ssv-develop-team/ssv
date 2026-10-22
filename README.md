@@ -81,12 +81,16 @@ cp config/ssv.example.yaml config/ssv.yaml
 
 `--profile` 可选 `auto`、`cpu`、`nvidia`、`intel`、`amd`；选择规则和依赖来源见 [依赖与构建](docs/依赖与构建.md)。
 
-### 4. 启动 Redis、Qdrant 并运行
+### 4. 启动 Redis、Qdrant、MinIO 并运行
 
 ```bash
+cp docker/.env.example docker/.env
+# 填写 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD，并把 SSV_MINIO_ACCESS_KEY / SSV_MINIO_SECRET_KEY 设为相同值
 ./ssv infra start
 ./ssv run --headless
 ```
+
+`./ssv infra start` 同时启动 Redis、Qdrant 和 MinIO；Agent 首次上传时会自动创建私有 bucket。正常 `stop` 保留 MinIO 数据卷。MinIO 镜像默认从 `ghcr.io/ssv-develop-team/ssv-minio` 拉取；无法访问镜像仓库时会使用仓库内 `docker/minio/Dockerfile` 在本地构建（首次构建需要网络）。MinIO 默认只监听 `127.0.0.1:9000`（S3 API）和 `127.0.0.1:9001`（控制台）。
 
 有桌面会话时可运行：
 

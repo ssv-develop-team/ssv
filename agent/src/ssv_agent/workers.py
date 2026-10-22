@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import os
+import shutil
+import tempfile
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -12,7 +16,16 @@ from time import monotonic
 
 import structlog
 
-from ssv_agent.event_store import DurableJob, EventLedger, JobKind, LeaseLostError
+from ssv_agent.event_store import (
+    ArtifactKind,
+    DurableJob,
+    EventCase,
+    EventLedger,
+    JobKind,
+    LeaseLostError,
+    StagedArtifact,
+)
+from ssv_agent.artifact_storage import ArtifactObjectStore, ArtifactReader, ArtifactStorageError
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
 from ssv_agent.embedding.provider import EmbeddingProvider
 from ssv_agent.evidence_provider import (
@@ -44,7 +57,7 @@ logger = structlog.get_logger()
 
 LedgerFactory = Callable[[], EventLedger]
 ReviewRunner = Callable[[ReviewContext], str]
-ResultWriter = Callable[[str, ReviewResult], Path]
+ResultWriter = Callable[..., Path]
 QdrantFactory = Callable[[], SsvQdrantStore]
 
 
@@ -205,6 +218,8 @@ def _evidence_failure_reason(exc: Exception) -> str:
 
 def _failure_details(exc: Exception) -> tuple[str, str]:
     """返回稳定错误码和脱敏用户消息，原始诊断不进入 Web 字段。"""
+    if isinstance(exc, ArtifactStorageError):
+        return "evidence_unavailable", "证据暂不可用，请稍后重试。"
     if isinstance(exc, ModelCallError):
         return exc.code, exc.user_message
     if isinstance(exc, ResultParseError):
@@ -269,7 +284,7 @@ class _PollingWorker:
         *,
         worker_id: str,
         poll_interval_seconds: float,
-        job_kind: JobKind,
+        job_kind: JobKind | str,
     ) -> None:
         self._worker_id = worker_id
         self._poll_interval_seconds = poll_interval_seconds
@@ -288,7 +303,7 @@ class _PollingWorker:
                 logger.warning(
                     "durable worker run_once failed",
                     worker_id=self._worker_id,
-                    job_kind=self._job_kind.value,
+                    job_kind=getattr(self._job_kind, "value", self._job_kind),
                     error=self._poll_error(exc),
                 )
                 stopping.wait(self._poll_interval_seconds)
@@ -317,6 +332,7 @@ class ReviewWorker(_PollingWorker):
         model_id: str | None = None,
         result_writer: ResultWriter = write_result_json,
         rule_retriever: Retriever | None = None,
+        artifact_store: ArtifactObjectStore | None = None,
     ) -> None:
         super().__init__(
             worker_id=worker_id,
@@ -332,6 +348,7 @@ class ReviewWorker(_PollingWorker):
         self._model_id = model_id
         self._result_writer = result_writer
         self._rule_retriever = rule_retriever
+        self._artifact_store = artifact_store
 
     def run_once(self) -> bool:
         """最多处理一条工作；无可领任务时返回 ``False``。"""
@@ -340,6 +357,10 @@ class ReviewWorker(_PollingWorker):
             if job is None:
                 return False
             heartbeat: _LeaseHeartbeat | None = None
+            def _release_nothing() -> None:
+                return None
+
+            release_frame: Callable[[], None] = _release_nothing
             try:
                 if _mark_exhausted_attempt_dead(
                     ledger,
@@ -364,7 +385,7 @@ class ReviewWorker(_PollingWorker):
                 )
                 heartbeat.start()
                 heartbeat.checkpoint()
-                review_context = case.to_review_context()
+                review_context, release_frame = self._review_context(ledger, case)
                 rule_context = None
                 if self._rule_retriever is not None:
                     query = build_rule_query(case)
@@ -404,8 +425,12 @@ class ReviewWorker(_PollingWorker):
                         text = self._runner(review_context)
                 except ModelCallError:
                     raise
+                except ArtifactStorageError:
+                    raise
                 except Exception as exc:
                     raise classify_model_error(exc) from exc
+                finally:
+                    release_frame()
                 if not isinstance(text, str) or not text.strip():
                     raise ModelCallError(
                         "model_no_response",
@@ -417,15 +442,34 @@ class ReviewWorker(_PollingWorker):
                     result = validate_rule_citations(result, rule_context)
                 result = self._add_provenance(result)
                 heartbeat.checkpoint()
-                result_path = self._result_writer(case.event_id, result)
+                artifact_id = uuid.uuid4().hex if ledger.staging_enabled else None
+                if artifact_id is not None:
+                    result_path = self._result_writer(
+                        case.event_id, result, artifact_id=artifact_id
+                    )
+                else:
+                    result_path = self._result_writer(case.event_id, result)
                 heartbeat.checkpoint()
                 heartbeat.stop_and_join()
                 heartbeat.checkpoint()
+                staged = None
+                if artifact_id is not None:
+                    content = Path(result_path).read_bytes()
+                    staged = StagedArtifact(
+                        artifact_id=artifact_id,
+                        event_id=case.event_id,
+                        kind=ArtifactKind.REVIEW_JSON,
+                        path=str(result_path),
+                        sha256=hashlib.sha256(content).hexdigest(),
+                        size_bytes=len(content),
+                        mime_type="application/json",
+                    )
                 ledger.complete_review_job(
                     job,
                     self._worker_id,
                     result,
                     str(result_path),
+                    staged=staged,
                 )
                 logger.info(
                     "review job completed",
@@ -470,8 +514,55 @@ class ReviewWorker(_PollingWorker):
                         error_type=type(exc).__name__,
                     )
             finally:
+                release_frame()
                 _stop_heartbeat(heartbeat)
             return True
+
+    def _review_context(
+        self,
+        ledger: EventLedger,
+        case: EventCase,
+    ) -> tuple[ReviewContext, Callable[[], None]]:
+        """需要本地图片时，通过读取边界创建本次复核持有的工作副本。"""
+        evidence = getattr(case, "evidence", ())
+        frame = next(
+            (
+                item
+                for item in evidence
+                if item.kind == "frame" and item.artifact_id is not None
+            ),
+            None,
+        )
+        if frame is None or self._artifact_store is None:
+            return case.to_review_context(), lambda: None
+
+        outputs_root = Path(os.getenv("SSV_OUTPUTS_DIR", "outputs")).resolve(strict=False)
+        roots = (outputs_root, *ledger.evidence_roots)
+        reader = ArtifactReader(
+            ledger,
+            self._artifact_store,
+            staging_roots=roots,
+            legacy_roots=roots,
+        )
+        suffix = Path(frame.path).suffix or ".jpg"
+        handle = tempfile.NamedTemporaryFile(
+            mode="w+b", prefix="ssv-review-frame-", suffix=suffix, delete=False
+        )
+        temporary = Path(handle.name)
+        try:
+            with reader.open(frame.artifact_id) as source:
+                shutil.copyfileobj(source, handle)
+            handle.flush()
+        except BaseException:
+            handle.close()
+            temporary.unlink(missing_ok=True)
+            raise
+        else:
+            handle.close()
+        return (
+            case.to_review_context(frame_path=str(temporary)),
+            lambda: temporary.unlink(missing_ok=True),
+        )
 
     def _add_provenance(self, result: ReviewResult) -> ReviewResult:
         updates: dict[str, str] = {}
@@ -794,15 +885,38 @@ class ReportWorker(_PollingWorker):
                 heartbeat.start()
                 heartbeat.checkpoint()
                 markdown = render_analysis_report(case, review)
-                artifact = write_analysis_report(job.entity_id, review.review_id, markdown)
+                artifact_id = uuid.uuid4().hex if ledger.staging_enabled else None
+                if artifact_id is not None:
+                    artifact = write_analysis_report(
+                        job.entity_id,
+                        review.review_id,
+                        markdown,
+                        artifact_id=artifact_id,
+                    )
+                else:
+                    artifact = write_analysis_report(
+                        job.entity_id, review.review_id, markdown
+                    )
                 heartbeat.checkpoint()
                 heartbeat.stop_and_join()
                 heartbeat.checkpoint()
+                staged = None
+                if artifact_id is not None:
+                    staged = StagedArtifact(
+                        artifact_id=artifact_id,
+                        event_id=job.entity_id,
+                        kind=ArtifactKind.REPORT_MARKDOWN,
+                        path=str(artifact.path),
+                        sha256=artifact.sha256,
+                        size_bytes=artifact.size_bytes,
+                        mime_type="text/markdown",
+                    )
                 ledger.complete_report_job(
                     job,
                     self._worker_id,
                     artifact,
                     REPORT_TEMPLATE_VERSION,
+                    staged=staged,
                 )
                 logger.info(
                     "report job completed",

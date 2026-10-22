@@ -8,7 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 import ssv_agent.event_store.ledger as ledger_module
-from ssv_agent.event_store import EventLedger, JobKind, LeaseLostError
+from ssv_agent.event_store import (
+    ArtifactKind,
+    EventLedger,
+    JobKind,
+    JobState,
+    LeaseLostError,
+    StagedArtifact,
+)
 from ssv_agent.config import RecordingEvidenceConfig
 from ssv_agent.evidence_provider import EvidenceArtifact
 from ssv_agent.result import ReviewResult
@@ -158,6 +165,8 @@ def test_schema_migration_preserves_legacy_review_and_index_jobs(tmp_path: Path)
         legacy_review = ledger.get_review_record("legacy", 1)
         assert legacy_review is not None
         assert legacy_review.rule_citations == ()
+        assert legacy_review.artifact_id is None
+        assert ledger.list_artifacts() == ()
         ledger.append_review(
             "evt-1",
             ReviewResult(
@@ -1115,3 +1124,242 @@ def test_complete_review_job_rejects_a_reference_when_the_registered_file_disapp
     assert unchanged is not None
     assert unchanged.revision == 0
     assert unchanged.review is None
+
+
+def test_artifact_schema_links_business_rows_and_uniquely_owns_staging(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "events.db"
+    with EventLedger(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert {"artifacts", "artifact_upload_jobs"} <= tables
+
+        for table in ("reviews", "reports", "evidence"):
+            columns = {
+                row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            assert "artifact_id" in columns
+
+        artifact_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(artifacts)")
+        }
+        assert {
+            "artifact_id",
+            "event_id",
+            "kind",
+            "storage_backend",
+            "bucket",
+            "object_key",
+            "sha256",
+            "size_bytes",
+            "mime_type",
+            "staging_path",
+            "created_ms",
+            "uploaded_ms",
+            "local_cleaned_ms",
+        } <= artifact_columns
+
+        indexes = {
+            row[1]: row[2]
+            for row in connection.execute("PRAGMA index_list(artifacts)")
+        }
+        assert any(
+            sql
+            and "STAGING_PATH" in sql.upper()
+            and "UNIQUE" in sql.upper()
+            for sql in (
+                connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (name,),
+                ).fetchone()[0]
+                for name in indexes
+            )
+        )
+
+
+def _staged_artifact(
+    artifact_id: str = "artifact-1",
+    kind: ArtifactKind = ArtifactKind.REVIEW_JSON,
+    path: str = "/tmp/outputs/staging/artifact-1/review.json",
+) -> StagedArtifact:
+    return StagedArtifact(
+        artifact_id=artifact_id,
+        event_id="evt-1",
+        kind=kind,
+        path=path,
+        sha256="a" * 64,
+        size_bytes=5,
+        mime_type="application/json",
+    )
+
+
+def _object_key(artifact_id: str, kind: str = "review_json") -> str:
+    return f"ssv/v1/events/event-token/{kind}/{artifact_id}/{'a' * 64}.json"
+
+
+def test_artifact_upload_claim_is_fenced_and_completion_sets_uploaded_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1_000]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        artifact = ledger.register_artifact(
+            _staged_artifact(), bucket="ssv-artifacts", object_key=_object_key("artifact-1")
+        )
+
+        first = ledger.claim_artifact_upload_job("worker-a", lease_ms=10)
+        assert first is not None
+        assert first.state is JobState.PROCESSING
+        assert first.attempts == 1
+
+        clock[0] += 11
+        second = ledger.claim_artifact_upload_job("worker-b", lease_ms=10_000)
+        assert second is not None
+        assert second.attempts > first.attempts
+
+        with pytest.raises(LeaseLostError):
+            ledger.complete_artifact_upload_job(first, "worker-a")
+
+        completed = ledger.complete_artifact_upload_job(second, "worker-b")
+        assert completed.artifact_id == artifact.artifact_id
+        assert completed.uploaded_ms == clock[0]
+        job = ledger.get_artifact_upload_job(artifact.artifact_id)
+        assert job is not None and job.state is JobState.COMPLETED
+        assert job.lease_owner is None
+
+
+def test_artifact_upload_renew_requires_live_lease(tmp_path: Path) -> None:
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        ledger.register_artifact(
+            _staged_artifact(), bucket="ssv-artifacts", object_key=_object_key("artifact-1")
+        )
+        job = ledger.claim_artifact_upload_job("worker-a", lease_ms=30_000)
+        assert job is not None
+
+        ledger.renew_artifact_upload_job(job, "worker-a", lease_ms=30_000)
+
+        with pytest.raises(LeaseLostError):
+            ledger.renew_artifact_upload_job(job, "worker-b", lease_ms=30_000)
+
+
+def test_artifact_upload_failure_dead_letter_and_dead_only_retry(tmp_path: Path) -> None:
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        ledger.register_artifact(
+            _staged_artifact(), bucket="ssv-artifacts", object_key=_object_key("artifact-1")
+        )
+        job = ledger.claim_artifact_upload_job("worker-a", lease_ms=30_000)
+        assert job is not None
+
+        state = ledger.fail_artifact_upload_job(
+            job,
+            "worker-a",
+            error="minio unavailable",
+            max_retries=1,
+            retry_delay_ms=0,
+            error_code="artifact_store_unavailable",
+        )
+        assert state is JobState.DEAD
+        failed = ledger.get_artifact_upload_job("artifact-1")
+        assert failed is not None and failed.state is JobState.DEAD
+        assert failed.error_code == "artifact_store_unavailable"
+
+        retried = ledger.retry_dead_artifact_upload("artifact-1")
+        assert retried.state is JobState.PENDING
+        assert retried.attempts == 0
+        assert retried.last_error is None
+
+        with pytest.raises(ValueError, match="dead"):
+            ledger.retry_dead_artifact_upload("artifact-1")
+
+
+def test_artifact_cleanup_is_registered_after_upload_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [5_000]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    with EventLedger(tmp_path / "events.db") as ledger:
+        ledger.record(_context())
+        artifact = ledger.register_artifact(
+            _staged_artifact(), bucket="ssv-artifacts", object_key=_object_key("artifact-1")
+        )
+        assert ledger.list_artifacts_pending_cleanup() == ()
+
+        job = ledger.claim_artifact_upload_job("worker-a", lease_ms=30_000)
+        assert job is not None
+        ledger.complete_artifact_upload_job(job, "worker-a")
+
+        pending = ledger.list_artifacts_pending_cleanup()
+        assert [item.artifact_id for item in pending] == [artifact.artifact_id]
+
+        clock[0] += 1
+        assert ledger.mark_artifact_cleaned(artifact.artifact_id) is True
+        cleaned = ledger.get_artifact(artifact.artifact_id)
+        assert cleaned is not None
+        assert cleaned.staging_path is None
+        assert cleaned.local_cleaned_ms == clock[0]
+        assert ledger.list_artifacts_pending_cleanup() == ()
+        assert ledger.mark_artifact_cleaned(artifact.artifact_id) is False
+
+
+def test_artifact_lookups_follow_business_associations(tmp_path: Path) -> None:
+    db_path = tmp_path / "events.db"
+    with EventLedger(db_path) as ledger:
+        ledger.record(_context())
+        ledger.append_review(
+            "evt-1",
+            ReviewResult(
+                verdict="uncertain",
+                confidence=0.4,
+                evidence_status="missing",
+                explanation="linked review",
+            ),
+            "outputs/evt-1/review.json",
+        )
+        review_artifact = ledger.register_artifact(
+            _staged_artifact("review-artifact"),
+            bucket="ssv-artifacts",
+            object_key=_object_key("review-artifact"),
+        )
+        frame_artifact = ledger.register_artifact(
+            _staged_artifact(
+                "frame-artifact",
+                kind=ArtifactKind.EVIDENCE_FRAME,
+                path="/tmp/outputs/staging/frame-artifact/frame.jpg",
+            ),
+            bucket="ssv-artifacts",
+            object_key=_object_key("frame-artifact", "evidence_frame"),
+        )
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE reviews SET artifact_id = ? WHERE event_id = 'evt-1' AND revision = 1",
+            (review_artifact.artifact_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO evidence (event_id, evidence_id, kind, path, mime_type, available,
+                size, sha256, coverage, artifact_id)
+            VALUES ('evt-1', 'evidence-1', 'frame', '/tmp/frame.jpg', 'image/jpeg', 1,
+                5, ?, 'exact_window', ?)
+            """,
+            ("a" * 64, frame_artifact.artifact_id),
+        )
+
+    with EventLedger(db_path) as ledger:
+        found_review = ledger.get_review_artifact("evt-1", revision=1)
+        assert found_review is not None
+        assert found_review.artifact_id == review_artifact.artifact_id
+        found_frame = ledger.get_artifact_for_evidence("evt-1", "evidence-1")
+        assert found_frame is not None
+        assert found_frame.artifact_id == frame_artifact.artifact_id
+        assert ledger.get_review_artifact("evt-1", revision=2) is None
+        assert ledger.get_artifact_for_evidence("evt-1", "missing") is None

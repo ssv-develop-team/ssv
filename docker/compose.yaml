@@ -22,9 +22,41 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
+  minio:
+    image: ${SSV_MINIO_IMAGE:-ghcr.io/ssv-develop-team/ssv-minio:RELEASE.2025-04-22T22-12-26Z}
+    build:
+      context: ./minio
+      args:
+        MINIO_VERSION: RELEASE.2025-04-22T22-12-26Z
+    container_name: ssv-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式提供}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式提供}
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          printf 'GET /minio/health/live HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3
+          IFS= read -r line <&3
+          case "$$line" in *' 200 '*) exit 0;; *) exit 1;; esac
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
 volumes:
   redis-data:
   qdrant-data:
+  minio-data:
 
 networks:
   default:

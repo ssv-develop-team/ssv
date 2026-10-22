@@ -67,6 +67,8 @@ class ProjectContext:
         project_root = (root or Path(__file__).resolve().parents[2]).resolve()
         environment = dict(os.environ)
         load_dotenv(project_root / ".env", environment)
+        # 本地 MinIO 凭据只写在 docker/.env；显式加载，且不覆盖进程或根 .env。
+        load_dotenv(project_root / "docker" / ".env", environment)
 
         configured_path = environment.get("SSV_CONFIG_PATH")
         config_path: Path | None = None

@@ -880,3 +880,24 @@ class CommandHandoffTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DockerEnvTest(unittest.TestCase):
+    def test_context_loads_docker_env_without_overriding_root_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker").mkdir()
+            (root / ".env").write_text(
+                "SSV_DOCKER_TEST_ROOT=root\nSSV_DOCKER_TEST_SHARED=root\n",
+                encoding="utf-8",
+            )
+            (root / "docker" / ".env").write_text(
+                "SSV_DOCKER_TEST_DOCKER=docker\nSSV_DOCKER_TEST_SHARED=docker\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"SSV_CONFIG_PATH": ""}, clear=True):
+                context = ProjectContext.discover(root)
+
+        self.assertEqual(context.environment["SSV_DOCKER_TEST_ROOT"], "root")
+        self.assertEqual(context.environment["SSV_DOCKER_TEST_DOCKER"], "docker")
+        self.assertEqual(context.environment["SSV_DOCKER_TEST_SHARED"], "root")

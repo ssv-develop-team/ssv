@@ -448,6 +448,54 @@ with EventLedger() as ledger:
 PY
 ```
 
+## 产物 MinIO 存储
+
+新生成的复核 JSON、Markdown 报告和证据图片登记为不可变产物，由独立上传 worker 异步写入 MinIO；SQLite 账本继续保存事件、复核事实和产物关联。视频、clip 和 manifest 不上传 MinIO。
+
+```yaml
+agent:
+  storage:
+    backend: "minio"          # local 保持既有本地写入；缺省 local
+    minio:
+      endpoint: "http://127.0.0.1:9000"
+      bucket: "ssv-artifacts"          # 缺省读取 SSV_MINIO_BUCKET
+      prefix: "ssv/v1"
+      access_key_env: "SSV_MINIO_ACCESS_KEY"
+      secret_key_env: "SSV_MINIO_SECRET_KEY"
+      connect_timeout_seconds: 5
+      read_timeout_seconds: 15
+    upload:
+      poll_interval_ms: 1000
+      lease_ms: 30000
+      max_retries: 3
+      retry_delay_ms: 1000
+```
+
+- 配置模型只保存凭据环境变量名；访问键和密钥通过环境变量注入，不写入 YAML、日志或 Web 响应。当前部署使用 MinIO root 账号：`.env` 中的 `SSV_MINIO_ACCESS_KEY` / `SSV_MINIO_SECRET_KEY` 应与 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 相同，Agent 首次上传时通过 SDK 幂等创建私有 bucket。
+- 复核完成与上传完成是两个状态。MinIO 不可用时复核和报告照常提交，文件保留在暂存区，由上传 worker 按 `upload.retry_delay_ms` 退避重试；恢复后自动补传，不重新调用模型。
+- 上传成功后必须通过远端实际字节的大小、SHA-256 和 Content-Type 校验，才允许删除本地暂存；删除失败保留 `artifact_cleanup_failed` 日志并由后续轮询重试。
+- `backend=local` 只停止登记新产物；账本中已有的待上传或待清理责任仍会继续处理。
+- 历史产物（启用 MinIO 前登记的文件）不回填、不迁移，继续按原本地路径读取。
+
+部署时用显式环境文件启动 Compose：
+
+```bash
+docker compose --env-file docker/.env -f docker/compose.yaml up -d
+```
+
+本地 MinIO 使用 `ghcr.io/ssv-develop-team/ssv-minio` 镜像（由仓库内 `docker/minio/Dockerfile` 从固定上游版本构建，CI 在 main 分支发布）；`./ssv redis start` 在镜像缺失时先尝试拉取，失败则本地构建。
+
+镜像不包含 `mc`；因此不运行独立初始化容器，bucket 由 Agent 在首次上传时创建。可用 `SSV_MINIO_IMAGE` 覆盖镜像地址，例如内网 registry：`SSV_MINIO_IMAGE=registry.internal/ssv/minio:<tag>`；已有本地 `ssv-minio:minio` 时可设为该名称复用。GHCR 包若为私有，首次拉取前需 `docker login ghcr.io`。部署凭据拥有管理权限，这是当前阶段的明确取舍：简化本地镜像依赖，后续如恢复最小权限应用账号，需要重新引入 Admin API 初始化步骤。
+
+上传任务耗尽重试后进入 `dead`，可按产物 ID 人工重试（仅接受 `dead` 状态）：
+
+```bash
+cd agent
+uv run ssv-agent --config ../config/ssv.yaml artifacts retry --artifact-id <artifact-id>
+```
+
+命令只重置上传任务，不创建新产物、不触发模型复核、不修改业务复核状态。只读 Web API 在证据响应中返回 `storage_status`（`local`、`pending`、`uploading`、`uploaded`、`failed`）；远端暂不可用返回 503 `artifact_store_unavailable`，对象缺失或完整性失败返回 410 `evidence_unavailable`。
+
 ## 验证与安全边界
 
 ```bash

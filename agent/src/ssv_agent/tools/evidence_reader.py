@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 from hashlib import sha256
 from pathlib import Path
+from typing import IO
 
 from langchain.tools import tool
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.tools import get_thread_data
 from deerflow.tools.types import Runtime
 
+from ssv_agent.artifact_storage import (
+    ArtifactStorageError,
+    create_artifact_reader,
+)
+from ssv_agent.config import load_config
 from ssv_agent.event_store import EventLedger
 
 
@@ -69,22 +77,38 @@ def evidence_reader_tool(
 
         evidence_dir = Path(outputs_path) / "evidence" / _token(event_id)
         evidence_dir.mkdir(parents=True, exist_ok=True)
+        needs_reader = any(item.artifact_id is not None for item in evidence)
+        reader = (
+            create_artifact_reader(ledger, load_config()) if needs_reader else None
+        )
         issues: list[str] = []
         found: list[dict[str, object]] = []
         for reference in evidence:
             source = ledger.resolve_evidence_path(reference.path)
-            if source is None:
-                issues.append(f"{reference.evidence_id}: path outside configured roots")
-                continue
-            if not source.is_file():
-                issues.append(f"{reference.evidence_id}: file missing")
-                continue
-            destination = evidence_dir / f"{_token(reference.evidence_id)}{source.suffix or ''}"
-            try:
-                shutil.copy2(source, destination)
-            except OSError:
-                issues.append(f"{reference.evidence_id}: copy failed")
-                continue
+            if reference.artifact_id is not None:
+                destination = evidence_dir / (
+                    f"{_token(reference.evidence_id)}{source.suffix if source else '.jpg'}"
+                )
+                try:
+                    assert reader is not None
+                    with reader.open(reference.artifact_id) as stream:
+                        _write_copy(destination, stream)
+                except (ArtifactStorageError, OSError):
+                    issues.append(f"{reference.evidence_id}: artifact unavailable")
+                    continue
+            else:
+                if source is None:
+                    issues.append(f"{reference.evidence_id}: path outside configured roots")
+                    continue
+                if not source.is_file():
+                    issues.append(f"{reference.evidence_id}: file missing")
+                    continue
+                destination = evidence_dir / f"{_token(reference.evidence_id)}{source.suffix or ''}"
+                try:
+                    shutil.copy2(source, destination)
+                except OSError:
+                    issues.append(f"{reference.evidence_id}: copy failed")
+                    continue
             if destination.is_file():
                 found.append(
                     {
@@ -100,3 +124,17 @@ def evidence_reader_tool(
                 )
 
         return _response(event_id, reason="; ".join(issues) if issues else "ok", found=found)
+
+
+def _write_copy(destination: Path, source: IO[bytes]) -> None:
+    """原子写入已校验的图片副本。"""
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            shutil.copyfileobj(source, handle)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)

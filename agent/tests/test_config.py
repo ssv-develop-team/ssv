@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from ssv_agent import cli
 from ssv_agent.config import (
     AgentSourceConfig,
+    MinioStorageConfig,
     RecordingEvidenceConfig,
     RedisConfig,
     SsvConfig,
@@ -493,6 +494,8 @@ def test_load_config_accepts_complete_example(
 ) -> None:
     monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "example-access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "example-secret")
     path = Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml"
 
     cfg = load_config(path)
@@ -528,6 +531,8 @@ def test_example_recording_evidence_defaults(
 ) -> None:
     monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "example-access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "example-secret")
     example = load_config(Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml")
 
     assert example.evidence_cache.directory == "/var/lib/ssv/evidence-cache"
@@ -586,3 +591,102 @@ def test_removed_evidence_switches_are_rejected() -> None:
         SsvConfig.model_validate({"agent": {"recording_evidence": {"enabled": True}}})
     with pytest.raises(ValidationError, match="enabled"):
         SsvConfig.model_validate({"evidence_cache": {"enabled": False}})
+
+
+def test_artifact_storage_defaults_to_local_and_old_config_still_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSV_MINIO_BUCKET", raising=False)
+
+    config = SsvConfig.model_validate({"version": "2.0", "agent": {"output_dir": "outputs"}})
+
+    assert config.agent.storage.backend == "local"
+    assert config.agent.storage.upload.max_retries == 3
+    assert config.agent.storage.upload.poll_interval_ms == 1000
+    assert config.agent.storage.minio.bucket == "ssv-artifacts"
+    assert config.agent.storage.minio.prefix == "ssv/v1"
+    assert config.agent.storage.minio.access_key_env == "SSV_MINIO_ACCESS_KEY"
+    assert config.agent.storage.minio.secret_key_env == "SSV_MINIO_SECRET_KEY"
+
+
+def test_minio_bucket_defaults_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "site-bucket")
+
+    assert MinioStorageConfig().bucket == "site-bucket"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "/ssv/v1", "ssv//v1", "ssv/./v1", "ssv/../other", "ssv/v1/"],
+)
+def test_minio_storage_rejects_unsafe_prefix(prefix: str) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig(prefix=prefix)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "127.0.0.1:9000",
+        "ftp://127.0.0.1:9000",
+        "http://user:pass@127.0.0.1:9000",
+        "http://127.0.0.1:9000/?region=us",
+        "http://127.0.0.1:9000/#fragment",
+    ],
+)
+def test_minio_endpoint_rejects_unsafe_values(endpoint: str) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig(endpoint=endpoint)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"connect_timeout_seconds": 0},
+        {"read_timeout_seconds": 0},
+        {"access_key_env": " "},
+        {"secret_key_env": ""},
+        {"bucket": "Invalid_Bucket"},
+        {"unknown": True},
+    ],
+)
+def test_minio_storage_rejects_invalid_settings(settings: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig.model_validate(settings)
+
+
+def test_minio_backend_requires_credentials_in_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSV_MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("SSV_MINIO_SECRET_KEY", raising=False)
+
+    with pytest.raises(ValidationError, match="SSV_MINIO_ACCESS_KEY"):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "minio"}}})
+
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "AKIA-FIXTURE-ACCESS")
+    with pytest.raises(ValidationError, match="SSV_MINIO_SECRET_KEY"):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "minio"}}})
+
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "FIXTURE-SECRET-VALUE")
+    config = SsvConfig.model_validate(
+        {
+            "agent": {
+                "storage": {
+                    "backend": "minio",
+                    "minio": {"endpoint": "http://minio.internal:9000"},
+                }
+            }
+        }
+    )
+
+    assert config.agent.storage.backend == "minio"
+    assert config.agent.storage.minio.endpoint == "http://minio.internal:9000"
+    assert "AKIA-FIXTURE-ACCESS" not in config.agent.storage.model_dump_json()
+    assert "FIXTURE-SECRET-VALUE" not in config.agent.storage.model_dump_json()
+
+
+def test_artifact_storage_rejects_unknown_backend() -> None:
+    with pytest.raises(ValidationError):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "s3"}}})

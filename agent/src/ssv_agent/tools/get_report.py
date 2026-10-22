@@ -15,6 +15,11 @@ from deerflow.sandbox.tools import get_thread_data
 from deerflow.tools.types import Runtime
 from langchain.tools import tool
 
+from ssv_agent.artifact_storage import (
+    ArtifactStorageError,
+    create_artifact_reader,
+)
+from ssv_agent.config import load_config
 from ssv_agent.event_store import EventLedger, ReportRecord
 from ssv_agent.report import read_analysis_report
 
@@ -146,18 +151,24 @@ def get_report_tool(
             reason = "report not found" if review_id else "report not ready"
             return _response(event_id, found=False, reason=reason)
         review = ledger.get_review_record(event_id, report.review_revision)
-
-    if review is None:
-        return _response(event_id, found=False, reason="review history not found")
-    try:
-        content = read_analysis_report(
-            report.artifact_path,
-            sha256=report.sha256,
-            size_bytes=report.size_bytes,
-        )
-        virtual_path = _copy_report_to_thread_outputs(runtime, report, content)
-    except (OSError, ValueError, UnicodeError):
-        return _response(event_id, found=False, reason="report artifact unavailable")
+        if review is None:
+            return _response(event_id, found=False, reason="review history not found")
+        try:
+            if report.artifact_id is not None:
+                reader = create_artifact_reader(ledger, load_config())
+                with reader.open(report.artifact_id) as stream:
+                    content = stream.read().decode("utf-8")
+            else:
+                content = read_analysis_report(
+                    report.artifact_path,
+                    sha256=report.sha256,
+                    size_bytes=report.size_bytes,
+                )
+            virtual_path = _copy_report_to_thread_outputs(runtime, report, content)
+        except (ArtifactStorageError, OSError, ValueError, UnicodeError):
+            return _response(
+                event_id, found=False, reason="report artifact unavailable"
+            )
 
     evidence_refs = [
         {

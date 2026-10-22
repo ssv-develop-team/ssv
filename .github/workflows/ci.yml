@@ -86,3 +86,31 @@ jobs:
 
       - name: Run test suite
         run: ./ssv test
+
+  minio-image:
+    name: Publish MinIO image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ssv-minio:RELEASE.2025-04-22T22-12-26Z
+            ghcr.io/${{ github.repository_owner }}/ssv-minio:sha-${{ github.sha }}

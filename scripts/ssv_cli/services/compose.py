@@ -14,10 +14,19 @@ from ..process import require_command, run_command
 from .redis_admin import RedisConnection, RedisError
 
 _LOCAL_QDRANT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_LOCAL_MINIO_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_DEFAULT_MINIO_IMAGE = (
+    "ghcr.io/ssv-develop-team/ssv-minio:RELEASE.2025-04-22T22-12-26Z"
+)
 
 
 def _compose_argv(context: ProjectContext, *args: str) -> list[str]:
-    return ["docker", "compose", "-f", str(context.compose_file), *args]
+    argv = ["docker", "compose"]
+    env_file = context.root / "docker" / ".env"
+    if env_file.is_file():
+        argv.extend(["--env-file", str(env_file)])
+    argv.extend(["-f", str(context.compose_file), *args])
+    return argv
 
 
 def _compose(
@@ -89,6 +98,59 @@ def _qdrant_ready(port: int) -> bool:
         return False
 
 
+def _image_present(context: ProjectContext, image: str) -> bool:
+    result = run_command(
+        context,
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _resolve_minio_image(context: ProjectContext) -> str:
+    """优先显式配置，其次复用本地旧镜像，最后使用共享 GHCR 镜像。"""
+    configured = context.environment.get("SSV_MINIO_IMAGE")
+    if configured:
+        return configured
+    if _image_present(context, "ssv-minio:minio"):
+        return "ssv-minio:minio"
+    return _DEFAULT_MINIO_IMAGE
+
+
+def _ensure_minio_image(
+    context: ProjectContext,
+    compose_environment: dict[str, str],
+    minio_image: str,
+) -> None:
+    """优先拉取共享镜像；不可用时从仓库内 Dockerfile 构建。"""
+    if _image_present(context, minio_image):
+        return
+    info("拉取 MinIO 镜像...")
+    pull = run_command(
+        context,
+        ["docker", "pull", minio_image],
+        capture_output=True,
+    )
+    if pull.returncode == 0 and _image_present(context, minio_image):
+        return
+    info("无法拉取共享镜像，使用 docker/minio 本地构建...")
+    _compose(
+        context,
+        "build",
+        "minio",
+        capture_output=True,
+        environment=compose_environment,
+    )
+
+
+def _minio_ready(port: int) -> bool:
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/minio/health/ready", timeout=1) as response:
+            return 200 <= response.status < 300
+    except OSError:
+        return False
+
+
 def start_infrastructure(
     context: ProjectContext,
     settings: RedisSettings,
@@ -96,10 +158,24 @@ def start_infrastructure(
     qdrant_url: str | None = None,
 ) -> int:
     qdrant_port = _local_qdrant_port(qdrant_url)
+    minio_user = context.environment.get("MINIO_ROOT_USER", "")
+    minio_password = context.environment.get("MINIO_ROOT_PASSWORD", "")
+    if len(minio_user) < 3 or len(minio_password) < 8:
+        raise CliError(
+            "MinIO root 凭据无效：MINIO_ROOT_USER 至少 3 个字符，"
+            "MINIO_ROOT_PASSWORD 至少 8 个字符；请在 docker/.env 中配置"
+        )
+    minio_api_port = context.environment.get("MINIO_API_PORT", "9000")
+    minio_console_port = context.environment.get("MINIO_CONSOLE_PORT", "9001")
+    minio_image = _resolve_minio_image(context)
     compose_environment = context.child_environment(
         REDIS_PORT=str(settings.port),
         QDRANT_PORT=str(qdrant_port),
+        MINIO_API_PORT=minio_api_port,
+        MINIO_CONSOLE_PORT=minio_console_port,
+        SSV_MINIO_IMAGE=minio_image,
     )
+    _ensure_minio_image(context, compose_environment, minio_image)
     _compose(context, "up", "-d", environment=compose_environment)
     info("等待 Redis 就绪...")
     last_error: Exception | None = None
@@ -119,9 +195,22 @@ def start_infrastructure(
     for _ in range(15):
         if _qdrant_ready(qdrant_port):
             info("Qdrant 已就绪")
-            return 0
+            break
         time.sleep(1)
-    raise CliError("Qdrant 启动超时")
+    else:
+        raise CliError("Qdrant 启动超时")
+
+    info("等待 MinIO 就绪...")
+    for _ in range(15):
+        if _minio_ready(int(minio_api_port)):
+            info("MinIO 已就绪")
+            break
+        time.sleep(1)
+    else:
+        raise CliError("MinIO 启动超时")
+
+    info("Redis、Qdrant 和 MinIO 已就绪")
+    return 0
 
 
 def stop_infrastructure(context: ProjectContext) -> int:
@@ -136,5 +225,5 @@ def stop_infrastructure(context: ProjectContext) -> int:
 def status_infrastructure(context: ProjectContext) -> int:
     result = _compose(context, "ps", capture_output=True)
     output = result.stdout.strip()
-    info(output or "Redis/Qdrant 基础设施未在运行")
+    info(output or "Redis/Qdrant/MinIO 基础设施未在运行")
     return 0
