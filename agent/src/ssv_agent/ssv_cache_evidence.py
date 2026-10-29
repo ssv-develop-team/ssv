@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ from ssv_agent.config import EvidenceCacheConfig, RecordingEvidenceConfig
 from ssv_agent.evidence_provider import (
     CommandRunner,
     EvidenceArtifact,
+    EvidenceCacheWindowUnavailable,
     EvidenceExtractionError,
 )
 from ssv_agent.event_store import EventCase
@@ -98,10 +100,16 @@ class SsvCacheEvidenceExtractor:
         temporary_dir = Path(
             tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}.")
         )
+        input_dir: Path | None = None
         try:
+            input_dir = Path(
+                tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}.inputs.")
+            )
+            pinned_segments = _pin_segments(input_dir, segments)
             artifacts = self._extract_to_temporary_dir(
                 temporary_dir,
-                segments,
+                input_dir,
+                pinned_segments,
                 window_start,
                 window_end,
                 source_pts,
@@ -113,7 +121,7 @@ class SsvCacheEvidenceExtractor:
                 generation,
                 window_start,
                 window_end,
-                segments,
+                pinned_segments,
                 artifacts,
             )
             destination = derived_parent / event_id
@@ -146,6 +154,91 @@ class SsvCacheEvidenceExtractor:
         finally:
             if temporary_dir.exists():
                 shutil.rmtree(temporary_dir, ignore_errors=True)
+            if input_dir is not None and input_dir.exists():
+                shutil.rmtree(input_dir, ignore_errors=True)
+
+    def extract_anchor_frame(self, case: EventCase) -> tuple[EvidenceArtifact, ...]:
+        """完整窗口耗尽重试后，仅从锚点所在的 finalized 分段取一张图。"""
+        event_id = _safe_event_id(case.event_id)
+        source_pts, generation = _event_anchor(case)
+        output_root = self._output_root()
+        derived_parent = self._prepare_derived_parent(output_root)
+        self._cleanup_recovery_temporary(derived_parent, event_id, output_root)
+        destination = derived_parent / event_id
+        existing = self._existing_anchor_destination(
+            destination, case.source, source_pts, generation, output_root,
+        )
+        if existing is not None:
+            return existing
+
+        cache_root = self._cache_root(output_root)
+        source_dir = self._source_directory(cache_root, case.source)
+        segment = self._select_anchor_segment(
+            source_dir, case.source, generation, source_pts,
+        )
+        temporary_dir = Path(tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}."))
+        input_dir: Path | None = None
+        try:
+            input_dir = Path(
+                tempfile.mkdtemp(dir=derived_parent, prefix=f".{event_id}.inputs.")
+            )
+            pinned_segment = _pin_segments(input_dir, (segment,))[0]
+            concat_list = input_dir / "segments.txt"
+            _write_concat_list(concat_list, (pinned_segment,))
+            # Seek a little before the event so an anchor near the final packet
+            # still yields a frame. This is a nearby image, not an exact frame PTS.
+            seek_ns = max(0, source_pts - segment.source_pts_start - 100_000_000)
+            frame_path = temporary_dir / "anchor.jpg"
+            self._run_ffmpeg(
+                concat_list, _seconds(seek_ns), "", frame_path,
+                ["-frames:v", "1", "-q:v", "2"],
+            )
+            artifact = _artifact(
+                "frame", frame_path, "image/jpeg",
+                source_pts_start=segment.source_pts_start,
+                source_pts_end=segment.source_pts_end,
+                stream_generation=generation,
+                coverage="anchor_only",
+            )
+            self._write_anchor_manifest(
+                temporary_dir, case.source, generation, source_pts,
+                pinned_segment, artifact,
+            )
+            try:
+                os.replace(temporary_dir, destination)
+                _fsync_directory(derived_parent)
+            except OSError as exc:
+                raise EvidenceExtractionError(
+                    "derived output could not be published", retryable=False,
+                ) from exc
+            output_path = destination / "anchor.jpg"
+            return (EvidenceArtifact(
+                kind="frame", path=output_path, sha256=artifact.sha256,
+                mime_type="image/jpeg", size=artifact.size,
+                mtime=output_path.stat().st_mtime,
+                source_pts_start=segment.source_pts_start,
+                source_pts_end=segment.source_pts_end,
+                stream_generation=generation, coverage="anchor_only",
+            ),)
+        except EvidenceExtractionError:
+            raise
+        except OSError as exc:
+            raise EvidenceExtractionError("media extraction failed", retryable=True) from exc
+        finally:
+            if temporary_dir.exists():
+                shutil.rmtree(temporary_dir, ignore_errors=True)
+            if input_dir is not None and input_dir.exists():
+                shutil.rmtree(input_dir, ignore_errors=True)
+
+    def existing_anchor_frame(self, case: EventCase) -> tuple[EvidenceArtifact, ...] | None:
+        """读取已发布单图，供 lease 超时后的任务恢复使用。"""
+        event_id = _safe_event_id(case.event_id)
+        source_pts, generation = _event_anchor(case)
+        output_root = self._output_root()
+        derived_parent = self._prepare_derived_parent(output_root)
+        return self._existing_anchor_destination(
+            derived_parent / event_id, case.source, source_pts, generation, output_root,
+        )
 
     def _output_root(self) -> Path:
         if not self._evidence_roots:
@@ -253,7 +346,7 @@ class SsvCacheEvidenceExtractor:
         try:
             entries = sorted(source_dir.iterdir(), key=lambda entry: entry.name)
         except OSError as exc:
-            raise EvidenceExtractionError(
+            raise EvidenceCacheWindowUnavailable(
                 "evidence cache window is unavailable",
                 retryable=True,
             ) from exc
@@ -282,10 +375,41 @@ class SsvCacheEvidenceExtractor:
             cursor = max(cursor, segment.source_pts_end)
             if cursor >= window_end:
                 return tuple(selected)
-        raise EvidenceExtractionError(
+        raise EvidenceCacheWindowUnavailable(
             "evidence cache window is unavailable",
             retryable=True,
         )
+
+    def _select_anchor_segment(
+        self,
+        source_dir: Path,
+        source: str,
+        generation: int,
+        source_pts: int,
+    ) -> _CacheSegment:
+        try:
+            entries = sorted(source_dir.iterdir(), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise EvidenceExtractionError(
+                "evidence cache anchor is unavailable", retryable=True,
+            ) from exc
+        matches: list[_CacheSegment] = []
+        for entry in entries:
+            if _SEGMENT_NAME.fullmatch(entry.name) is None:
+                continue
+            segment = self._read_finalized_segment(
+                entry, source_dir, source, generation,
+            )
+            if (
+                segment is not None
+                and segment.source_pts_start <= source_pts < segment.source_pts_end
+            ):
+                matches.append(segment)
+        if not matches:
+            raise EvidenceExtractionError(
+                "evidence cache anchor is unavailable", retryable=True,
+            )
+        return max(matches, key=lambda segment: segment.source_pts_start)
 
     @staticmethod
     def _read_finalized_segment(
@@ -375,6 +499,10 @@ class SsvCacheEvidenceExtractor:
             raise EvidenceExtractionError("derived manifest is invalid", retryable=False) from exc
         if not isinstance(payload, dict):
             raise EvidenceExtractionError("derived manifest is invalid", retryable=False)
+        if payload.get("time_basis") == "source_pts_anchor":
+            return self._existing_anchor_destination(
+                destination, case.source, source_pts, generation, output_root,
+            )
         try:
             window_start, window_end = _requested_window(
                 case,
@@ -421,6 +549,75 @@ class SsvCacheEvidenceExtractor:
                 raise EvidenceExtractionError("derived manifest is invalid", retryable=False)
             artifacts.append(artifact)
         return tuple(artifacts)
+
+    @staticmethod
+    def _existing_anchor_destination(
+        destination: Path,
+        source: str,
+        source_pts: int,
+        generation: int,
+        output_root: Path,
+    ) -> tuple[EvidenceArtifact, ...] | None:
+        try:
+            details = destination.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise EvidenceExtractionError(
+                "derived output is unavailable", retryable=False,
+            ) from exc
+        resolved = _validated_directory(
+            destination, error_message="derived output is unsafe", retryable=False,
+        )
+        if stat.S_ISLNK(details.st_mode) or not _is_within(resolved, output_root):
+            raise EvidenceExtractionError("derived output is unsafe", retryable=False)
+        manifest_path = _validated_output_file(destination / "manifest.json", resolved)
+        try:
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EvidenceExtractionError("derived manifest is invalid", retryable=False) from exc
+        if not isinstance(payload, dict):
+            raise EvidenceExtractionError("derived manifest is invalid", retryable=False)
+        interval = payload.get("actual_source_pts")
+        entries = payload.get("artifacts")
+        inputs = payload.get("inputs")
+        if (
+            payload.get("time_basis") != "source_pts_anchor"
+            or payload.get("source") != source
+            or payload.get("stream_generation") != generation
+            or payload.get("event_source_pts") != source_pts
+            or not isinstance(interval, list)
+            or len(interval) != 2
+            or any(type(value) is not int for value in interval)
+            or not interval[0] <= source_pts < interval[1]
+            or not isinstance(inputs, list)
+            or len(inputs) != 1
+            or not isinstance(inputs[0], str)
+            or _SEGMENT_NAME.fullmatch(inputs[0]) is None
+            or not isinstance(entries, list)
+            or len(entries) != 1
+            or not isinstance(entries[0], dict)
+        ):
+            raise EvidenceExtractionError("derived manifest is invalid", retryable=False)
+        entry = entries[0]
+        path = _validated_output_file(destination / "anchor.jpg", resolved)
+        artifact = _artifact(
+            "frame", path, "image/jpeg",
+            source_pts_start=interval[0], source_pts_end=interval[1],
+            stream_generation=generation, coverage="anchor_only",
+        )
+        if (
+            entry.get("name") != "anchor.jpg"
+            or entry.get("kind") != "frame"
+            or entry.get("coverage") != "anchor_only"
+            or entry.get("mime_type") != "image/jpeg"
+            or entry.get("sha256") != artifact.sha256
+            or entry.get("size") != artifact.size
+            or entry.get("mtime") != artifact.mtime
+        ):
+            raise EvidenceExtractionError("derived manifest is invalid", retryable=False)
+        return (artifact,)
 
     @staticmethod
     def _prepare_derived_parent(output_root: Path) -> Path:
@@ -487,13 +684,14 @@ class SsvCacheEvidenceExtractor:
     def _extract_to_temporary_dir(
         self,
         temporary_dir: Path,
+        input_dir: Path,
         segments: tuple[_CacheSegment, ...],
         window_start: int,
         window_end: int,
         source_pts: int,
         generation: int,
     ) -> tuple[EvidenceArtifact, ...]:
-        concat_list = temporary_dir / "segments.txt"
+        concat_list = input_dir / "segments.txt"
         _write_concat_list(concat_list, segments)
         self._run_ffmpeg(
             concat_list,
@@ -601,6 +799,38 @@ class SsvCacheEvidenceExtractor:
                 }
                 for artifact in artifacts
             ],
+        }
+        manifest = temporary_dir / "manifest.json"
+        with manifest.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _write_anchor_manifest(
+        temporary_dir: Path,
+        source: str,
+        generation: int,
+        source_pts: int,
+        segment: _CacheSegment,
+        artifact: EvidenceArtifact,
+    ) -> None:
+        payload = {
+            "time_basis": "source_pts_anchor",
+            "source": source,
+            "stream_generation": generation,
+            "event_source_pts": source_pts,
+            "actual_source_pts": [segment.source_pts_start, segment.source_pts_end],
+            "inputs": [segment.path.name],
+            "artifacts": [{
+                "name": artifact.path.name,
+                "kind": artifact.kind,
+                "coverage": artifact.coverage,
+                "sha256": artifact.sha256,
+                "mime_type": artifact.mime_type,
+                "size": artifact.size,
+                "mtime": artifact.mtime,
+            }],
         }
         manifest = temporary_dir / "manifest.json"
         with manifest.open("w", encoding="utf-8") as handle:
@@ -750,6 +980,59 @@ def _seconds(nanoseconds: int) -> str:
     return f"{nanoseconds / 1_000_000_000:.9f}"
 
 
+def _pin_segments(
+    temporary_dir: Path,
+    segments: tuple[_CacheSegment, ...],
+) -> tuple[_CacheSegment, ...]:
+    """获取窗口输入，隔离后续缓存清理对 ffmpeg 的影响。"""
+    return tuple(
+        _pin_segment(temporary_dir, segment)
+        for segment in segments
+    )
+
+
+def _pin_segment(
+    temporary_dir: Path,
+    segment: _CacheSegment,
+) -> _CacheSegment:
+    """优先用硬链接持有 inode，跨文件系统时复制 finalized 文件。"""
+    target = temporary_dir / segment.path.name
+    try:
+        os.link(segment.path, target, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise EvidenceExtractionError(
+                "evidence cache segment disappeared during acquisition",
+                retryable=True,
+            ) from exc
+        try:
+            shutil.copyfile(segment.path, target, follow_symlinks=False)
+            _fsync_file(target)
+        except (OSError, shutil.Error) as copy_error:
+            raise EvidenceExtractionError(
+                "evidence cache segment disappeared during acquisition",
+                retryable=True,
+            ) from copy_error
+
+    try:
+        details = target.lstat()
+    except OSError as exc:
+        raise EvidenceExtractionError(
+            "evidence cache segment acquisition failed",
+            retryable=True,
+        ) from exc
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        raise EvidenceExtractionError(
+            "evidence cache segment acquisition produced an unsafe file",
+            retryable=False,
+        )
+    return _CacheSegment(
+        path=target,
+        source_pts_start=segment.source_pts_start,
+        source_pts_end=segment.source_pts_end,
+    )
+
+
 def _write_concat_list(path: Path, segments: tuple[_CacheSegment, ...]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for segment in segments:
@@ -766,6 +1049,7 @@ def _artifact(
     source_pts_start: int,
     source_pts_end: int,
     stream_generation: int,
+    coverage: Literal["exact_window", "anchor_only"] = "exact_window",
 ) -> EvidenceArtifact:
     try:
         data = path.read_bytes()
@@ -782,6 +1066,7 @@ def _artifact(
         source_pts_start=source_pts_start,
         source_pts_end=source_pts_end,
         stream_generation=stream_generation,
+        coverage=coverage,
     )
 
 

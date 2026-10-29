@@ -38,7 +38,7 @@ class SsvRunAttemptFactory {
 public:
     virtual ~SsvRunAttemptFactory() = default;
 
-    [[nodiscard]] virtual SsvHardwareCapabilities prepare_run(
+    [[nodiscard]] virtual SsvCapabilitySnapshot prepare_run(
         const SsvConfig &original_config) = 0;
 
     [[nodiscard]] virtual SsvRunAttemptCreation create(

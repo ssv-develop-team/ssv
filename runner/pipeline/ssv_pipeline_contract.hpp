@@ -51,6 +51,7 @@ struct SsvPipelineContractViolation {
 
 enum class SsvPipelineContractRecovery {
     Fatal,
+    FallbackMixedCodec,
     FallbackSoftware,
 };
 

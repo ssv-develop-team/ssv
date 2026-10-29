@@ -40,7 +40,8 @@ def test_runtime_environment_projects_configured_runtime_values() -> None:
                     "qdrant_url": "https://qdrant.example.test",
                     "min_score": 0.7,
                 },
-            }
+            },
+            "evidence_cache": {"directory": "/var/lib/ssv/evidence/recording-cache"},
         }
     )
 

@@ -1,5 +1,6 @@
 #include "observability/ssv_event_log.hpp"
 #include "pipeline/ssv_hardware_capabilities.hpp"
+#include "pipeline/ssv_evidence_cache.hpp"
 #include "pipeline/ssv_pipeline_contract.hpp"
 #include "pipeline/ssv_pipeline_plan.hpp"
 #include "runtime/ssv_run_attempt.hpp"
@@ -7,12 +8,16 @@
 #include "ssv_inference_test_service.hpp"
 
 #include <gst/gst.h>
+#include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -100,7 +105,8 @@ ssv::SsvPipelinePlan make_headless_plan(const ssv::SsvConfig &config)
 {
     ssv::SsvHardwareCapabilities capabilities;
     capabilities.gstreamer_elements = {"avdec_h264"};
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
 ssv::SsvPipelinePlan make_enabled_plan(const ssv::SsvConfig &config)
@@ -116,7 +122,30 @@ ssv::SsvPipelinePlan make_enabled_plan(const ssv::SsvConfig &config)
         "gtksink",
     };
     capabilities.onnxruntime_available = true;
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
+}
+
+ssv::SsvConfig make_rtsp_config()
+{
+    auto config = make_headless_config();
+    config.display.enabled = true;
+    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
+    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
+    return config;
+}
+
+ssv::SsvPipelinePlan make_rtsp_plan(const ssv::SsvConfig &config)
+{
+    ssv::SsvHardwareCapabilities capabilities;
+    capabilities.gstreamer_elements = {
+        "avdec_h264",
+        "openh264enc",
+        "rtph264pay",
+        "rtspclientsink",
+    };
+    return ssv::SsvPipelinePlan::resolve(
+        config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
 ssv::SsvConfig make_rtsp_config()
@@ -932,7 +961,25 @@ void test_runtime_resolved_uses_snapshot_after_service_stop()
 void test_controlled_signal_returns_success(int signal_number)
 {
     const auto config = make_headless_config();
-    auto pipeline = make_live_pipeline();
+    auto *raw_pipeline = gst_parse_launch(
+        "videotestsrc is-live=true ! "
+        "fakesink name=shutdown-sink sync=false async=false", nullptr);
+    assert(raw_pipeline != nullptr);
+    auto pipeline = adopt_pipeline(raw_pipeline);
+    std::atomic_bool reached_eos = false;
+    auto *sink = gst_bin_get_by_name(GST_BIN(raw_pipeline), "shutdown-sink");
+    assert(sink != nullptr);
+    auto *pad = gst_element_get_static_pad(sink, "sink");
+    gst_pad_add_probe(
+        pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+            if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) == GST_EVENT_EOS)
+                static_cast<std::atomic_bool *>(data)->store(true);
+            return GST_PAD_PROBE_OK;
+        },
+        &reached_eos, nullptr);
+    gst_object_unref(pad);
+    gst_object_unref(sink);
     GstElement *observed_pipeline = GST_ELEMENT(
         gst_object_ref(pipeline.pipeline()));
     ssv::SsvRunAttempt runner(
@@ -953,10 +1000,126 @@ void test_controlled_signal_returns_success(int signal_number)
         == ssv::SsvRunAttemptStopReason::ControlledShutdown);
     assert(result.reached_playing);
     assert(result.error.empty());
+    assert(reached_eos.load());
     assert(runner.state() == ssv::SsvRunAttemptState::Stopped);
     assert(!signal_sender.joinable());
     assert_pipeline_is_null(observed_pipeline);
     gst_object_unref(observed_pipeline);
+}
+
+void test_controlled_shutdown_finalizes_short_evidence_fragment()
+{
+    auto *factory = gst_element_factory_find("openh264enc");
+    if (factory == nullptr)
+        return;
+    gst_object_unref(factory);
+    char directory[] = "/tmp/ssv-shutdown-cache-test-XXXXXX";
+    assert(mkdtemp(directory) != nullptr);
+    auto config = make_headless_config();
+    config.evidence_cache.directory = directory;
+    config.evidence_cache.segment_duration_ms = 10000;
+    auto context = std::make_shared<SsvSourceContext>("runner-test");
+    auto cache = std::make_shared<ssv::SsvEvidenceCache>(
+        config.evidence_cache, "runner-test", context);
+    auto *pipeline = gst_parse_launch(
+        "videotestsrc is-live=true ! "
+        "video/x-raw,format=I420,width=64,height=48,framerate=10/1 ! "
+        "openh264enc gop-size=10 ! h264parse name=parser ! "
+        "splitmuxsink name=cache-sink", nullptr);
+    assert(pipeline != nullptr);
+    auto *parser = gst_bin_get_by_name(GST_BIN(pipeline), "parser");
+    auto *sink = gst_bin_get_by_name(GST_BIN(pipeline), "cache-sink");
+    assert(parser != nullptr && sink != nullptr);
+    cache->configure(parser, sink);
+    std::atomic_uint observed_buffers = 0;
+    auto *pad = gst_element_get_static_pad(parser, "src");
+    gst_pad_add_probe(
+        pad, GST_PAD_PROBE_TYPE_BUFFER,
+        [](GstPad *, GstPadProbeInfo *, gpointer data) {
+            static_cast<std::atomic_uint *>(data)->fetch_add(1);
+            return GST_PAD_PROBE_OK;
+        },
+        &observed_buffers, nullptr);
+    gst_object_unref(pad);
+    gst_object_unref(parser);
+    gst_object_unref(sink);
+    ssv::SsvPipelineInstance instance(
+        ssv::SsvPipelinePtr(pipeline), std::nullopt, context, cache);
+    ssv::SsvRunAttempt runner(
+        config, make_headless_plan(config), std::move(instance));
+    std::thread signal_sender([&runner, &observed_buffers] {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (runner.state() != ssv::SsvRunAttemptState::Playing
+            || observed_buffers.load() < 4) {
+            assert(runner.state() != ssv::SsvRunAttemptState::Stopped);
+            assert(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(kill(getpid(), SIGTERM) == 0);
+    });
+    const auto result = runner.run();
+    signal_sender.join();
+    assert(result.exit_code == ssv::SsvExitCode::Success);
+    assert(result.stop_reason == ssv::SsvRunAttemptStopReason::ControlledShutdown);
+    const auto media = std::filesystem::path(directory)
+        / "runner-test" / "segment-00000000.mp4";
+    assert(std::filesystem::file_size(media) > 0);
+    auto sidecar = media;
+    sidecar.replace_extension(".json");
+    std::ifstream input(sidecar);
+    const auto metadata = nlohmann::json::parse(input);
+    assert(metadata.at("finalized").get<bool>());
+    assert(metadata.at("stream_generation").is_number_unsigned());
+    assert(metadata.at("source_pts_start").is_number_unsigned());
+    assert(metadata.at("source_pts_end").is_number_unsigned());
+    assert(metadata.at("source_pts_end") > metadata.at("source_pts_start"));
+    input.close();
+    cache.reset();
+    std::filesystem::remove_all(directory);
+}
+
+void test_controlled_shutdown_timeout_is_failure()
+{
+    const auto config = make_headless_config();
+    auto *raw_pipeline = gst_parse_launch(
+        "videotestsrc is-live=true ! "
+        "fakesink name=shutdown-sink sync=false async=false", nullptr);
+    assert(raw_pipeline != nullptr);
+    auto pipeline = adopt_pipeline(raw_pipeline);
+    auto *sink = gst_bin_get_by_name(GST_BIN(raw_pipeline), "shutdown-sink");
+    assert(sink != nullptr);
+    auto *pad = gst_element_get_static_pad(sink, "sink");
+    gst_pad_add_probe(
+        pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        [](GstPad *, GstPadProbeInfo *info, gpointer) {
+            return GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) == GST_EVENT_EOS
+                ? GST_PAD_PROBE_DROP
+                : GST_PAD_PROBE_OK;
+        },
+        nullptr, nullptr);
+    gst_object_unref(pad);
+    gst_object_unref(sink);
+    ssv::SsvRunAttemptOptions options;
+    options.shutdown_timeout = 50ms;
+    ssv::SsvRunAttempt runner(
+        config, make_headless_plan(config), std::move(pipeline), {}, options);
+    std::thread signal_sender([&runner] {
+        while (runner.state() != ssv::SsvRunAttemptState::Playing) {
+            assert(runner.state() != ssv::SsvRunAttemptState::Stopped);
+            std::this_thread::yield();
+        }
+        assert(kill(getpid(), SIGTERM) == 0);
+        std::this_thread::sleep_for(10ms);
+        assert(kill(getpid(), SIGINT) == 0);
+    });
+
+    const auto result = runner.run();
+    signal_sender.join();
+    assert(result.exit_code == ssv::SsvExitCode::RuntimeFailure);
+    assert(result.stop_reason == ssv::SsvRunAttemptStopReason::RuntimeError);
+    assert(result.stage == "pipeline.shutdown");
+    assert(result.error == "timed out waiting for GStreamer EOS");
+    assert(runner.state() == ssv::SsvRunAttemptState::Stopped);
 }
 
 void test_owned_resources_stop_before_window_destruction()
@@ -1219,6 +1382,8 @@ int main(int argc, char **argv)
     test_runtime_resolved_uses_snapshot_after_service_stop();
     test_controlled_signal_returns_success(SIGINT);
     test_controlled_signal_returns_success(SIGTERM);
+    test_controlled_shutdown_timeout_is_failure();
+    test_controlled_shutdown_finalizes_short_evidence_fragment();
     test_owned_resources_stop_before_window_destruction();
     test_headless_runner_rejects_window_ownership();
     test_runner_rejects_display_config_without_resolved_backend();

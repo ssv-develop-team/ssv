@@ -22,6 +22,7 @@ from ssv_agent.config import SsvConfig
 from ssv_agent.embedding.registry import create_provider
 from ssv_agent.evidence_provider import EvidenceExtractor
 from ssv_agent.event_consumer import EventConsumer
+from ssv_agent.event_episode import EventEpisodeAggregator
 from ssv_agent.event_store import EventLedger
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
 from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
@@ -30,7 +31,6 @@ from ssv_agent.review_runtime import (
     create_review_config,
     load_review_view_image_tool as _load_review_view_image_tool,
     reset_deerflow_runtime_caches,
-    validate_review_view_image_tool,
 )
 from ssv_agent.runner import run_review
 from ssv_agent.runtime import (
@@ -38,7 +38,12 @@ from ssv_agent.runtime import (
     runtime_environment as _runtime_environment,
     embedding_settings as _embedding_settings,
 )
-from ssv_agent.workers import IndexWorker, RecordingEvidenceWorker, ReviewWorker
+from ssv_agent.workers import (
+    IndexWorker,
+    RecordingEvidenceWorker,
+    ReportWorker,
+    ReviewWorker,
+)
 
 logger = structlog.get_logger()
 
@@ -70,13 +75,8 @@ def _close_resource(resource: object | None) -> None:
         asyncio.run(result)
 
 
-def _validate_review_view_image_tool(tool: object) -> None:
-    """保留旧的 service 私有测试入口，实际校验位于 review_runtime。"""
-    validate_review_view_image_tool(tool)
-
-
 class AgentService:
-    """拥有 Redis ingress 与异步复核/索引 worker 的进程生命周期。"""
+    """拥有 Redis ingress 与异步持久 worker 的进程生命周期。"""
 
     def __init__(
         self,
@@ -85,6 +85,7 @@ class AgentService:
         consumer_factory: Callable[[SsvConfig], EventConsumer] = EventConsumer,
         review_worker_factory: Callable[..., ReviewWorker] = ReviewWorker,
         index_worker_factory: Callable[..., IndexWorker] = IndexWorker,
+        report_worker_factory: Callable[..., ReportWorker] = ReportWorker,
         recording_evidence_worker_factory: Callable[..., RecordingEvidenceWorker] = RecordingEvidenceWorker,
         evidence_extractor_factory: Callable[..., EvidenceExtractor] = SsvCacheEvidenceExtractor,
         client_factory: Callable[[], Any] = DeerFlowClient,
@@ -95,6 +96,7 @@ class AgentService:
         self._consumer_factory = consumer_factory
         self._review_worker_factory = review_worker_factory
         self._index_worker_factory = index_worker_factory
+        self._report_worker_factory = report_worker_factory
         self._recording_evidence_worker_factory = recording_evidence_worker_factory
         self._evidence_extractor_factory = evidence_extractor_factory
         self._client_factory = client_factory
@@ -128,6 +130,9 @@ class AgentService:
                 if self._stopping.is_set():
                     return
                 self._start_index_worker()
+                if self._stopping.is_set():
+                    return
+                self._start_report_worker()
                 if self._stopping.is_set():
                     return
                 consumer = self._create_consumer()
@@ -273,7 +278,7 @@ class AgentService:
 
     def _start_recording_evidence_worker(self) -> None:
         worker_config = self._config.agent.recording_evidence
-        if not worker_config.enabled or self._stopping.is_set():
+        if self._stopping.is_set():
             return
         extractor = self._create_evidence_extractor()
         if self._stopping.is_set():
@@ -284,7 +289,10 @@ class AgentService:
             worker_id="ssv-recording-evidence-0",
             lease_ms=worker_config.lease_ms,
             max_retries=worker_config.max_retries,
-            retry_delay_ms=worker_config.retry_delay_ms,
+            retry_delay_ms=max(
+                worker_config.retry_delay_ms,
+                self._config.evidence_cache.segment_duration_ms,
+            ),
             poll_interval_seconds=worker_config.poll_interval_ms / 1000,
         )
         if self._stopping.is_set():
@@ -302,7 +310,13 @@ class AgentService:
     def _create_consumer(self) -> EventConsumer:
         """让内置 consumer 使用包含 recording 策略的独立账本连接。"""
         if self._consumer_factory is EventConsumer:
-            return self._consumer_factory(self._config, ledger_factory=self._ledger_factory)
+            return self._consumer_factory(
+                self._config,
+                ledger_factory=self._ledger_factory,
+                episode_aggregator=EventEpisodeAggregator(
+                    self._config.agent.recording_evidence
+                ),
+            )
         return self._consumer_factory(self._config)
 
     def _start_index_worker(self) -> None:
@@ -328,6 +342,22 @@ class AgentService:
         if self._stopping.is_set():
             return
         self._start_worker_thread("ssv-agent-index", worker.run)
+
+    def _start_report_worker(self) -> None:
+        worker_config = self._config.agent.reporting
+        if not worker_config.enabled or self._stopping.is_set():
+            return
+        worker = self._report_worker_factory(
+            ledger_factory=self._ledger_factory,
+            worker_id="ssv-report-0",
+            lease_ms=worker_config.lease_ms,
+            max_retries=worker_config.max_retries,
+            retry_delay_ms=worker_config.retry_delay_ms,
+            poll_interval_seconds=worker_config.poll_interval_ms / 1000,
+        )
+        if self._stopping.is_set():
+            return
+        self._start_worker_thread("ssv-agent-report", worker.run)
 
     def _build_embedding(self) -> Any:
         backend, model = _embedding_settings(self._config)

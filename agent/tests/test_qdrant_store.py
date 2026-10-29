@@ -188,7 +188,11 @@ def test_upsert_and_search_event(tmp_path: Path) -> None:
         store.upsert_event_vector(
             "1-0",
             [0.1] * 64,
-            {"source": "camera-1", "timestamp_ms": 1000},
+            {
+                "source": "camera-1",
+                "timestamp_ms": 1000,
+                "event_type": "helmet_violation",
+            },
         )
 
         hits = store.search_events(
@@ -199,6 +203,13 @@ def test_upsert_and_search_event(tmp_path: Path) -> None:
         assert len(hits) == 1
         assert hits[0]["event_id"] == "1-0"
         assert hits[0]["source"] == "camera-1"
+
+        hits = store.search_events(
+            [0.1] * 64,
+            top_k=5,
+            filters={"event_type": "helmet_violation"},
+        )
+        assert len(hits) == 1
 
         hits = store.search_events([0.1] * 64, filters={"source": "camera-2"})
         assert hits == []

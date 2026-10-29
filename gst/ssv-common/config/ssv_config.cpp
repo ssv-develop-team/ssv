@@ -509,7 +509,9 @@ SsvPreprocessConfig parse_preprocess(const YAML::Node &node)
 void validate_worker_common(
     const YAML::Node &node,
     std::string_view path,
-    int retry_delay_default_ms = 1000)
+    int retry_delay_default_ms = 1000,
+    bool enabled_default = false,
+    bool parse_enabled = true)
 {
     const auto poll_path = std::string(path) + ".poll_interval_ms";
     const auto poll_interval_ms = get_or<int>(
@@ -539,8 +541,10 @@ void validate_worker_common(
         throw_invalid_value(
             delay_path, delay_path + " must not be negative");
     }
-    static_cast<void>(get_or<bool>(
-        node, "enabled", false, std::string(path) + ".enabled"));
+    if (parse_enabled) {
+        static_cast<void>(get_or<bool>(
+            node, "enabled", enabled_default, std::string(path) + ".enabled"));
+    }
 }
 
 void validate_review_extension(const YAML::Node &node)
@@ -597,6 +601,20 @@ void validate_indexing_extension(const YAML::Node &node)
         true);
     validate_optional_string_field(
         node, "query_text_type", "agent.indexing.query_text_type");
+}
+
+void validate_reporting_extension(const YAML::Node &node)
+{
+    constexpr std::string_view path = "agent.reporting";
+    require_map(node, path);
+    reject_unknown_keys(node, path, {
+        "enabled",
+        "poll_interval_ms",
+        "lease_ms",
+        "max_retries",
+        "retry_delay_ms",
+    });
+    validate_worker_common(node, path, 1000, true);
 }
 
 void validate_knowledge_extension(const YAML::Node &node)
@@ -662,7 +680,6 @@ void validate_recording_evidence_extension(const YAML::Node &node)
     constexpr std::string_view path = "agent.recording_evidence";
     require_map(node, path);
     reject_unknown_keys(node, path, {
-        "enabled",
         "poll_interval_ms",
         "lease_ms",
         "max_retries",
@@ -675,7 +692,7 @@ void validate_recording_evidence_extension(const YAML::Node &node)
         "max_episode_ms",
     });
 
-    validate_worker_common(node, path, 2000);
+    validate_worker_common(node, path, 2000, false, false);
     const auto clip_before_ms = get_or<int>(
         node,
         "clip_before_ms",
@@ -752,15 +769,12 @@ SsvEvidenceCacheConfig parse_evidence_cache(const YAML::Node &node)
     constexpr std::string_view path = "evidence_cache";
     require_map(node, path);
     reject_unknown_keys(node, path, {
-        "enabled",
         "directory",
         "segment_duration_ms",
         "retention_ms",
         "max_bytes_mb",
     });
 
-    cache.enabled = get_or<bool>(
-        node, "enabled", cache.enabled, "evidence_cache.enabled");
     cache.directory = get_or<std::string>(
         node, "directory", cache.directory, "evidence_cache.directory");
     if (is_blank(cache.directory)
@@ -814,27 +828,19 @@ void validate_recording_evidence_cache(
     const YAML::Node &agent,
     const SsvEvidenceCacheConfig &cache)
 {
-    const auto recording = agent["recording_evidence"];
-    if (!recording
-        || !get_or<bool>(
-            recording, "enabled", false, "agent.recording_evidence.enabled")) {
-        return;
-    }
+    const auto cache_path = std::filesystem::path(cache.directory);
+    const auto default_root =
+        std::filesystem::path("/var/lib/ssv/evidence-cache");
+    const auto evidence_roots = agent ? agent["evidence_roots"] : YAML::Node {};
 
-    if (!cache.enabled) {
-        throw_invalid_value(
-            "evidence_cache.enabled",
-            "recording_evidence requires evidence_cache.enabled");
-    }
-
-    const auto evidence_roots = agent["evidence_roots"];
     if (!evidence_roots || evidence_roots.size() == 0) {
+        if (path_is_within(cache_path, default_root))
+            return;
         throw_invalid_value(
             "agent.evidence_roots",
-            "recording_evidence requires non-empty evidence_roots");
+            "custom evidence_cache.directory requires matching agent.evidence_roots");
     }
 
-    const auto cache_path = std::filesystem::path(cache.directory);
     for (std::size_t index = 0; index < evidence_roots.size(); ++index) {
         const auto item_path =
             std::string("agent.evidence_roots[") + std::to_string(index) + "]";
@@ -845,6 +851,24 @@ void validate_recording_evidence_cache(
     throw_invalid_value(
         "evidence_cache.directory",
         "recording_evidence requires evidence_cache.directory inside evidence_roots");
+}
+
+void validate_web_extension(const YAML::Node &web)
+{
+    constexpr std::string_view path = "agent.web";
+    require_map(web, path);
+    reject_unknown_keys(web, path, {"host", "port"});
+    const auto host = get_or<std::string>(
+        web, "host", "127.0.0.1", "agent.web.host");
+    if (is_blank(host)) {
+        throw_invalid_value(
+            "agent.web.host", "agent.web.host must not be blank");
+    }
+    const auto port = get_or<int>(web, "port", 8765, "agent.web.port");
+    if (port < 1 || port > 65535) {
+        throw_invalid_value(
+            "agent.web.port", "agent.web.port must be between 1 and 65535");
+    }
 }
 
 void validate_agent_extensions(
@@ -872,10 +896,14 @@ void validate_agent_extensions(
             }
         }
     }
+    if (const auto web = agent["web"])
+        validate_web_extension(web);
     if (const auto review = agent["review"])
         validate_review_extension(review);
     if (const auto indexing = agent["indexing"])
         validate_indexing_extension(indexing);
+    if (const auto reporting = agent["reporting"])
+        validate_reporting_extension(reporting);
     if (const auto recording_evidence = agent["recording_evidence"])
         validate_recording_evidence_extension(recording_evidence);
     validate_recording_evidence_cache(agent, cache);
@@ -1165,7 +1193,9 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
     if (const auto rtsp = node["rtsp"]) {
         require_map(rtsp, "display.rtsp");
         reject_unknown_keys(
-            rtsp, "display.rtsp", {"location", "burn_in_overlay"});
+            rtsp,
+            "display.rtsp",
+            {"location", "burn_in_overlay", "encoded_passthrough"});
         display.rtsp.location = get_or<std::string>(
             rtsp, "location", display.rtsp.location, "display.rtsp.location");
         display.rtsp.burn_in_overlay = get_or<bool>(
@@ -1173,6 +1203,11 @@ SsvDisplayConfig parse_display(const YAML::Node &node)
             "burn_in_overlay",
             display.rtsp.burn_in_overlay,
             "display.rtsp.burn_in_overlay");
+        display.rtsp.encoded_passthrough = get_or<bool>(
+            rtsp,
+            "encoded_passthrough",
+            display.rtsp.encoded_passthrough,
+            "display.rtsp.encoded_passthrough");
     }
     if (display.backend == SsvDisplayBackend::RtspClientSink) {
         if (is_blank(display.rtsp.location)) {
@@ -1777,9 +1812,11 @@ SsvConfig parse_and_validate(const YAML::Node &root)
                 "dedup_enabled",
                 "dedup_cooldown_seconds",
                 // The Python Agent owns these shared-config extensions.
+                "web",
                 "evidence_roots",
                 "review",
                 "indexing",
+                "reporting",
                 "recording_evidence",
                 "knowledge",
             });

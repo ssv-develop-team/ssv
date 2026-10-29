@@ -8,10 +8,19 @@ from pathlib import Path
 import yaml
 
 _REVIEW_TOOL_NAMES = frozenset(
-    {"get_event", "evidence_reader", "rule_retriever", "search_events", "view_image"}
+    {
+        "get_event",
+        "get_report",
+        "evidence_reader",
+        "rule_retriever",
+        "sample_video",
+        "search_events",
+        "view_image",
+    }
 )
 _REVIEW_CONFIGURED_TOOL_NAMES = _REVIEW_TOOL_NAMES - {"view_image"}
 _REVIEW_VIEW_IMAGE_MODULE = "deerflow.tools.builtins.view_image_tool"
+_REVIEW_REPORT_TOOL_USE = "ssv_agent.tools.get_report:get_report_tool"
 
 
 def validate_review_view_image_tool(tool: object) -> None:
@@ -69,6 +78,36 @@ def create_review_config(
     }
     if "view_image" in configured_names:
         raise ValueError("review config cannot shadow DeerFlow builtin view_image")
+
+    report_tools = [
+        item
+        for item in config.get("tools", [])
+        if isinstance(item, dict) and item.get("name") == "get_report"
+    ]
+    if len(report_tools) > 1 or any(
+        item.get("use") != _REVIEW_REPORT_TOOL_USE for item in report_tools
+    ):
+        raise ValueError("review get_report must use the canonical implementation")
+    if not report_tools:
+        event_tool = next(
+            (
+                item
+                for item in config.get("tools", [])
+                if isinstance(item, dict) and item.get("name") == "get_event"
+            ),
+            None,
+        )
+        if event_tool is None or not event_tool.get("group"):
+            raise ValueError("review get_event tool configuration is incomplete")
+        event_index = config["tools"].index(event_tool)
+        config["tools"].insert(
+            event_index + 1,
+            {
+                "name": "get_report",
+                "group": event_tool["group"],
+                "use": _REVIEW_REPORT_TOOL_USE,
+            }
+        )
 
     tools = [
         item

@@ -59,7 +59,7 @@ def test_qdrant_rule_ingest_retrieve_filter_and_rebuild(tmp_path: Path, monkeypa
     document.parent.mkdir(parents=True)
     document.write_text(
         "---\nkind: rule\nrule_id: standard\nversion: v1\n"
-        "event_type: event-a\n---\n\n1 目标安全帽条款。\n2 其他条款。\n",
+        "event_types:\n  - event-a\n  - event-b\n---\n\n1 目标安全帽条款。\n2 其他条款。\n",
         encoding="utf-8",
     )
 
@@ -80,6 +80,13 @@ def test_qdrant_rule_ingest_retrieve_filter_and_rebuild(tmp_path: Path, monkeypa
     )
     assert [chunk.metadata["source"] for chunk in filtered.chunks] == ["standard/v1/rule.md"]
     assert filtered.chunks[0].metadata["content_hash"].startswith("sha256:")
+
+    second_event_type = asyncio.run(
+        retriever.retrieve("目标", top_k=5, filters={"event_type": "event-b"})
+    )
+    assert [chunk.metadata["source"] for chunk in second_event_type.chunks] == [
+        "standard/v1/rule.md"
+    ]
 
     document.write_text(
         "---\nkind: rule\nrule_id: standard\nversion: v1\n"

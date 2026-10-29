@@ -14,7 +14,9 @@ from ssv_agent.event_store.ledger import (
     JobKind,
     LeaseLostError,
     JobState,
+    ReportRecord,
     RecordOutcome,
+    ReviewRecord,
 )
 from ssv_agent.event_store.sqlite_store import SsvEventStore
 
@@ -32,6 +34,8 @@ __all__ = [
     "JobKind",
     "LeaseLostError",
     "JobState",
+    "ReportRecord",
     "RecordOutcome",
+    "ReviewRecord",
     "SsvEventStore",
 ]

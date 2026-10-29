@@ -48,6 +48,17 @@ const SsvVideoCaps &require_expected_caps(
     return *caps;
 }
 
+const SsvEncodePlan &require_encode_plan(const SsvPipelinePlan &plan)
+{
+    if (!plan.codec.encode) {
+        throw SsvPipelineBuilderError(
+            SsvExitCode::PipelineContractFailed,
+            "pipeline.build",
+            "RTSP transcode topology requires a resolved encoder plan");
+    }
+    return *plan.codec.encode;
+}
+
 std::string model_caps(const infer::SsvModelContract &contract)
 {
     std::ostringstream caps;
@@ -57,12 +68,46 @@ std::string model_caps(const infer::SsvModelContract &contract)
     return caps.str();
 }
 
+std::string video_caps(const SsvVideoCaps &caps)
+{
+    const char *format = "UNKNOWN";
+    switch (caps.format) {
+    case SsvPixelFormat::Nv12: format = "NV12"; break;
+    case SsvPixelFormat::Rgba: format = "RGBA"; break;
+    case SsvPixelFormat::Bgrx: format = "BGRx"; break;
+    case SsvPixelFormat::I420: format = "I420"; break;
+    }
+
+    std::string result = "video/x-raw";
+    switch (caps.memory) {
+    case SsvMemoryKind::SystemMemory:
+        break;
+    case SsvMemoryKind::VaMemory:
+        result += "(memory:VAMemory)";
+        break;
+    case SsvMemoryKind::CudaMemory:
+        result += "(memory:CUDAMemory)";
+        break;
+    case SsvMemoryKind::DmaBuf:
+        result += "(memory:DMABuf)";
+        break;
+    case SsvMemoryKind::GlMemory:
+        result += "(memory:GLMemory)";
+        break;
+    case SsvMemoryKind::Unknown:
+        break;
+    }
+    result += ",format=";
+    result += format;
+    return result;
+}
+
 void require_registered(
-    const SsvHardwareCapabilities &registry,
+    const SsvCapabilitySnapshot &capabilities,
     const std::vector<PipelineStage> &stages)
 {
     for (const auto &item : stages) {
-        if (registry.has_gstreamer_element(item.factory))
+        if (capabilities.has_gstreamer_element(item.factory))
             continue;
         throw SsvPipelineBuilderError(
             SsvExitCode::CapabilityUnavailable,
@@ -72,11 +117,11 @@ void require_registered(
 }
 
 void require_registered(
-    const SsvHardwareCapabilities &registry,
+    const SsvCapabilitySnapshot &capabilities,
     const std::vector<std::string> &factories)
 {
     for (const auto &factory : factories) {
-        if (registry.has_gstreamer_element(factory))
+        if (capabilities.has_gstreamer_element(factory))
             continue;
         throw SsvPipelineBuilderError(
             SsvExitCode::CapabilityUnavailable,
@@ -284,39 +329,117 @@ void configure_rate(
 
 void configure_va_device(
     GstElement *element,
-    const SsvDecodePlan &decode)
+    const SsvDecodeDevice &device,
+    std::string_view stage_name)
 {
-    if (decode.device.kind != SsvDecodeDeviceKind::Drm)
+    if (device.kind != SsvDecodeDeviceKind::Drm)
         return;
     const auto *spec = g_object_class_find_property(
         G_OBJECT_GET_CLASS(element), "device-path");
     if (spec == nullptr) {
         const std::string factory =
             GST_OBJECT_NAME(gst_element_get_factory(element));
-        const auto basename = decode.device.value.substr(
-            decode.device.value.find_last_of('/') + 1);
+        const auto basename = device.value.substr(
+            device.value.find_last_of('/') + 1);
         if (factory.find(basename) != std::string::npos)
             return;
         throw SsvPipelineBuilderError(
             SsvExitCode::CapabilityUnavailable,
-            "capability.decode.device",
+            std::string(stage_name),
             "VA element does not expose its device path");
     }
     if ((spec->flags & G_PARAM_WRITABLE) != 0) {
-        g_object_set(element, "device-path", decode.device.value.c_str(), nullptr);
+        g_object_set(element, "device-path", device.value.c_str(), nullptr);
     }
     if ((spec->flags & G_PARAM_READABLE) != 0) {
         gchar *actual = nullptr;
         g_object_get(element, "device-path", &actual, nullptr);
-        const bool matches = actual != nullptr && decode.device.value == actual;
+        const bool matches = actual != nullptr && device.value == actual;
         g_free(actual);
         if (!matches) {
             throw SsvPipelineBuilderError(
                 SsvExitCode::CapabilityUnavailable,
-                "capability.decode.device",
+                std::string(stage_name),
                 "VA element resolved a different DRM render node");
         }
     }
+}
+
+void configure_cuda_device(
+    GstElement *element,
+    const SsvDecodeDevice &device,
+    std::string_view stage_name)
+{
+    if (device.kind != SsvDecodeDeviceKind::Cuda)
+        return;
+
+    int device_id = 0;
+    try {
+        device_id = std::stoi(device.value);
+    } catch (const std::exception &) {
+        throw SsvPipelineBuilderError(
+            SsvExitCode::InvalidConfiguration,
+            std::string(stage_name),
+            "CUDA device selector must be a non-negative integer");
+    }
+    if (device_id < 0) {
+        throw SsvPipelineBuilderError(
+            SsvExitCode::InvalidConfiguration,
+            std::string(stage_name),
+            "CUDA device selector must be non-negative");
+    }
+
+    for (const char *property_name : {
+             "cuda-device-id",
+             "device-id",
+             "gpu-id",
+         }) {
+        const auto *property = g_object_class_find_property(
+            G_OBJECT_GET_CLASS(element), property_name);
+        if (property == nullptr
+            || (property->flags & G_PARAM_WRITABLE) == 0) {
+            continue;
+        }
+        if (property->value_type == G_TYPE_INT) {
+            g_object_set(element, property_name, device_id, nullptr);
+        } else if (property->value_type == G_TYPE_UINT) {
+            g_object_set(
+                element, property_name, static_cast<guint>(device_id), nullptr);
+        } else {
+            continue;
+        }
+        if ((property->flags & G_PARAM_READABLE) != 0) {
+            guint actual = 0;
+            if (property->value_type == G_TYPE_INT) {
+                gint signed_actual = -1;
+                g_object_get(element, property_name, &signed_actual, nullptr);
+                if (signed_actual != device_id)
+                    throw SsvPipelineBuilderError(
+                        SsvExitCode::CapabilityUnavailable,
+                        std::string(stage_name),
+                        "CUDA element resolved a different device");
+            } else {
+                g_object_get(element, property_name, &actual, nullptr);
+                if (actual != static_cast<guint>(device_id))
+                    throw SsvPipelineBuilderError(
+                        SsvExitCode::CapabilityUnavailable,
+                        std::string(stage_name),
+                        "CUDA element resolved a different device");
+            }
+        }
+        return;
+    }
+
+    const std::string factory =
+        GST_OBJECT_NAME(gst_element_get_factory(element));
+    if (factory.find("device" + std::to_string(device_id))
+        != std::string::npos) {
+        return;
+    }
+    throw SsvPipelineBuilderError(
+        SsvExitCode::CapabilityUnavailable,
+        std::string(stage_name),
+        "CUDA element does not expose its device selector");
 }
 
 void configure_decoder_boolean(
@@ -347,10 +470,31 @@ void configure_decoder(
     GstElement *decoder,
     const SsvDecodePlan &decode)
 {
-    configure_va_device(decoder, decode);
+    configure_va_device(
+        decoder, decode.device, "capability.decode.device");
+    configure_cuda_device(
+        decoder, decode.device, "capability.decode.device");
     configure_decoder_boolean(decoder, decode, "qos", FALSE);
     configure_decoder_boolean(
         decoder, decode, "discard-corrupted-frames", TRUE);
+}
+
+void configure_encoder(
+    GstElement *encoder,
+    const SsvEncodePlan &encode)
+{
+    switch (encode.backend) {
+    case SsvEncodeBackend::Vaapi:
+        configure_va_device(
+            encoder, encode.device, "capability.encode.device");
+        break;
+    case SsvEncodeBackend::Nvenc:
+        configure_cuda_device(
+            encoder, encode.device, "capability.encode.device");
+        break;
+    case SsvEncodeBackend::Software:
+        break;
+    }
 }
 
 struct DynamicRtspLink {
@@ -452,19 +596,29 @@ PipelineBranchTopology resolve_display_topology(
     const SsvConfig &config,
     const SsvPipelinePlan &plan)
 {
+    const auto &decode = plan.codec.decode;
     PipelineBranchTopology branch;
+    if (plan.display_encoded_passthrough) {
+        branch.queue_capacity = 32;
+        branch.leaky_downstream = false;
+        branch.drop_only = false;
+        branch.max_rate = std::nullopt;
+        branch.stages = {
+            stage("queue", "display-queue"),
+            stage("rtph264pay", "display-rtp-pay"),
+            stage("rtspclientsink", "display-sink"),
+        };
+        return branch;
+    }
+
     branch.max_rate = config.display.fps;
     branch.stages = {
         stage("queue", "display-queue"),
         stage("videorate", "display-rate"),
     };
-    if (plan.decode.backend == SsvDecodeBackend::Vaapi
-        && plan.display_backend
-            == SsvResolvedDisplayBackend::GtkGlSink) {
-        branch.stages.push_back(stage(
-            plan.decode.va_postproc_factory, "display-va-export"));
-    }
     if (plan.display_backend == SsvResolvedDisplayBackend::GtkGlSink) {
+        branch.stages.push_back(stage(
+            decode.va_postproc_factory, "display-va-export"));
         branch.stages.push_back(stage("capsfilter", "display-upload-caps"));
         branch.stages.push_back(stage("glupload", "display-gl-upload"));
         branch.stages.push_back(stage(
@@ -472,9 +626,14 @@ PipelineBranchTopology resolve_display_topology(
         branch.stages.push_back(stage("capsfilter", "display-sink-caps"));
         branch.stages.push_back(stage("gtkglsink", "display-sink"));
     } else if (plan.display_backend == SsvResolvedDisplayBackend::GtkSink) {
-        if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
+        if (decode.backend == SsvDecodeBackend::Vaapi) {
             branch.stages.push_back(stage(
-                plan.decode.va_postproc_factory, "display-va-download"));
+                decode.va_postproc_factory, "display-va-download"));
+            branch.stages.push_back(stage(
+                "capsfilter", "display-download-caps"));
+        } else if (decode.backend == SsvDecodeBackend::Nvdec) {
+            branch.stages.push_back(
+                stage("cudadownload", "display-cuda-download"));
             branch.stages.push_back(stage(
                 "capsfilter", "display-download-caps"));
         }
@@ -482,14 +641,24 @@ PipelineBranchTopology resolve_display_topology(
         branch.stages.push_back(stage("capsfilter", "display-sink-caps"));
         branch.stages.push_back(stage("gtksink", "display-sink"));
     } else {
-        if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
-            branch.stages.push_back(stage(
-                plan.decode.va_postproc_factory, "display-va-download"));
-            branch.stages.push_back(stage(
-                "capsfilter", "display-download-caps"));
+        const auto &encode = require_encode_plan(plan);
+        const bool hardware_encode =
+            encode.backend != SsvEncodeBackend::Software;
+        if (!hardware_encode) {
+            if (decode.backend == SsvDecodeBackend::Vaapi) {
+                branch.stages.push_back(stage(
+                    decode.va_postproc_factory, "display-va-download"));
+                branch.stages.push_back(stage(
+                    "capsfilter", "display-download-caps"));
+            } else if (decode.backend == SsvDecodeBackend::Nvdec) {
+                branch.stages.push_back(
+                    stage("cudadownload", "display-cuda-download"));
+                branch.stages.push_back(stage(
+                    "capsfilter", "display-download-caps"));
+            }
+            branch.stages.push_back(stage("videoconvert", "display-convert"));
         }
-        branch.stages.push_back(stage("videoconvert", "display-convert"));
-        if (config.display.rtsp.burn_in_overlay) {
+        if (config.display.rtsp.burn_in_overlay && !hardware_encode) {
             branch.stages.push_back(
                 stage("capsfilter", "display-overlay-caps"));
             branch.stages.push_back(stage("ssvoverlay", "display-overlay"));
@@ -497,8 +666,8 @@ PipelineBranchTopology resolve_display_topology(
                 stage("videoconvert", "display-encode-convert"));
         }
         branch.stages.push_back(stage("capsfilter", "display-encode-caps"));
-        branch.stages.push_back(stage(
-            plan.display_encoder_factory, "display-encoder"));
+        branch.stages.push_back(
+            stage(encode.encoder_factory, "display-encoder"));
         branch.stages.push_back(stage("h264parse", "display-h264-parser"));
         branch.stages.push_back(stage("rtph264pay", "display-rtp-pay"));
         branch.stages.push_back(stage(
@@ -511,6 +680,7 @@ PipelineBranchTopology resolve_analysis_topology(
     const SsvConfig &config,
     const SsvPipelinePlan &plan)
 {
+    const auto &decode = plan.codec.decode;
     PipelineBranchTopology branch;
     if (config.inference.analysis_fps > 0)
         branch.max_rate = config.inference.analysis_fps;
@@ -518,10 +688,14 @@ PipelineBranchTopology resolve_analysis_topology(
         stage("queue", "analysis-queue"),
         stage("videorate", "analysis-rate"),
     };
-    if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
+    if (decode.backend == SsvDecodeBackend::Vaapi) {
         branch.stages.push_back(stage(
-            plan.decode.va_postproc_factory, "analysis-va-postproc"));
+            decode.va_postproc_factory, "analysis-va-postproc"));
     } else {
+        if (decode.backend == SsvDecodeBackend::Nvdec) {
+            branch.stages.push_back(
+                stage("cudadownload", "analysis-cuda-download"));
+        }
         branch.stages.push_back(stage("videoscale", "analysis-scale"));
         branch.stages.push_back(stage("videoconvert", "analysis-convert"));
     }
@@ -560,7 +734,6 @@ const std::string &SsvPipelineBuilderError::stage() const noexcept
 pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
     const SsvConfig &config,
     const SsvPipelinePlan &plan,
-    const SsvHardwareCapabilities &registry,
     std::optional<infer::SsvModelContract> model_contract)
 {
     if (config.sources.size() != 1
@@ -570,56 +743,61 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
             "pipeline.build",
             "pipeline config and resolved source must match");
     }
-    if (plan.inference_backend && !model_contract) {
+    if (plan.inference.backend && !model_contract) {
         throw SsvPipelineBuilderError(
             SsvExitCode::ModelInitializationFailed,
             "inference.model_contract",
             "inference pipeline requires a validated model contract");
     }
 
+    const auto &capabilities = plan.capability_snapshot;
+    const auto &decode = plan.codec.decode;
     PipelineTopology topology;
-    topology.decode_caps = plan.decode.backend == SsvDecodeBackend::Vaapi
-        ? "video/x-raw(memory:VAMemory),format=NV12"
-        : "video/x-raw,format=NV12";
+    topology.decode_caps = video_caps(plan.expected_caps.decode_output);
     topology.source_path = {
         stage("rtspsrc", "rtsp-source"),
         stage("capsfilter", "rtp-h264-caps"),
         stage("rtph264depay", "h264-depay"),
         stage("h264parse", "h264-parser"),
     };
-    if (config.evidence_cache.enabled) {
-        topology.encoded_tee = stage("tee", "encoded-tee");
-        topology.evidence_cache = PipelineBranchTopology {
-            .stages = {
-                stage("queue", "evidence-cache-queue"),
-                stage("splitmuxsink", "evidence-cache-sink"),
-            },
-            .queue_capacity = 32,
-            .leaky_downstream = true,
-            .drop_only = false,
-            .max_rate = std::nullopt,
-        };
-        topology.required_factories = {"mp4mux"};
-    }
-    topology.decode_path = {
-        stage(plan.decode.decoder_factory, "h264-decoder"),
+    topology.encoded_tee = stage("tee", "encoded-tee");
+    topology.evidence_cache = PipelineBranchTopology {
+        .stages = {
+            stage("queue", "evidence-cache-queue"),
+            stage("h264timestamper", "evidence-cache-timestamp"),
+            stage("splitmuxsink", "evidence-cache-sink"),
+        },
+        .queue_capacity = 32,
+        .leaky_downstream = true,
+        .drop_only = false,
+        .max_rate = std::nullopt,
     };
-    if (plan.decode.backend == SsvDecodeBackend::Software) {
-        // avdec_h264 commonly negotiates I420, while the shared decode
-        // contract requires NV12. Convert before the capsfilter so software
-        // decoding does not fail with not-negotiated.
-        topology.decode_path.push_back(stage("videoconvert", "decode-format"));
+    topology.required_factories = {"mp4mux"};
+    if (plan.codec.decoded_path_required) {
+        topology.decode_path = {
+            stage(decode.decoder_factory, "h264-decoder"),
+        };
+        if (decode.backend == SsvDecodeBackend::Software) {
+            // avdec_h264 commonly negotiates I420, while the shared decode
+            // contract requires NV12. Convert before the capsfilter so software
+            // decoding does not fail with not-negotiated.
+            topology.decode_path.push_back(
+                stage("videoconvert", "decode-format"));
+        }
+        topology.decode_path.push_back(
+            stage("capsfilter", "decode-memory-caps"));
+        topology.decode_path.push_back(stage("clocksync", "decode-clock"));
+        topology.decode_path.push_back(stage("tee", "decoded-tee"));
+        topology.contracts.push_back(contract_from_caps(
+            SsvPipelineBoundary::DecodeTee,
+            plan.expected_caps.decode_output));
     }
-    topology.decode_path.push_back(stage("capsfilter", "decode-memory-caps"));
-    topology.decode_path.push_back(stage("clocksync", "decode-clock"));
-    topology.decode_path.push_back(stage("tee", "decoded-tee"));
-    topology.contracts.push_back(contract_from_caps(
-        SsvPipelineBoundary::DecodeTee,
-        plan.expected_caps.decode_output));
 
     if (config.display.enabled) {
         topology.display = resolve_display_topology(config, plan);
-        if (plan.display_backend == SsvResolvedDisplayBackend::GtkGlSink) {
+        if (plan.display_encoded_passthrough) {
+            topology.display_from_encoded = true;
+        } else if (plan.display_backend == SsvResolvedDisplayBackend::GtkGlSink) {
             const auto &sink_caps = require_expected_caps(
                 plan.expected_caps.display_sink_input, "display sink");
             const auto &upload_caps = require_expected_caps(
@@ -636,9 +814,12 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
         } else if (plan.display_backend == SsvResolvedDisplayBackend::GtkSink) {
             const auto &sink_caps = require_expected_caps(
                 plan.expected_caps.display_sink_input, "display sink");
-            if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
+            if (decode.backend == SsvDecodeBackend::Vaapi) {
                 topology.display_download_caps =
                     "video/x-raw,format=RGBA";
+            } else if (decode.backend == SsvDecodeBackend::Nvdec) {
+                topology.display_download_caps =
+                    "video/x-raw,format=NV12";
             }
             topology.display_sink_caps = "video/x-raw,format=BGRx";
             topology.contracts.push_back(contract_from_caps(
@@ -657,11 +838,17 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
             const auto &encode_caps = require_expected_caps(
                 plan.expected_caps.display_encode_input,
                 "display encoder input");
-            if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
-                topology.display_download_caps =
-                    "video/x-raw,format=RGBA";
+            const auto &encode = require_encode_plan(plan);
+            if (encode.input_memory == SsvMemoryKind::SystemMemory) {
+                if (decode.backend == SsvDecodeBackend::Vaapi) {
+                    topology.display_download_caps =
+                        "video/x-raw,format=RGBA";
+                } else if (decode.backend == SsvDecodeBackend::Nvdec) {
+                    topology.display_download_caps =
+                        "video/x-raw,format=NV12";
+                }
             }
-            topology.display_encode_caps = "video/x-raw,format=I420";
+            topology.display_encode_caps = video_caps(encode_caps);
             topology.contracts.push_back(contract_from_caps(
                 SsvPipelineBoundary::DisplayEncodeInput, encode_caps));
         }
@@ -669,7 +856,7 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
     if (config.inference.enabled) {
         topology.analysis = resolve_analysis_topology(config, plan);
         topology.analysis_host_caps = model_caps(*model_contract);
-        if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
+        if (decode.backend != SsvDecodeBackend::Software) {
             topology.contracts.push_back(contract_from_caps(
                 SsvPipelineBoundary::AnalysisGpuInput,
                 require_expected_caps(
@@ -684,6 +871,17 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
             model_contract->width,
             model_contract->height));
     }
+    if (topology.display_from_encoded
+        && !topology.analysis
+        && !topology.decode_path.empty()) {
+        topology.decoded_discard = PipelineBranchTopology {
+            .stages = {
+                stage("queue", "decoded-discard-queue"),
+                stage("fakesink", "decoded-discard-sink"),
+            },
+            .max_rate = std::nullopt,
+        };
+    }
     if (!topology.display && !topology.analysis) {
         topology.display = PipelineBranchTopology {
             .stages = {
@@ -694,28 +892,29 @@ pipeline_internal::PipelineTopology pipeline_internal::resolve_topology(
         };
     }
 
-    require_registered(registry, topology.source_path);
+    require_registered(capabilities, topology.source_path);
     if (topology.encoded_tee)
-        require_registered(registry, {*topology.encoded_tee});
-    require_registered(registry, topology.decode_path);
+        require_registered(capabilities, {*topology.encoded_tee});
+    require_registered(capabilities, topology.decode_path);
     if (topology.display)
-        require_registered(registry, topology.display->stages);
+        require_registered(capabilities, topology.display->stages);
     if (topology.analysis)
-        require_registered(registry, topology.analysis->stages);
+        require_registered(capabilities, topology.analysis->stages);
+    if (topology.decoded_discard)
+        require_registered(capabilities, topology.decoded_discard->stages);
     if (topology.evidence_cache)
-        require_registered(registry, topology.evidence_cache->stages);
-    require_registered(registry, topology.required_factories);
+        require_registered(capabilities, topology.evidence_cache->stages);
+    require_registered(capabilities, topology.required_factories);
     return topology;
 }
 
 SsvPipelineInstance SsvPipelineBuilder::build(
     const SsvConfig &config,
     const SsvPipelinePlan &plan,
-    const SsvHardwareCapabilities &registry,
     SsvInferenceService *inference_service)
 {
     std::optional<infer::SsvModelContract> model_contract;
-    if (plan.inference_backend) {
+    if (plan.inference.backend) {
         if (inference_service == nullptr) {
             throw SsvPipelineBuilderError(
                 SsvExitCode::ModelInitializationFailed,
@@ -726,7 +925,7 @@ SsvPipelineInstance SsvPipelineBuilder::build(
             inference_service);
     }
     auto topology = pipeline_internal::resolve_topology(
-        config, plan, registry, model_contract);
+        config, plan, model_contract);
 
     auto request_pad_leases =
         std::make_shared<std::vector<RequestPadLease>>();
@@ -757,6 +956,14 @@ SsvPipelineInstance SsvPipelineBuilder::build(
                 rethrow_display_start(error);
             throw;
         }
+    }
+    if (topology.decoded_discard) {
+        for (const auto &item : topology.decoded_discard->stages)
+            add_element(pipeline.get(), item, elements);
+        configure_queue(
+            required_element(
+                elements, topology.decoded_discard->stages.front().name),
+            *topology.decoded_discard);
     }
     if (topology.analysis) {
         for (const auto &item : topology.analysis->stages)
@@ -790,13 +997,15 @@ SsvPipelineInstance SsvPipelineBuilder::build(
         "wait-for-keyframe", topology.depay_wait_for_keyframe,
         "request-keyframe", topology.depay_request_keyframe,
         nullptr);
-    set_caps(
-        required_element(elements, "decode-memory-caps"),
-        topology.decode_caps);
-    g_object_set(
-        required_element(elements, "decode-clock"),
-        "sync", TRUE,
-        nullptr);
+    if (!topology.decode_path.empty()) {
+        set_caps(
+            required_element(elements, "decode-memory-caps"),
+            topology.decode_caps);
+        g_object_set(
+            required_element(elements, "decode-clock"),
+            "sync", TRUE,
+            nullptr);
+    }
 
     std::shared_ptr<SsvEvidenceCache> evidence_cache;
     if (topology.evidence_cache) {
@@ -816,8 +1025,10 @@ SsvPipelineInstance SsvPipelineBuilder::build(
         }
     }
 
-    auto *decoder = required_element(elements, "h264-decoder");
-    configure_decoder(decoder, plan.decode);
+    if (!topology.decode_path.empty()) {
+        auto *decoder = required_element(elements, "h264-decoder");
+        configure_decoder(decoder, plan.codec.decode);
+    }
 
     if (topology.display) {
         try {
@@ -829,9 +1040,11 @@ SsvPipelineInstance SsvPipelineBuilder::build(
                 if (item.factory == "videorate") {
                     configure_rate(required_element(elements, item.name),
                                    *topology.display);
-                } else if (item.factory == plan.decode.va_postproc_factory) {
+                } else if (item.factory == plan.codec.decode.va_postproc_factory) {
                     configure_va_device(
-                        required_element(elements, item.name), plan.decode);
+                        required_element(elements, item.name),
+                        plan.codec.decode.device,
+                        "capability.decode.device");
                 }
             }
             if (!topology.display_upload_caps.empty()) {
@@ -873,14 +1086,23 @@ SsvPipelineInstance SsvPipelineBuilder::build(
                     required_element(elements, "display-encode-caps"),
                     topology.display_encode_caps);
             }
+            if (plan.codec.encode
+                && plan.codec.encode->backend != SsvEncodeBackend::Software) {
+                configure_encoder(
+                    required_element(elements, "display-encoder"),
+                    *plan.codec.encode);
+            }
             auto *sink = required_element(
                 elements, topology.display->stages.back().name);
             if (plan.display_backend
                 == SsvResolvedDisplayBackend::RtspClientSink) {
-                g_object_set(
-                    sink,
-                    "location", config.display.rtsp.location.c_str(),
-                    nullptr);
+                if (g_object_class_find_property(
+                        G_OBJECT_GET_CLASS(sink), "location") != nullptr) {
+                    g_object_set(
+                        sink,
+                        "location", config.display.rtsp.location.c_str(),
+                        nullptr);
+                }
                 g_object_set(
                     required_element(elements, "display-rtp-pay"),
                     "pt", 96,
@@ -924,9 +1146,12 @@ SsvPipelineInstance SsvPipelineBuilder::build(
             } else if (item.factory == "videoscale") {
                 configure_resize_borders(
                     required_element(elements, item.name), add_borders);
-            } else if (item.factory == plan.decode.va_postproc_factory) {
+            } else if (item.factory == plan.codec.decode.va_postproc_factory) {
                 auto *postproc = required_element(elements, item.name);
-                configure_va_device(postproc, plan.decode);
+                configure_va_device(
+                    postproc,
+                    plan.codec.decode.device,
+                    "capability.decode.device");
                 configure_resize_borders(postproc, add_borders);
             }
         }
@@ -987,36 +1212,59 @@ SsvPipelineInstance SsvPipelineBuilder::build(
     if (topology.evidence_cache) {
         link_stages(topology.evidence_cache->stages, elements);
     }
+    auto *encoded_source = required_element(
+        elements, topology.source_path.back().name);
+    if (!topology.encoded_tee && topology.decode_path.empty()) {
+        throw SsvPipelineBuilderError(
+            SsvExitCode::PipelineContractFailed,
+            "pipeline.build",
+            "pipeline has no encoded or decoded output branch");
+    }
     link_elements(
-        required_element(elements, topology.source_path.back().name),
+        encoded_source,
         required_element(
             elements,
             topology.encoded_tee
                 ? topology.encoded_tee->name
                 : topology.decode_path.front().name));
     if (topology.encoded_tee) {
-        request_pad_leases->push_back(link_tee_branch(
-            required_element(elements, topology.encoded_tee->name),
-            required_element(elements, topology.decode_path.front().name),
-            "encoded"));
+        auto *encoded_tee = required_element(
+            elements, topology.encoded_tee->name);
+        if (!topology.decode_path.empty()) {
+            request_pad_leases->push_back(link_tee_branch(
+                encoded_tee,
+                required_element(elements, topology.decode_path.front().name),
+                "encoded"));
+        }
         if (topology.evidence_cache) {
             request_pad_leases->push_back(link_tee_branch(
-                required_element(elements, topology.encoded_tee->name),
+                encoded_tee,
                 required_element(
                     elements, topology.evidence_cache->stages.front().name),
                 "encoded"));
         }
+        if (topology.display && topology.display_from_encoded) {
+            request_pad_leases->push_back(link_tee_branch(
+                encoded_tee,
+                required_element(
+                    elements, topology.display->stages.front().name),
+                "encoded"));
+        }
     }
     link_stages(topology.decode_path, elements);
-    auto *tee = required_element(elements, "decoded-tee");
+    GstElement *decoded_tee = nullptr;
+    if (!topology.decode_path.empty())
+        decoded_tee = required_element(elements, "decoded-tee");
     if (topology.display) {
         try {
             link_stages(topology.display->stages, elements);
-            request_pad_leases->push_back(link_tee_branch(
-                tee,
-                required_element(
-                    elements, topology.display->stages.front().name),
-                "decoded"));
+            if (!topology.display_from_encoded) {
+                request_pad_leases->push_back(link_tee_branch(
+                    decoded_tee,
+                    required_element(
+                        elements, topology.display->stages.front().name),
+                    "decoded"));
+            }
         } catch (const SsvPipelineBuilderError &error) {
             if (config.display.enabled)
                 rethrow_display_start(error);
@@ -1026,9 +1274,17 @@ SsvPipelineInstance SsvPipelineBuilder::build(
     if (topology.analysis) {
         link_stages(topology.analysis->stages, elements);
         request_pad_leases->push_back(link_tee_branch(
-            tee,
+            decoded_tee,
             required_element(
                 elements, topology.analysis->stages.front().name),
+            "decoded"));
+    }
+    if (topology.decoded_discard) {
+        link_stages(topology.decoded_discard->stages, elements);
+        request_pad_leases->push_back(link_tee_branch(
+            decoded_tee,
+            required_element(
+                elements, topology.decoded_discard->stages.front().name),
             "decoded"));
     }
 
@@ -1039,17 +1295,19 @@ SsvPipelineInstance SsvPipelineBuilder::build(
             [](SsvInferenceService *service) { g_object_unref(service); },
         };
     }
-    watch_boundary(
-        required_element(elements, "decode-memory-caps"),
-        contract_at(topology, SsvPipelineBoundary::DecodeTee),
-        geometry_service
-            ? std::function<void(int, int)>(
-                  [geometry_service, source_id = plan.source_id](
-                      int width, int height) {
-                      infer::ssv_inference_service_update_source_geometry(
-                          geometry_service.get(), source_id, width, height);
-                  })
-            : std::function<void(int, int)> {});
+    if (!topology.decode_path.empty()) {
+        watch_boundary(
+            required_element(elements, "decode-memory-caps"),
+            contract_at(topology, SsvPipelineBoundary::DecodeTee),
+            geometry_service
+                ? std::function<void(int, int)>(
+                      [geometry_service, source_id = plan.source_id](
+                          int width, int height) {
+                          infer::ssv_inference_service_update_source_geometry(
+                              geometry_service.get(), source_id, width, height);
+                      })
+                : std::function<void(int, int)> {});
+    }
     if (config.display.enabled) {
         try {
             if (!topology.display_upload_caps.empty()) {
@@ -1079,7 +1337,7 @@ SsvPipelineInstance SsvPipelineBuilder::build(
         }
     }
     if (topology.analysis) {
-        if (plan.decode.backend == SsvDecodeBackend::Vaapi) {
+        if (plan.codec.decode.backend != SsvDecodeBackend::Software) {
             watch_boundary(
                 required_element(elements, "analysis-rate"),
                 contract_at(

@@ -215,7 +215,7 @@ void test_rejects_incomplete_contract_observations()
 ssv::SsvPipelinePlan make_plan(bool fallback_allowed)
 {
     ssv::SsvPipelinePlan plan;
-    plan.decode = {
+    plan.codec.decode = {
         .backend = ssv::SsvDecodeBackend::Vaapi,
         .device = {},
         .decoder_factory = "vah264dec",

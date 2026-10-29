@@ -12,10 +12,21 @@ from ssv_agent.event_store import DurableJob, EventLedger, JobKind, JobState
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.prompt import build_review_prompt
 from ssv_agent.result import ReviewResult
+from ssv_agent.report import REPORT_TEMPLATE_VERSION
 from ssv_agent.knowledge.schema import Chunk, RetrievalResult
-from ssv_agent.evidence_provider import EvidenceArtifact, EvidenceExtractionError
+from ssv_agent.evidence_provider import (
+    EvidenceArtifact,
+    EvidenceCacheWindowUnavailable,
+    EvidenceExtractionError,
+)
 from ssv_agent.config import RecordingEvidenceConfig
-from ssv_agent.workers import _LeaseHeartbeat, IndexWorker, ReviewWorker, RecordingEvidenceWorker
+from ssv_agent.workers import (
+    _LeaseHeartbeat,
+    IndexWorker,
+    RecordingEvidenceWorker,
+    ReportWorker,
+    ReviewWorker,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +63,22 @@ def _record_case(
     return case.evidence[0].evidence_id
 
 
+def _record_reviewed_case(db_path: Path, evidence_path: Path) -> str:
+    evidence_id = _record_case(db_path, evidence_path)
+    with EventLedger(db_path) as ledger:
+        job = ledger.claim_job(JobKind.REVIEW, "review-seed", lease_ms=1_000)
+        assert job is not None
+        result = ReviewResult(
+            verdict="violation",
+            confidence=0.91,
+            evidence_status="available",
+            evidence_ids=[evidence_id],
+            explanation="The registered frame supports the finding.",
+        )
+        ledger.complete_review_job(job, "review-seed", result, "result.json")
+    return evidence_id
+
+
 def _requeue_claim_for_a_stricter_retry_limit(db_path: Path, kind: JobKind) -> None:
     with EventLedger(db_path) as ledger:
         claimed = ledger.claim_job(kind, "previous-worker", lease_ms=1_000)
@@ -70,7 +97,7 @@ def _record_recording_case(db_path: Path, root: Path) -> None:
     with EventLedger(
         db_path,
         evidence_roots=[str(root)],
-        recording_evidence=RecordingEvidenceConfig(enabled=True),
+        recording_evidence=RecordingEvidenceConfig(),
     ) as ledger:
         ledger.record(
             ReviewContext(
@@ -105,12 +132,12 @@ def test_recording_worker_completes_extract_before_review_is_claimable(tmp_path:
             return _recording_artifacts(tmp_path)
 
     worker = RecordingEvidenceWorker(
-        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
+        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()),
         extractor=Extractor(), worker_id="extract-test", lease_ms=1_000, max_retries=2, retry_delay_ms=0,
     )
     assert worker.run_once() is True
     assert calls == ["case-1"]
-    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)) as ledger:
+    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()) as ledger:
         assert ledger.claim_job(JobKind.REVIEW, "review", 1000) is not None
 
 
@@ -126,11 +153,119 @@ def test_recording_worker_marks_retryable_failure_and_does_not_extract_after_lim
             raise EvidenceExtractionError("window unavailable", retryable=True)
 
     worker = RecordingEvidenceWorker(
-        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
+        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()),
         extractor=Extractor(), worker_id="extract-test", lease_ms=1_000, max_retries=1, retry_delay_ms=0,
     )
     assert worker.run_once() is True
     assert calls == 1
+
+
+def test_recording_worker_keeps_retrying_full_window_then_registers_anchor_image(tmp_path: Path) -> None:
+    db_path = tmp_path / "events.db"
+    with EventLedger(
+        db_path, evidence_roots=[str(tmp_path)],
+        recording_evidence=RecordingEvidenceConfig(),
+    ) as ledger:
+        ledger.record(ReviewContext(
+            event_id="case-1", ingress_id="1-0", source="camera-1",
+            timestamp_ms=1000, frame_id=4, source_pts=10_000_000_000,
+            stream_generation=7,
+        ))
+    calls: list[str] = []
+
+    class Extractor:
+        def extract(self, case):
+            calls.append("full")
+            raise EvidenceCacheWindowUnavailable("evidence cache window is unavailable", retryable=True)
+
+        def extract_anchor_frame(self, case):
+            calls.append("anchor")
+            path = tmp_path / "derived" / case.event_id / "anchor.jpg"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"anchor-jpeg")
+            details = path.stat()
+            return (EvidenceArtifact(
+                kind="frame", path=path,
+                sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
+                mime_type="image/jpeg", size=details.st_size, mtime=details.st_mtime,
+                source_pts_start=9_000_000_000, source_pts_end=11_000_000_000,
+                stream_generation=7, coverage="anchor_only",
+            ),)
+
+    worker = RecordingEvidenceWorker(
+        ledger_factory=lambda: EventLedger(
+            db_path, evidence_roots=[str(tmp_path)],
+            recording_evidence=RecordingEvidenceConfig(),
+        ),
+        extractor=Extractor(), worker_id="extract-test", lease_ms=1_000,
+        max_retries=2, retry_delay_ms=0,
+    )
+    assert worker.run_once() is True
+    assert calls == ["full"]
+    assert worker.run_once() is True
+    assert calls == ["full", "full", "anchor"]
+    with EventLedger(db_path, evidence_roots=[str(tmp_path)]) as ledger:
+        case = ledger.get_case("case-1")
+        jobs = ledger.jobs_for_event("case-1")
+    assert case is not None and case.status == "manual_review"
+    assert [(item.kind, item.coverage) for item in case.evidence] == [
+        ("frame", "anchor_only")
+    ]
+    assert [item.kind for item in jobs] == [JobKind.EVIDENCE_EXTRACT]
+
+
+def test_recording_worker_recovers_published_anchor_after_lease_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    now_ms = 1_000_000
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: now_ms)
+    with EventLedger(
+        db_path, evidence_roots=[str(tmp_path)],
+        recording_evidence=RecordingEvidenceConfig(),
+    ) as ledger:
+        ledger.record(ReviewContext(
+            event_id="case-1", ingress_id="1-0", source="camera-1",
+            timestamp_ms=1000, frame_id=4, source_pts=10_000_000_000,
+            stream_generation=7,
+        ))
+        claimed = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "expired-worker", 10)
+        assert claimed is not None and claimed.attempts == 1
+    path = tmp_path / "derived" / "case-1" / "anchor.jpg"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"anchor-jpeg")
+    details = path.stat()
+    artifact = EvidenceArtifact(
+        kind="frame", path=path,
+        sha256=__import__("hashlib").sha256(path.read_bytes()).hexdigest(),
+        mime_type="image/jpeg", size=details.st_size, mtime=details.st_mtime,
+        source_pts_start=9_000_000_000, source_pts_end=11_000_000_000,
+        stream_generation=7, coverage="anchor_only",
+    )
+    now_ms += 20
+
+    class Extractor:
+        def extract(self, case):
+            raise AssertionError("an exhausted attempt must not extract again")
+
+        def existing_anchor_frame(self, case):
+            return (artifact,)
+
+    worker = RecordingEvidenceWorker(
+        ledger_factory=lambda: EventLedger(
+            db_path, evidence_roots=[str(tmp_path)],
+            recording_evidence=RecordingEvidenceConfig(),
+        ),
+        extractor=Extractor(), worker_id="recover-worker", lease_ms=1000,
+        max_retries=1, retry_delay_ms=0,
+    )
+    assert worker.run_once() is True
+    with EventLedger(db_path, evidence_roots=[str(tmp_path)]) as ledger:
+        case = ledger.get_case("case-1")
+        jobs = ledger.jobs_for_event("case-1")
+    assert case is not None and case.status == "manual_review"
+    assert case.evidence[0].coverage == "anchor_only"
+    assert jobs[0].state == JobState.COMPLETED
 
 
 def test_recording_worker_nonretryable_failure_marks_event_manual_review(tmp_path: Path) -> None:
@@ -142,11 +277,11 @@ def test_recording_worker_nonretryable_failure_marks_event_manual_review(tmp_pat
             raise EvidenceExtractionError("unsafe recording input", retryable=False)
 
     worker = RecordingEvidenceWorker(
-        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
+        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()),
         extractor=Extractor(), worker_id="extract-test", lease_ms=1_000, max_retries=3, retry_delay_ms=0,
     )
     assert worker.run_once() is True
-    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)) as ledger:
+    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()) as ledger:
         case = ledger.get_case("case-1")
         job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "other", 1000)
     assert case is not None and case.status == "manual_review"
@@ -169,12 +304,12 @@ def test_recording_worker_exhausted_reclaimed_job_marks_event_manual_review(tmp_
             return _recording_artifacts(tmp_path)
 
     worker = RecordingEvidenceWorker(
-        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
+        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()),
         extractor=Extractor(), worker_id="extract-test", lease_ms=1_000, max_retries=1, retry_delay_ms=0,
     )
     assert worker.run_once() is True
     assert calls == 0
-    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)) as ledger:
+    with EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()) as ledger:
         case = ledger.get_case("case-1")
     assert case is not None and case.status == "manual_review"
 
@@ -193,7 +328,7 @@ def test_recording_worker_stop_event_prevents_claim(tmp_path: Path) -> None:
             return _recording_artifacts(tmp_path)
 
     worker = RecordingEvidenceWorker(
-        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig(enabled=True)),
+        ledger_factory=lambda: EventLedger(db_path, evidence_roots=[str(tmp_path)], recording_evidence=RecordingEvidenceConfig()),
         extractor=Extractor(), worker_id="extract-test", lease_ms=1_000, max_retries=1, retry_delay_ms=0,
     )
     worker.run(stopping)
@@ -315,6 +450,64 @@ def test_review_worker_retrieves_rules_before_runner_and_accepts_matching_citati
     }
 
 
+def test_review_worker_downgrades_invalid_rule_citation_to_uncertain(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    evidence_id = _record_case(
+        db_path,
+        tmp_path / "frame.jpg",
+        event_type="person_without_helmet",
+        rule_id="r1",
+        rule_version="v1",
+    )
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+
+    class Retriever:
+        async def retrieve(self, query, *, top_k=5, filters=None):
+            return RetrievalResult(
+                query=query,
+                backend="fake",
+                chunks=[Chunk(
+                    chunk_id="chunk-1", content="必须佩戴安全帽", score=0.9,
+                    metadata={
+                        "source": "rules.md", "rule_id": "r1", "rule_version": "v1",
+                        "section": "5.2",
+                    },
+                )],
+            )
+
+    def runner(context, rule_context):
+        assert rule_context is not None and rule_context.available
+        return json.dumps({
+            "verdict": "violation", "confidence": 0.9,
+            "evidence_status": "available", "evidence_ids": [evidence_id],
+            "claims": [], "explanation": "模型给出了确定性结论",
+            "rule_citations": [{
+                "chunk_id": "chunk-1", "source": "wrong-rules.md",
+                "rule_id": "r1", "rule_version": "v1", "section": "5.2",
+            }],
+        })
+
+    worker = ReviewWorker(
+        ledger_factory=lambda: EventLedger(db_path), runner=runner,
+        rule_retriever=Retriever(), worker_id="review-test", lease_ms=1_000,
+        max_retries=2, retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        case = ledger.get_case("case-1")
+        remaining = ledger.claim_job(JobKind.REVIEW, "another-worker", lease_ms=1_000)
+
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == "uncertain"
+    assert case.review["confidence"] == 0.0
+    assert remaining is None
+
+
 def test_review_worker_refreshes_evidence_before_constructing_context(
     tmp_path: Path,
     monkeypatch,
@@ -394,6 +587,16 @@ def test_review_worker_retries_model_failure_then_marks_job_dead(tmp_path: Path)
     assert calls == 2
     assert case is not None
     assert case.review is None
+    with EventLedger(db_path) as ledger:
+        row = ledger._store._conn.execute(
+            "SELECT state, error_code, error_message, failed_at_ms FROM durable_jobs "
+            "WHERE kind = 'review' AND entity_id = 'case-1'"
+        ).fetchone()
+    assert row is not None
+    assert row["state"] == "dead"
+    assert row["error_code"] == "model_call_failed"
+    assert row["error_message"] == "模型服务调用失败，请稍后重试或检查服务配置。"
+    assert isinstance(row["failed_at_ms"], int)
 
 
 def test_review_worker_retries_invalid_json_and_unregistered_evidence(tmp_path: Path) -> None:
@@ -1090,3 +1293,181 @@ def test_index_worker_run_recovers_after_transient_ledger_context_failure(monkey
             },
         )
     ]
+
+
+def test_report_worker_writes_artifact_for_the_claimed_review_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        remaining = ledger.claim_job(JobKind.REPORT, "another-worker", lease_ms=1_000)
+
+    assert report is not None
+    assert report.review_revision == review.revision == 1
+    assert report.template_version == REPORT_TEMPLATE_VERSION
+    assert report.sha256
+    assert report.size_bytes > 0
+    assert report.artifact_path
+    assert Path(report.artifact_path).is_relative_to(outputs.resolve())
+    assert "违规" in Path(report.artifact_path).read_text(encoding="utf-8")
+    assert "The registered frame supports the finding\\." in Path(
+        report.artifact_path
+    ).read_text(encoding="utf-8")
+    assert remaining is None
+
+
+def test_report_worker_retries_with_the_same_content_addressed_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    original_complete = EventLedger.complete_report_job
+    completion_calls = 0
+
+    def fail_first_completion(self, *args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if completion_calls == 1:
+            raise RuntimeError("temporary ledger failure")
+        return original_complete(self, *args, **kwargs)
+
+    monkeypatch.setattr(EventLedger, "complete_report_job", fail_first_completion)
+    written_paths: list[Path] = []
+    original_writer = workers_module.write_analysis_report
+
+    def track_writer(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        written_paths.append(artifact.path)
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", track_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+
+    assert completion_calls == 2
+    assert len(written_paths) == 2
+    assert written_paths[0] == written_paths[1]
+    assert report is not None
+    assert report.artifact_path == str(written_paths[0])
+    assert report.review_revision == 1
+    assert review.verdict == "violation"
+
+
+def test_report_worker_marks_exhausted_job_dead_without_changing_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    writer_calls = 0
+
+    def failing_writer(*_args):
+        nonlocal writer_calls
+        writer_calls += 1
+        raise RuntimeError("disk unavailable")
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", failing_writer)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-test",
+        lease_ms=1_000,
+        max_retries=2,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        case = ledger.get_case("case-1")
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state FROM durable_jobs WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert writer_calls == 2
+    assert case is not None
+    assert case.review is not None
+    assert case.review["verdict"] == review.verdict == "violation"
+    assert report is None
+    assert row is not None and row["state"] == JobState.DEAD.value
+
+
+def test_report_worker_does_not_complete_after_lease_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    clock = [ledger_module._now_ms()]
+    monkeypatch.setattr(ledger_module, "_now_ms", lambda: clock[0])
+    original_writer = workers_module.write_analysis_report
+
+    def reclaim_during_write(event_id: str, review_id: str, markdown: str):
+        artifact = original_writer(event_id, review_id, markdown)
+        clock[0] += 2
+        with EventLedger(db_path) as rival:
+            reclaimed = rival.claim_job(JobKind.REPORT, "report-b", lease_ms=1_000)
+        assert reclaimed is not None
+        return artifact
+
+    monkeypatch.setattr(workers_module, "write_analysis_report", reclaim_during_write)
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path),
+        worker_id="report-a",
+        lease_ms=1,
+        max_retries=3,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        row = ledger._store._conn.execute(
+            "SELECT state, lease_owner, attempts FROM durable_jobs "
+            "WHERE kind = 'report' AND entity_id = ?",
+            ("case-1",),
+        ).fetchone()
+
+    assert report is None
+    assert row is not None
+    assert row["state"] == JobState.PROCESSING.value
+    assert row["lease_owner"] == "report-b"
+    assert row["attempts"] == 2

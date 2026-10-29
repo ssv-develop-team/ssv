@@ -1,6 +1,7 @@
 import asyncio
 
-from ssv_agent.knowledge.backends.local_markdown import LocalMarkdownRetriever, _split_clauses
+from ssv_agent.knowledge.backends.local_markdown import LocalMarkdownRetriever
+from ssv_agent.knowledge.rule_chunks import split_rule_clauses
 
 
 def test_local_markdown_returns_helmet_clause_first() -> None:
@@ -52,7 +53,7 @@ def test_local_markdown_filters_rule_identity_and_event_type(tmp_path) -> None:
 
 
 def test_clause_splitter_ignores_pdf_page_noise_and_parses_markdown_numbers() -> None:
-    passages = _split_clauses(
+    passages = split_rule_clauses(
         "rules.md",
         "# 规则标题\n## ? 1 ?\n1 第一条。\n1\nGB26860—2011\n"
         "## ? 2 ?\n# 2 第二条。\n",

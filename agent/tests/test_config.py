@@ -63,13 +63,18 @@ def test_knowledge_rules_dir_defaults_to_versioned_catalog() -> None:
             SsvConfig.model_validate({"agent": {"knowledge": {"rules_dir": rules_dir}}})
 
 
-def test_agent_config_evidence_roots_default_empty_and_requires_absolute_paths(
+def test_agent_config_evidence_roots_default_to_cache_and_requires_absolute_paths(
     tmp_path: Path,
 ) -> None:
-    assert SsvConfig().agent.evidence_roots == []
+    assert SsvConfig().agent.evidence_roots == ["/var/lib/ssv/evidence-cache"]
 
     root = tmp_path / "evidence"
-    config = SsvConfig.model_validate({"agent": {"evidence_roots": [str(root)]}})
+    config = SsvConfig.model_validate(
+        {
+            "evidence_cache": {"directory": str(root)},
+            "agent": {"evidence_roots": [str(root)]},
+        }
+    )
 
     assert config.agent.evidence_roots == [str(root)]
     for invalid in (["relative"], [""], [str(root), "../outside"]):
@@ -78,15 +83,20 @@ def test_agent_config_evidence_roots_default_empty_and_requires_absolute_paths(
 
 
 def test_recording_evidence_requires_a_root_and_valid_window() -> None:
-    with pytest.raises(ValidationError, match="evidence_roots"):
-        SsvConfig.model_validate({"agent": {"recording_evidence": {"enabled": True}}})
+    empty_roots = SsvConfig.model_validate({"agent": {"evidence_roots": []}})
+    assert empty_roots.agent.evidence_roots == []
+
+    with pytest.raises(ValidationError, match="matching agent.evidence_roots"):
+        SsvConfig.model_validate(
+            {
+                "evidence_cache": {"directory": "/tmp/custom-cache"},
+                "agent": {"evidence_roots": []},
+            }
+        )
 
     config = SsvConfig.model_validate(
         {
-            "evidence_cache": {
-                "enabled": True,
-                "directory": "/var/lib/ssv/evidence",
-            },
+            "evidence_cache": {"directory": "/var/lib/ssv/evidence"},
             "sources": [
                 {
                     "id": "camera-01",
@@ -97,27 +107,25 @@ def test_recording_evidence_requires_a_root_and_valid_window() -> None:
             ],
             "agent": {
                 "evidence_roots": ["/var/lib/ssv/evidence"],
-                "recording_evidence": {"enabled": True},
+                "recording_evidence": {},
             },
         }
     )
 
-    assert config.sources == [
-        AgentSourceConfig(id="camera-01", uri="rtsp://localhost:8554/stream")
-    ]
-    assert config.agent.recording_evidence == RecordingEvidenceConfig(enabled=True)
+    assert config.sources == [AgentSourceConfig(id="camera-01", uri="rtsp://localhost:8554/stream")]
+    assert config.agent.recording_evidence == RecordingEvidenceConfig()
 
     for recording_evidence in (
-        {"enabled": True, "clip_before_ms": 0},
-        {"enabled": True, "clip_after_ms": 0},
-        {"enabled": True, "clip_after_ms": -1},
-        {"enabled": True, "clip_before_ms": 999},
-        {"enabled": True, "clip_after_ms": 999},
-        {"enabled": True, "merge_gap_ms": 0},
-        {"enabled": True, "lost_grace_ms": -1},
-        {"enabled": True, "silence_timeout_ms": 0},
-        {"enabled": True, "max_episode_ms": 3000, "merge_gap_ms": 3000},
-        {"enabled": True, "unknown": True},
+        {"clip_before_ms": 0},
+        {"clip_after_ms": 0},
+        {"clip_after_ms": -1},
+        {"clip_before_ms": 999},
+        {"clip_after_ms": 999},
+        {"merge_gap_ms": 0},
+        {"lost_grace_ms": -1},
+        {"silence_timeout_ms": 0},
+        {"max_episode_ms": 3000, "merge_gap_ms": 3000},
+        {"unknown": True},
     ):
         with pytest.raises(ValidationError):
             SsvConfig.model_validate(
@@ -130,48 +138,40 @@ def test_recording_evidence_requires_a_root_and_valid_window() -> None:
             )
 
 
-def test_recording_evidence_requires_shared_enabled_cache_inside_allowed_root() -> None:
+def test_recording_evidence_requires_shared_cache_inside_allowed_root() -> None:
     config = SsvConfig.model_validate(
         {
             "evidence_cache": {
-                "enabled": True,
                 "directory": "/var/lib/ssv/evidence-cache",
             },
             "agent": {
                 "evidence_roots": ["/var/lib/ssv"],
-                "recording_evidence": {
-                    "enabled": True,
-                },
             },
         }
     )
 
-    assert config.evidence_cache.enabled is True
-    assert config.agent.recording_evidence == RecordingEvidenceConfig(enabled=True)
+    assert config.evidence_cache.directory == "/var/lib/ssv/evidence-cache"
+    assert config.agent.recording_evidence == RecordingEvidenceConfig()
 
-    invalid_cases = (
-        {"enabled": False, "directory": "/var/lib/ssv/evidence-cache"},
-        {"enabled": True, "directory": "/tmp/evidence-cache"},
+    default_cache_without_agent_roots = SsvConfig.model_validate(
+        {"agent": {"evidence_roots": []}}
     )
-    for cache in invalid_cases:
-        with pytest.raises(ValidationError, match="recording_evidence"):
-            SsvConfig.model_validate(
-                {
-                    "evidence_cache": cache,
-                    "agent": {
-                        "evidence_roots": ["/var/lib/ssv"],
-                        "recording_evidence": {
-                            "enabled": True,
-                        },
-                    },
-                }
-            )
+    assert default_cache_without_agent_roots.evidence_cache.directory == (
+        "/var/lib/ssv/evidence-cache"
+    )
+
+    with pytest.raises(ValidationError, match="recording_evidence"):
+        SsvConfig.model_validate(
+            {
+                "evidence_cache": {"directory": "/tmp/evidence-cache"},
+                "agent": {"evidence_roots": ["/var/lib/ssv"]},
+            }
+        )
 
     with pytest.raises(ValidationError):
         SsvConfig.model_validate(
             {
                 "evidence_cache": {
-                    "enabled": True,
                     "directory": "relative-cache",
                 }
             }
@@ -182,19 +182,17 @@ def test_recording_evidence_reuses_worker_runtime_settings() -> None:
     config = SsvConfig.model_validate(
         {
             "evidence_cache": {
-                "enabled": True,
                 "directory": "/var/lib/ssv/evidence",
             },
             "agent": {
                 "evidence_roots": ["/var/lib/ssv/evidence"],
                 "recording_evidence": {
-                    "enabled": True,
                     "poll_interval_ms": 250,
                     "lease_ms": 5_000,
                     "max_retries": 4,
                     "retry_delay_ms": 2_000,
                 },
-            }
+            },
         }
     )
 
@@ -212,7 +210,6 @@ def test_recording_evidence_rejects_unknown_runtime_keys() -> None:
                 "agent": {
                     "evidence_roots": ["/var/lib/ssv/evidence"],
                     "recording_evidence": {
-                        "enabled": True,
                         "frame_offsets_ms": [-1000, 0, 1000],
                     },
                 }
@@ -228,7 +225,6 @@ def test_recording_evidence_rejects_provider_key() -> None:
 def test_recording_evidence_defaults_are_constant() -> None:
     defaults = RecordingEvidenceConfig()
 
-    assert defaults.enabled is False
     assert defaults.poll_interval_ms == 1000
     assert defaults.lease_ms == 30_000
     assert defaults.max_retries == 3
@@ -253,6 +249,33 @@ def test_recording_evidence_defaults_are_constant() -> None:
 def test_agent_sources_require_non_empty_id_and_uri(source: dict[str, str]) -> None:
     with pytest.raises(ValidationError):
         SsvConfig.model_validate({"sources": [source]})
+
+
+def test_source_ids_must_be_unique() -> None:
+    with pytest.raises(ValidationError, match=r"sources\[\]\.id values must be unique"):
+        SsvConfig.model_validate(
+            {
+                "sources": [
+                    {"id": "camera-01", "uri": "rtsp://localhost/1"},
+                    {"id": "camera-01", "uri": "rtsp://localhost/2"},
+                ]
+            }
+        )
+
+
+def test_source_configuration_rejects_wvp_channel_mapping() -> None:
+    with pytest.raises(ValidationError, match="wvp_channel_id"):
+        SsvConfig.model_validate(
+            {
+                "sources": [
+                    {
+                        "id": "camera-01",
+                        "uri": "rtsp://localhost/stream",
+                        "wvp_channel_id": "34020000001320000001",
+                    }
+                ]
+            }
+        )
 
 
 def test_redis_reclaim_settings_are_strict_and_support_an_optional_consumer_name() -> None:
@@ -303,6 +326,12 @@ agent:
     retry_delay_ms: 200
     embedding_backend: "bge_m3"
     embedding_model: "/models/bge-m3"
+  reporting:
+    enabled: true
+    poll_interval_ms: 750
+    lease_ms: 8000
+    max_retries: 6
+    retry_delay_ms: 250
 """.strip(),
         encoding="utf-8",
     )
@@ -314,6 +343,30 @@ agent:
     assert cfg.agent.indexing.enabled is True
     assert cfg.agent.indexing.embedding_backend == "bge_m3"
     assert cfg.agent.indexing.embedding_model == "/models/bge-m3"
+    assert cfg.agent.reporting.enabled is True
+    assert cfg.agent.reporting.poll_interval_ms == 750
+    assert cfg.agent.reporting.lease_ms == 8000
+    assert cfg.agent.reporting.max_retries == 6
+    assert cfg.agent.reporting.retry_delay_ms == 250
+
+
+def test_reporting_worker_defaults_enabled_and_rejects_invalid_settings() -> None:
+    defaults = SsvConfig().agent.reporting
+    assert defaults.enabled is True
+    assert defaults.poll_interval_ms == 1000
+    assert defaults.lease_ms == 30_000
+    assert defaults.max_retries == 3
+    assert defaults.retry_delay_ms == 1000
+
+    for invalid in (
+        {"enabled": "true"},
+        {"poll_interval_ms": 0},
+        {"lease_ms": 0},
+        {"max_retries": 0},
+        {"retry_delay_ms": -1},
+    ):
+        with pytest.raises(ValidationError):
+            SsvConfig.model_validate({"agent": {"reporting": invalid}})
 
 
 def test_knowledge_config_has_safe_defaults_and_validates_threshold() -> None:
@@ -449,26 +502,23 @@ def test_load_config_accepts_complete_example(
     assert cfg.agent.max_retries == 3
 
 
-def test_deployment_recording_evidence_defaults_can_be_enabled() -> None:
+def test_deployment_recording_evidence_defaults_are_active() -> None:
     config = SsvConfig.model_validate(
         {
             "evidence_cache": {
-                "enabled": True,
                 "directory": "/var/lib/ssv/evidence",
             },
             "agent": {
                 "evidence_roots": ["/var/lib/ssv/evidence"],
                 "recording_evidence": {
-                    "enabled": True,
                     "clip_before_ms": 2500,
                     "clip_after_ms": 2500,
                 },
-            }
+            },
         }
     )
 
     recording_evidence = config.agent.recording_evidence
-    assert recording_evidence.enabled is True
     assert recording_evidence.clip_before_ms == 2500
     assert recording_evidence.clip_after_ms == 2500
 
@@ -480,7 +530,8 @@ def test_example_recording_evidence_defaults(
     monkeypatch.delenv("REDIS_PORT", raising=False)
     example = load_config(Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml")
 
-    assert example.agent.recording_evidence.enabled is False
+    assert example.evidence_cache.directory == "/var/lib/ssv/evidence-cache"
+    assert example.agent.evidence_roots == ["/var/lib/ssv/evidence-cache"]
     assert example.agent.recording_evidence.clip_before_ms == 2500
     assert example.agent.recording_evidence.clip_after_ms == 2500
 
@@ -528,3 +579,10 @@ def test_cli_does_not_pass_example_as_default_config(
     cli.main()
 
     assert observed_paths == [None]
+
+
+def test_removed_evidence_switches_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="enabled"):
+        SsvConfig.model_validate({"agent": {"recording_evidence": {"enabled": True}}})
+    with pytest.raises(ValidationError, match="enabled"):
+        SsvConfig.model_validate({"evidence_cache": {"enabled": False}})

@@ -120,6 +120,7 @@ struct SsvOverlayConfig {
 struct SsvRtspOutputConfig {
     std::string location;
     bool burn_in_overlay = false;
+    bool encoded_passthrough = false;
 };
 
 struct SsvDisplayConfig {
@@ -243,7 +244,6 @@ struct SsvTrackingConfig {
 };
 
 struct SsvEvidenceCacheConfig {
-    bool enabled = false;
     std::string directory = "/var/lib/ssv/evidence-cache";
     int segment_duration_ms = 10000;
     int retention_ms = 120000;

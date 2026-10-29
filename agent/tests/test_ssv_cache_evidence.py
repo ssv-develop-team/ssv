@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
 from ssv_agent.config import EvidenceCacheConfig, RecordingEvidenceConfig
 from ssv_agent.event_store import EventCase
-from ssv_agent.evidence_provider import EvidenceExtractionError
+from ssv_agent.evidence_provider import EvidenceCacheWindowUnavailable, EvidenceExtractionError
 from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
 
 
@@ -21,11 +23,31 @@ class RecordedCall:
 
 
 class FakeCommandRunner:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        before_run: Callable[[], None] | None = None,
+        verify_inputs: bool = False,
+    ) -> None:
         self.calls: list[RecordedCall] = []
+        self.input_paths: list[tuple[Path, ...]] = []
+        self._before_run = before_run
+        self._verify_inputs = verify_inputs
 
     def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(RecordedCall(tuple(args), kwargs))
+        if self._before_run is not None:
+            before_run = self._before_run
+            self._before_run = None
+            before_run()
+        if self._verify_inputs:
+            concat_list = Path(args[args.index("-i") + 1])
+            inputs = tuple(
+                Path(line[len("file '") : -1].replace("'\\''", "'"))
+                for line in concat_list.read_text(encoding="utf-8").splitlines()
+            )
+            self.input_paths.append(inputs)
+            assert inputs and all(path.is_file() for path in inputs)
         Path(args[-1]).write_bytes(f"derived:{Path(args[-1]).name}".encode())
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
@@ -72,8 +94,8 @@ def _extractor(
     evidence_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)
     return SsvCacheEvidenceExtractor(
-        RecordingEvidenceConfig(enabled=True),
-        EvidenceCacheConfig(enabled=True, directory=str(cache_root)),
+        RecordingEvidenceConfig(),
+        EvidenceCacheConfig(directory=str(cache_root)),
         [str(evidence_root)],
         runner=runner,
     )
@@ -163,6 +185,140 @@ def test_extracts_complete_same_generation_pts_window(tmp_path: Path) -> None:
     ]
     assert manifest["requested_source_pts"] == [7_500_000_000, 12_500_000_000]
     assert manifest["actual_source_pts"] == [5_000_000_000, 15_000_000_000]
+
+
+def test_extracts_anchor_image_only_after_full_window_is_unavailable(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=9_000_000_000,
+        end=11_000_000_000,
+    )
+    runner = FakeCommandRunner()
+    extractor = _extractor(evidence_root, cache_root, runner=runner)
+
+    with pytest.raises(EvidenceCacheWindowUnavailable):
+        extractor.extract(_case())
+    artifacts = extractor.extract_anchor_frame(_case())
+
+    assert len(artifacts) == 1
+    assert artifacts[0].kind == "frame"
+    assert artifacts[0].coverage == "anchor_only"
+    assert (artifacts[0].source_pts_start, artifacts[0].source_pts_end) == (
+        9_000_000_000, 11_000_000_000,
+    )
+    assert artifacts[0].path.read_bytes()
+    manifest = json.loads((artifacts[0].path.parent / "manifest.json").read_text())
+    assert manifest["time_basis"] == "source_pts_anchor"
+    assert manifest["event_source_pts"] == 10_000_000_000
+    assert manifest["inputs"] == ["segment-00000000.mp4"]
+    assert extractor.extract_anchor_frame(_case()) == artifacts
+    assert extractor.extract(_case()) == artifacts
+    assert len(runner.calls) == 1
+
+
+def test_anchor_image_rejects_wrong_generation(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=9_000_000_000,
+        end=11_000_000_000,
+        generation=8,
+    )
+
+    with pytest.raises(EvidenceExtractionError, match="anchor"):
+        _extractor(evidence_root, cache_root).extract_anchor_frame(_case())
+    assert not (evidence_root / "derived" / "event-1").exists()
+
+
+def test_extract_pins_inputs_before_cache_cleanup(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    first = _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=5_000_000_000,
+        end=10_000_000_000,
+    )
+    second = _write_segment(
+        cache_root,
+        name="segment-00000001.mp4",
+        start=10_000_000_000,
+        end=15_000_000_000,
+    )
+
+    def clean_source_cache() -> None:
+        for media in (first, second):
+            media.unlink()
+            media.with_suffix(".json").unlink()
+
+    runner = FakeCommandRunner(before_run=clean_source_cache, verify_inputs=True)
+    artifacts = _extractor(evidence_root, cache_root, runner=runner).extract(_case())
+
+    assert len(artifacts) == 4
+    assert all(
+        path.parent.name.startswith(".event-1.")
+        for paths in runner.input_paths
+        for path in paths
+    )
+    assert not first.exists()
+    assert not second.exists()
+    derived = evidence_root / "derived" / "event-1"
+    assert sorted(path.name for path in derived.iterdir()) == [
+        "context.mp4",
+        "frame-01.jpg",
+        "frame-02.jpg",
+        "frame-03.jpg",
+        "manifest.json",
+    ]
+    assert not list(derived.parent.glob(".event-1.*"))
+
+
+def test_extract_uses_copy_when_cache_and_derived_roots_are_cross_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    cache_root = evidence_root / "cache"
+    first = _write_segment(
+        cache_root,
+        name="segment-00000000.mp4",
+        start=5_000_000_000,
+        end=10_000_000_000,
+    )
+    second = _write_segment(
+        cache_root,
+        name="segment-00000001.mp4",
+        start=10_000_000_000,
+        end=15_000_000_000,
+    )
+
+    def force_cross_device(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "link", force_cross_device)
+
+    def clean_source_cache() -> None:
+        for media in (first, second):
+            media.unlink()
+            media.with_suffix(".json").unlink()
+
+    runner = FakeCommandRunner(before_run=clean_source_cache, verify_inputs=True)
+    artifacts = _extractor(evidence_root, cache_root, runner=runner).extract(_case())
+
+    assert len(artifacts) == 4
+    assert runner.input_paths
+    assert all(
+        path.parent.name.startswith(".event-1.")
+        for paths in runner.input_paths
+        for path in paths
+    )
+    assert not first.exists()
+    assert not second.exists()
 
 
 def test_extract_uses_closed_episode_window_instead_of_single_event_window(

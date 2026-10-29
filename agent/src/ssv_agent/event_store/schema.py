@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_pts_start INTEGER,
     source_pts_end INTEGER,
     stream_generation INTEGER,
+    coverage TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only')),
     UNIQUE (event_id, kind, path)
 );
 
@@ -86,14 +88,27 @@ CREATE TABLE IF NOT EXISTS reviews (
     explanation TEXT NOT NULL,
     evidence_ids_json TEXT NOT NULL,
     claims_json TEXT NOT NULL,
+    rule_citations_json TEXT NOT NULL DEFAULT '[]',
     result_path TEXT,
     created_ms INTEGER NOT NULL,
     UNIQUE (event_id, revision)
 );
 
+CREATE TABLE IF NOT EXISTS reports (
+    report_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    review_id TEXT NOT NULL UNIQUE REFERENCES reviews(review_id),
+    review_revision INTEGER NOT NULL,
+    template_version TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS durable_jobs (
     job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK (kind IN ('review', 'index', 'evidence_extract')),
+    kind TEXT NOT NULL CHECK (kind IN ('review', 'index', 'evidence_extract', 'report')),
     entity_id TEXT NOT NULL REFERENCES events(event_id),
     entity_revision INTEGER NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'processing', 'completed', 'dead')),
@@ -102,6 +117,9 @@ CREATE TABLE IF NOT EXISTS durable_jobs (
     lease_expires_ms INTEGER,
     available_at_ms INTEGER NOT NULL,
     last_error TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    failed_at_ms INTEGER,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL,
     UNIQUE (kind, entity_id, entity_revision)
@@ -176,6 +194,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "source_pts_start": "INTEGER",
         "source_pts_end": "INTEGER",
         "stream_generation": "INTEGER",
+        "coverage": "TEXT NOT NULL DEFAULT 'unknown' CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only'))",
     },
     "review_results": {
         "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -186,6 +205,12 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "reviews": {
         "policy_id": "TEXT",
         "model_id": "TEXT",
+        "rule_citations_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "durable_jobs": {
+        "error_code": "TEXT",
+        "error_message": "TEXT",
+        "failed_at_ms": "INTEGER",
     },
 }
 
@@ -196,7 +221,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
     durable_sql = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'durable_jobs'"
     ).fetchone()[0]
-    if "evidence_extract" not in durable_sql:
+    if "'report'" not in durable_sql:
         # SQLite cannot alter a CHECK constraint. Rebuild the table in one transaction,
         # explicitly copying every durable column so leases and retry history survive.
         connection.execute("BEGIN")
@@ -205,7 +230,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
                 """
                 CREATE TABLE durable_jobs_new (
                     job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL CHECK (kind IN ('review', 'index', 'evidence_extract')),
+                    kind TEXT NOT NULL CHECK (kind IN ('review', 'index', 'evidence_extract', 'report')),
                     entity_id TEXT NOT NULL REFERENCES events(event_id),
                     entity_revision INTEGER NOT NULL,
                     state TEXT NOT NULL CHECK (state IN ('pending', 'processing', 'completed', 'dead')),
@@ -214,6 +239,9 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
                     lease_expires_ms INTEGER,
                     available_at_ms INTEGER NOT NULL,
                     last_error TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    failed_at_ms INTEGER,
                     created_ms INTEGER NOT NULL,
                     updated_ms INTEGER NOT NULL,
                     UNIQUE (kind, entity_id, entity_revision)
@@ -261,6 +289,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_event_evidence_id
             ON evidence(event_id, evidence_id) WHERE evidence_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_reviews_event ON reviews(event_id, revision DESC);
+        CREATE INDEX IF NOT EXISTS idx_reports_event ON reports(event_id, review_revision DESC);
         CREATE INDEX IF NOT EXISTS idx_durable_jobs_claim
             ON durable_jobs(kind, state, available_at_ms, lease_expires_ms, job_id);
         """

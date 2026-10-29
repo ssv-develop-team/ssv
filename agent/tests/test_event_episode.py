@@ -11,7 +11,6 @@ from ssv_agent.review_context import ReviewContext
 
 def _config() -> RecordingEvidenceConfig:
     return RecordingEvidenceConfig(
-        enabled=True,
         clip_before_ms=2_500,
         clip_after_ms=2_500,
         merge_gap_ms=3_000,

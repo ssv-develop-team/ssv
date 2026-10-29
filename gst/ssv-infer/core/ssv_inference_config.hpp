@@ -3,7 +3,9 @@
 #include "core/ssv_tensor.hpp"
 
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace ssv::infer {
 
@@ -16,6 +18,8 @@ struct InferenceConfig {
     ssv::SsvPrecision precision = ssv::SsvPrecision::Auto;
     std::optional<int> cpu_threads;
     ssv::SsvCacheConfig cache;
+    // Set by the Runner capability snapshot; absent for standalone factories.
+    std::optional<std::vector<ssv::SsvProvider>> available_providers;
     ModelFamily model_family = ModelFamily::Yolo;
     OutputFormat output_format = OutputFormat::YoloV8;
     float confidence_threshold = 0.5f;
@@ -26,6 +30,9 @@ struct InferenceConfig {
 
 [[nodiscard]] InferenceConfig make_inference_config(
     const ssv::SsvInferenceConfig &config);
+[[nodiscard]] InferenceConfig make_inference_config(
+    const ssv::SsvInferenceConfig &config,
+    std::span<const ssv::SsvProvider> available_providers);
 void validate_inference_config(const InferenceConfig &config);
 
 } // namespace ssv::infer

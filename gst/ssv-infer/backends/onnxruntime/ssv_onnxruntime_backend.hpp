@@ -6,10 +6,14 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <memory>
+#include <vector>
 
 namespace ssv::infer {
 
 struct SsvOrtSessionState;
+
+[[nodiscard]] std::vector<ssv::SsvProvider>
+ssv_onnxruntime_available_providers();
 
 class OnnxRuntimeBackend final : public InferenceBackend {
 public:

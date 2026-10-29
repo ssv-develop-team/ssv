@@ -24,6 +24,8 @@ _AGENT_CONFIG_KEYS = frozenset(
     {"version", "logging", "redis", "sources", "evidence_cache", "agent"}
 )
 
+_DEFAULT_EVIDENCE_DIRECTORY = "/var/lib/ssv/evidence-cache"
+
 
 class _StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -45,14 +47,19 @@ class RedisConfig(_StrictConfigModel):
     consumer_name: str | None = Field(default=None, min_length=1)
 
 
-class WorkerConfig(_StrictConfigModel):
-    """持久 worker 的领取与重试策略。"""
+class PollingWorkerConfig(_StrictConfigModel):
+    """持久轮询 worker 的领取与重试策略。"""
 
-    enabled: bool = False
     poll_interval_ms: int = Field(default=1000, gt=0)
     lease_ms: int = Field(default=30_000, gt=0)
     max_retries: int = Field(default=3, ge=1)
     retry_delay_ms: int = Field(default=1000, ge=0)
+
+
+class WorkerConfig(PollingWorkerConfig):
+    """可按部署需要启停的持久 worker 配置。"""
+
+    enabled: bool = False
 
 
 class ReviewWorkerConfig(WorkerConfig):
@@ -67,14 +74,34 @@ class IndexWorkerConfig(WorkerConfig):
     query_text_type: str | None = None
 
 
+class ReportWorkerConfig(WorkerConfig):
+    """把已提交的复核结果整理为可追溯报告。"""
+
+    enabled: bool = True
+
+
 class AgentSourceConfig(_StrictConfigModel):
-    """Agent 所需的 source 标识和录像路径来源。"""
+    """Agent 所需的 source 身份和录像路径来源。"""
 
     id: str = Field(min_length=1)
     uri: str = Field(min_length=1)
 
 
-class RecordingEvidenceConfig(WorkerConfig):
+class AgentWebConfig(_StrictConfigModel):
+    """独立只读 Web API 的监听地址。"""
+
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: int = Field(default=8765, ge=1, le=65535)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("agent.web.host must not be blank")
+        return value
+
+
+class RecordingEvidenceConfig(PollingWorkerConfig):
     """由 Agent 持久 worker 读取 SSV cache 并生成上下文证据的配置。"""
 
     retry_delay_ms: int = Field(default=2_000, ge=0)
@@ -112,8 +139,7 @@ class KnowledgeConfig(_StrictConfigModel):
 class EvidenceCacheConfig(_StrictConfigModel):
     """由 GStreamer 生成、供 Agent 取证的短时循环缓存配置。"""
 
-    enabled: bool = False
-    directory: str = "/var/lib/ssv/evidence-cache"
+    directory: str = _DEFAULT_EVIDENCE_DIRECTORY
     segment_duration_ms: int = Field(default=10_000, ge=1_000)
     retention_ms: int = Field(default=120_000, ge=1_000)
     max_bytes_mb: int = Field(default=512, ge=1)
@@ -140,11 +166,13 @@ class AgentConfig(_StrictConfigModel):
     model_name: str | None = None
     event_db_path: str = Field(default="data/events.db", min_length=1)
     output_dir: str = Field(default="outputs", min_length=1)
-    evidence_roots: list[str] = Field(default_factory=list)
+    evidence_roots: list[str] = Field(default_factory=lambda: [_DEFAULT_EVIDENCE_DIRECTORY])
+    web: AgentWebConfig = Field(default_factory=AgentWebConfig)
     dedup_enabled: bool = True
     dedup_cooldown_seconds: float = Field(default=30.0, gt=0)
     review: ReviewWorkerConfig = Field(default_factory=ReviewWorkerConfig)
     indexing: IndexWorkerConfig = Field(default_factory=IndexWorkerConfig)
+    reporting: ReportWorkerConfig = Field(default_factory=ReportWorkerConfig)
     recording_evidence: RecordingEvidenceConfig = Field(default_factory=RecordingEvidenceConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
 
@@ -155,13 +183,6 @@ class AgentConfig(_StrictConfigModel):
             if not Path(root).is_absolute():
                 raise ValueError("evidence_roots entries must be absolute paths")
         return roots
-
-    @model_validator(mode="after")
-    def validate_recording_evidence(self) -> Self:
-        recording_evidence = self.recording_evidence
-        if recording_evidence.enabled and not self.evidence_roots:
-            raise ValueError("recording_evidence requires non-empty evidence_roots")
-        return self
 
 
 class SsvConfig(_StrictConfigModel):
@@ -184,10 +205,13 @@ class SsvConfig(_StrictConfigModel):
                 raise ValueError(f"unknown configuration key: {key}")
 
         # The Agent owns only these sections. Runner-only source fields are not part of
-        # the Agent config contract, so retain only the identity and RTSP URI it needs.
+        # the Agent config contract, so retain only source identity and RTSP URI.
         agent_config = {key: item for key, item in value.items() if key in _AGENT_CONFIG_KEYS}
         sources = value.get("sources")
         if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict) and "wvp_channel_id" in source:
+                    raise ValueError("unknown configuration key: sources[].wvp_channel_id")
             agent_config["sources"] = [
                 {key: source.get(key) for key in ("id", "uri")}
                 if isinstance(source, dict)
@@ -198,14 +222,14 @@ class SsvConfig(_StrictConfigModel):
 
     @model_validator(mode="after")
     def validate_recording_evidence_cache(self) -> Self:
-        recording = self.agent.recording_evidence
-        if not recording.enabled:
-            return self
-        if not self.evidence_cache.enabled:
-            raise ValueError(
-                "recording_evidence requires evidence_cache.enabled"
-            )
         cache_directory = Path(self.evidence_cache.directory).resolve(strict=False)
+        if not self.agent.evidence_roots:
+            default_root = Path(_DEFAULT_EVIDENCE_DIRECTORY).resolve(strict=False)
+            if cache_directory == default_root or default_root in cache_directory.parents:
+                return self
+            raise ValueError(
+                "custom evidence_cache.directory requires matching agent.evidence_roots"
+            )
         allowed = any(
             cache_directory == root or root in cache_directory.parents
             for root in (Path(item).resolve(strict=False) for item in self.agent.evidence_roots)
@@ -214,6 +238,13 @@ class SsvConfig(_StrictConfigModel):
             raise ValueError(
                 "recording_evidence requires evidence_cache.directory inside evidence_roots"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_source_ids(self) -> Self:
+        source_ids = [source.id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("sources[].id values must be unique")
         return self
 
 

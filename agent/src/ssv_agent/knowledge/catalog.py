@@ -14,12 +14,12 @@ DEFAULT_RULES_DIR = Path(__file__).resolve().parents[3] / "knowledge" / "rules"
 
 
 class RuleCatalogError(ValueError):
-    """A rule file cannot be represented as a stable versioned document."""
+    """规则文件无法表示为稳定的版本化文档。"""
 
 
 @dataclass(frozen=True, kw_only=True)
 class RuleReference:
-    """Stable identity and matching metadata for one rule version."""
+    """一个规则版本的稳定身份和匹配元数据。"""
 
     rule_id: str
     version: str
@@ -37,7 +37,7 @@ class RuleReference:
 
 @dataclass(frozen=True, kw_only=True)
 class RuleDocument(RuleReference):
-    """A read-only rule reference together with its normalized body."""
+    """包含规范化正文的只读规则引用。"""
 
     content: str
 

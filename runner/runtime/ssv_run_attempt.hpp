@@ -30,6 +30,7 @@ struct SsvRunAttemptOptions {
     std::optional<infer::SsvInferenceRuntimeSnapshot>
         inference_runtime_snapshot;
     std::chrono::milliseconds inference_stats_interval {5000};
+    std::chrono::milliseconds shutdown_timeout {10000};
 };
 
 enum class SsvRunAttemptState {

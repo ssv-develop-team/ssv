@@ -18,6 +18,7 @@ def test_prompt_limits_model_to_read_only_tools_and_json_contract() -> None:
     prompt = build_review_prompt(context)
 
     assert "get_event" in prompt
+    assert "get_report" in prompt
     assert "evidence_reader" in prompt
     assert "rule_retriever" in prompt
     assert "search_events" in prompt

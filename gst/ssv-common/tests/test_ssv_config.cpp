@@ -195,7 +195,6 @@ tracking:
     method: "sparse-opt-flow"
     downscale: 3
 evidence_cache:
-  enabled: true
   directory: "/var/lib/ssv/evidence-cache"
   segment_duration_ms: 5000
   retention_ms: 60000
@@ -262,7 +261,6 @@ agent:
     assert(config.tracking.gmc.method ==
         ssv::SsvGmcMethod::SparseOpticalFlow);
     assert(config.tracking.publish_cooldown_ms == 12000);
-    assert(config.evidence_cache.enabled);
     assert(config.evidence_cache.directory == "/var/lib/ssv/evidence-cache");
     assert(config.evidence_cache.segment_duration_ms == 5000);
     assert(config.evidence_cache.retention_ms == 60000);
@@ -305,6 +303,29 @@ inference:
     assert(config.display.rtsp.burn_in_overlay);
 }
 
+void test_loads_rtsp_encoded_passthrough_config()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("rtsp-passthrough.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+display:
+  backend: "rtsp"
+  rtsp:
+    location: "rtsp://publisher.example/live/camera-01"
+    encoded_passthrough: true
+inference:
+  enabled: false
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+
+    assert(config.display.rtsp.encoded_passthrough);
+    assert(!config.display.rtsp.burn_in_overlay);
+}
+
 void test_loads_example_config(std::string_view path)
 {
     const auto config = ssv::ssv_config_load(std::string(path));
@@ -332,12 +353,22 @@ sources:
       rule_version: "v1"
       rule_facts: {}
 agent:
+  web:
+    host: "127.0.0.1"
+    port: 8765
   event_db_path: "data/custom-events.db"
+  reporting:
+    enabled: true
+    poll_interval_ms: 750
+    lease_ms: 8000
+    max_retries: 6
+    retry_delay_ms: 250
   indexing:
     embedding_base_url: "http://127.0.0.1:8080/v1"
     query_text_type: "query"
 )yaml");
-    static_cast<void>(ssv::ssv_config_load(valid_path.string()));
+    const auto config = ssv::ssv_config_load(valid_path.string());
+    assert(config.sources.front().id == "camera-01");
 
     const auto empty_query_path = environment.write(
         "empty-query-text-type.yaml", R"yaml(
@@ -389,8 +420,105 @@ sources:
 agent:
   indexing:
     enabled: false
+  reporting: {}
 )yaml");
     static_cast<void>(ssv::ssv_config_load(omitted_path.string()));
+
+    expect_config_error(
+        R"yaml(version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    wvp_channel_id: "34020000001320000001"
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "sources[0].wvp_channel_id");
+
+    expect_config_error(
+        R"yaml(version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  web:
+    host: "  "
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "agent.web.host");
+}
+
+void test_rejects_invalid_reporting_worker_settings()
+{
+    struct Case {
+        std::string_view field;
+        std::string_view value;
+        ssv::SsvConfigErrorKind kind;
+    };
+    const Case cases[] = {
+        {"poll_interval_ms", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"lease_ms", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"max_retries", "0", ssv::SsvConfigErrorKind::InvalidValue},
+        {"retry_delay_ms", "-1", ssv::SsvConfigErrorKind::InvalidValue},
+        {"enabled", "\"true\"", ssv::SsvConfigErrorKind::InvalidType},
+        {"poll_interval_ms", "\"1000\"", ssv::SsvConfigErrorKind::InvalidType},
+    };
+
+    for (const auto &test_case : cases) {
+        const auto yaml = std::string(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  reporting:
+    )yaml") + std::string(test_case.field) + ": "
+            + std::string(test_case.value) + "\n";
+        expect_config_error(
+            yaml,
+            test_case.kind,
+            std::string("agent.reporting.") + std::string(test_case.field));
+    }
+}
+
+void test_evidence_cache_rejects_invalid_values()
+{
+    const std::string prefix = R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+    event_rule:
+      event_type: "person_without_helmet"
+      severity: "high"
+      rule_id: "rule-1"
+      rule_version: "v1"
+      rule_facts: {}
+evidence_cache:
+)yaml";
+    expect_config_error(
+        prefix + "  directory: relative\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.directory");
+    expect_config_error(
+        prefix + "  segment_duration_ms: 999\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.segment_duration_ms");
+    expect_config_error(
+        prefix + "  retention_ms: 999\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.retention_ms");
+    expect_config_error(
+        prefix + "  segment_duration_ms: 5000\n  retention_ms: 1000\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.retention_ms");
+    expect_config_error(
+        prefix + "  max_bytes_mb: 0\n",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "evidence_cache.max_bytes_mb");
+    expect_config_error(
+        prefix + "  unknown: true\n",
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "evidence_cache.unknown");
 }
 
 void test_evidence_cache_rejects_invalid_values()
@@ -1259,12 +1387,10 @@ sources:
 inference:
   enabled: false
 evidence_cache:
-  enabled: true
   directory: "/var/lib/ssv/evidence"
 agent:
   evidence_roots: ["/var/lib/ssv"]
   recording_evidence:
-    enabled: true
     poll_interval_ms: 1000
     lease_ms: 30000
     max_retries: 3
@@ -1297,7 +1423,7 @@ agent:
         "agent.recording_evidence.provider");
 }
 
-void test_rejects_recording_evidence_without_cache()
+void test_rejects_removed_recording_evidence_enabled_key()
 {
     expect_config_error(R"yaml(
 version: "2.0"
@@ -1309,7 +1435,21 @@ agent:
   recording_evidence:
     enabled: true
 )yaml",
-        ssv::SsvConfigErrorKind::InvalidValue,
+        ssv::SsvConfigErrorKind::UnknownKey,
+        "agent.recording_evidence.enabled");
+}
+
+void test_rejects_removed_evidence_cache_enabled_key()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+evidence_cache:
+  enabled: false
+)yaml",
+        ssv::SsvConfigErrorKind::UnknownKey,
         "evidence_cache.enabled");
 }
 
@@ -1321,15 +1461,46 @@ sources:
   - id: "camera-01"
     uri: "rtsp://127.0.0.1/test"
 evidence_cache:
-  enabled: true
   directory: "/tmp/ssv-evidence-cache"
 agent:
   evidence_roots: ["/var/lib/ssv"]
-  recording_evidence:
-    enabled: true
+  recording_evidence: {}
 )yaml",
         ssv::SsvConfigErrorKind::InvalidValue,
         "evidence_cache.directory");
+}
+
+void test_allows_empty_evidence_roots_with_default_cache()
+{
+    ScopedConfigEnvironment environment;
+    const auto path = environment.write("empty-evidence-roots.yaml", R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+agent:
+  evidence_roots: []
+)yaml");
+
+    const auto config = ssv::ssv_config_load(path.string());
+
+    assert(config.evidence_cache.directory == "/var/lib/ssv/evidence-cache");
+}
+
+void test_rejects_custom_cache_with_empty_evidence_roots()
+{
+    expect_config_error(R"yaml(
+version: "2.0"
+sources:
+  - id: "camera-01"
+    uri: "rtsp://127.0.0.1/test"
+evidence_cache:
+  directory: "/tmp/ssv-evidence-cache"
+agent:
+  evidence_roots: []
+)yaml",
+        ssv::SsvConfigErrorKind::InvalidValue,
+        "agent.evidence_roots");
 }
 
 void test_rejects_invalid_recording_evidence_episode_settings()
@@ -1343,7 +1514,6 @@ inference:
   enabled: false
 agent:
   recording_evidence:
-    enabled: false
 )yaml";
 
     for (const auto &invalid : std::array {
@@ -1387,7 +1557,6 @@ inference:
   enabled: false
 agent:
   recording_evidence:
-    enabled: true
 )yaml";
 
     for (const auto &invalid : std::array {
@@ -2008,8 +2177,10 @@ int main(int argc, char **argv)
 
     test_loads_complete_config();
     test_loads_rtsp_display_config();
+    test_loads_rtsp_encoded_passthrough_config();
     test_loads_example_config(argv[1]);
     test_accepts_shared_agent_config_fields();
+    test_rejects_invalid_reporting_worker_settings();
     test_evidence_cache_rejects_invalid_values();
     test_rejects_invalid_event_db_path();
     test_rejects_invalid_indexing_string_fields();
@@ -2042,8 +2213,11 @@ int main(int argc, char **argv)
     test_rejects_deep_unknown_key();
     test_accepts_recording_evidence_extension();
     test_rejects_recording_evidence_unknown_key();
-    test_rejects_recording_evidence_without_cache();
+    test_rejects_removed_recording_evidence_enabled_key();
+    test_rejects_removed_evidence_cache_enabled_key();
     test_rejects_recording_evidence_cache_outside_root();
+    test_allows_empty_evidence_roots_with_default_cache();
+    test_rejects_custom_cache_with_empty_evidence_roots();
     test_rejects_invalid_recording_evidence_episode_settings();
     test_rejects_recording_evidence_wrong_type();
     test_rejects_invalid_recording_evidence_worker_settings();

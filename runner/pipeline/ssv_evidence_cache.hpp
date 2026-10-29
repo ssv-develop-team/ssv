@@ -10,10 +10,10 @@
 
 namespace ssv {
 
-/// Owns the optional encoded-video evidence cache for one pipeline source.
+/// 持有单个 pipeline source 的可选编码视频证据缓存。
 ///
-/// The cache observes the parser output and finalizes sidecars from
-/// splitmuxsink bus messages. It never owns the pipeline itself.
+/// 缓存观察 parser 输出，并根据 splitmuxsink bus 消息完成 sidecar。
+/// 它不持有 pipeline 本身。
 class SsvEvidenceCache final {
 public:
     SsvEvidenceCache(
@@ -25,12 +25,12 @@ public:
     SsvEvidenceCache(const SsvEvidenceCache &) = delete;
     SsvEvidenceCache &operator=(const SsvEvidenceCache &) = delete;
 
-    /// Configures splitmuxsink and installs the parser observation probe.
-    /// Must be called while the pipeline is in NULL or READY state.
+    /// 配置 splitmuxsink 并安装 parser 观察 probe。
+    /// 必须在 pipeline 处于 NULL 或 READY 状态时调用。
     void configure(GstElement *parser, GstElement *splitmux_sink);
 
-    /// Consumes splitmuxsink element messages. Failures are isolated from the
-    /// pipeline bus callback and only make this optional cache unavailable.
+    /// 消费 splitmuxsink element 消息。失败与 pipeline bus callback 隔离，
+    /// 只会使该可选缓存不可用。
     void handle_message(GstMessage *message) noexcept;
 
 private:

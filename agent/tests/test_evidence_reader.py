@@ -72,7 +72,7 @@ def _register_derived_context_evidence(tmp_path: Path, monkeypatch) -> list[str]
     with EventLedger(
         db_path,
         evidence_roots=[str(tmp_path)],
-        recording_evidence=RecordingEvidenceConfig(enabled=True),
+            recording_evidence=RecordingEvidenceConfig(),
     ) as ledger:
         ledger.record(
             ReviewContext(
