@@ -295,7 +295,7 @@ class EventDbAdmin:
             if connection is not None:
                 connection.close()
 
-    def clear(self, *, dry_run: bool = False) -> EventDbCleanupResult:
+    def reset(self, *, dry_run: bool = False) -> EventDbCleanupResult:
         before = self.status()
         if dry_run or not before.exists:
             return EventDbCleanupResult(

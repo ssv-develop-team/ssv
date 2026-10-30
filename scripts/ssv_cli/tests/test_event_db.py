@@ -237,7 +237,7 @@ class EventDbAdminTest(unittest.TestCase):
             path = Path(directory) / "events.db"
             _create_event_db(path)
 
-            result = EventDbAdmin(path).clear(dry_run=True)
+            result = EventDbAdmin(path).reset(dry_run=True)
             status = EventDbAdmin(path).status()
 
         self.assertTrue(result.dry_run)
@@ -250,7 +250,7 @@ class EventDbAdminTest(unittest.TestCase):
             path = Path(directory) / "events.db"
             _create_event_db(path)
 
-            result = EventDbAdmin(path).clear()
+            result = EventDbAdmin(path).reset()
             status = EventDbAdmin(path).status()
             connection = sqlite3.connect(path)
             try:
@@ -271,7 +271,7 @@ class EventDbAdminTest(unittest.TestCase):
 
             admin = EventDbAdmin(path)
             status = admin.status()
-            result = admin.clear()
+            result = admin.reset()
 
         self.assertFalse(status.exists)
         self.assertEqual(status.total_rows, 0)
