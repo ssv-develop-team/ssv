@@ -17,7 +17,13 @@ from scripts.ssv_cli.commands.clean import run as clean_command
 from scripts.ssv_cli.config import RedisSettings, RuntimeConfig, load_runtime_config
 from scripts.ssv_cli.context import ProjectContext, load_dotenv
 from scripts.ssv_cli.output import CliError
-from scripts.ssv_cli.services.event_db import EventDbCleanupResult, EventDbError, EventDbStatus
+from scripts.ssv_cli.services.event_db import (
+    DeadLetterStatus,
+    DurableJobStatus,
+    EventDbCleanupResult,
+    EventDbError,
+    EventDbStatus,
+)
 from scripts.ssv_cli.services.redis_admin import (
     RedisCleanupError,
     RedisCleanupResult,
@@ -359,6 +365,26 @@ class CacheCommandTest(unittest.TestCase):
             exists=True,
             events=3,
             durable_jobs=4,
+            durable_job_states=(
+                DurableJobStatus(
+                    kind="review",
+                    state="processing",
+                    count=2,
+                    max_attempts=3,
+                    oldest_updated_ms=1000,
+                    expired_leases=1,
+                ),
+            ),
+            dead_letters=(
+                DeadLetterStatus(
+                    job_id=42,
+                    kind="review",
+                    entity_revision=2,
+                    attempts=4,
+                    updated_ms=2000,
+                    error_code="legacy_unclassified",
+                ),
+            ),
         )
 
         with (
@@ -383,6 +409,10 @@ class CacheCommandTest(unittest.TestCase):
         self.assertTrue(any("| 范围" in message for message in messages))
         self.assertTrue(any("| 事件流" in message for message in messages))
         self.assertTrue(any("| 事件" in message for message in messages))
+        self.assertTrue(any("任务 review/processing" in message for message in messages))
+        self.assertTrue(any("过期租约=1" in message for message in messages))
+        self.assertTrue(any("最近死信 #42" in message for message in messages))
+        self.assertTrue(any("legacy_unclassified" in message for message in messages))
         table_lines = [message for message in messages if message.startswith(("+", "|"))]
         self.assertGreater(len(table_lines), 3)
         self.assertEqual(len({cache_command._display_width(line) for line in table_lines}), 1)

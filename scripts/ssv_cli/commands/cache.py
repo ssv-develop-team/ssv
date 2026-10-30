@@ -108,6 +108,31 @@ def status(context: ProjectContext, args: Namespace) -> int:
                 ("SQLite", "审核结果", event_db_state.review_results),
             )
         )
+        for job_state in event_db_state.durable_job_states:
+            details = (
+                f"数量={job_state.count}; 最大尝试={job_state.max_attempts}; "
+                f"最早更新时间(ms)={job_state.oldest_updated_ms}; "
+                f"过期租约={job_state.expired_leases}"
+            )
+            rows.append(
+                ("SQLite", f"任务 {job_state.kind}/{job_state.state}", details)
+            )
+        expired_lease_count = sum(
+            job_state.expired_leases for job_state in event_db_state.durable_job_states
+        )
+        rows.append(("SQLite", "过期 processing 租约总数", expired_lease_count))
+        if event_db_state.dead_letters:
+            for dead_letter in event_db_state.dead_letters:
+                details = (
+                    f"{dead_letter.kind}; revision={dead_letter.entity_revision}; "
+                    f"尝试={dead_letter.attempts}; 更新时间(ms)={dead_letter.updated_ms}; "
+                    f"错误码={dead_letter.error_code}"
+                )
+                rows.append(
+                    ("SQLite", f"最近死信 #{dead_letter.job_id}", details)
+                )
+        else:
+            rows.append(("SQLite", "最近死信", "无"))
     else:
         rows.append(("SQLite", "状态", "不可用"))
     _print_table(("范围", "指标", "值"), rows)
