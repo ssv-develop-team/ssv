@@ -536,7 +536,7 @@ std::string resolve_display_encoder_factory(
 {
     if (display_backend != SsvResolvedDisplayBackend::RtspClientSink)
         return {};
-    for (const auto factory : kRtspEncoderFactories) {
+    for (const auto factory : kSoftwareEncoderFactories) {
         if (capabilities.has_gstreamer_element(factory))
             return std::string(factory);
     }
