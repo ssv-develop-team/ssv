@@ -132,35 +132,6 @@ void unregister_test_rtsp_sink_alias(bool registered)
     gst_object_unref(feature);
 }
 
-bool register_test_rtsp_sink_alias()
-{
-    auto *existing = gst_registry_lookup_feature(
-        gst_registry_get(), "rtspclientsink");
-    if (existing != nullptr) {
-        gst_object_unref(existing);
-        return false;
-    }
-
-    auto *fakesink = gst_element_factory_make("fakesink", nullptr);
-    assert(fakesink != nullptr);
-    const auto element_type = G_OBJECT_TYPE(fakesink);
-    const gboolean registered = gst_element_register(
-        nullptr, "rtspclientsink", GST_RANK_NONE, element_type);
-    gst_object_unref(fakesink);
-    assert(registered);
-    return true;
-}
-
-void unregister_test_rtsp_sink_alias(bool registered)
-{
-    if (!registered)
-        return;
-    auto *feature = gst_registry_lookup_feature(
-        gst_registry_get(), "rtspclientsink");
-    assert(feature != nullptr);
-    gst_registry_remove_feature(gst_registry_get(), feature);
-    gst_object_unref(feature);
-}
 
 std::vector<std::string> factories(
     const std::vector<ssv::pipeline_internal::PipelineStage> &stages)

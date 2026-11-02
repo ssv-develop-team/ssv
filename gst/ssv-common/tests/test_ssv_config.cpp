@@ -521,47 +521,6 @@ evidence_cache:
         "evidence_cache.unknown");
 }
 
-void test_evidence_cache_rejects_invalid_values()
-{
-    const std::string prefix = R"yaml(
-version: "2.0"
-sources:
-  - id: "camera-01"
-    uri: "rtsp://127.0.0.1/test"
-    event_rule:
-      event_type: "person_without_helmet"
-      severity: "high"
-      rule_id: "rule-1"
-      rule_version: "v1"
-      rule_facts: {}
-evidence_cache:
-)yaml";
-    expect_config_error(
-        prefix + "  directory: relative\n",
-        ssv::SsvConfigErrorKind::InvalidValue,
-        "evidence_cache.directory");
-    expect_config_error(
-        prefix + "  segment_duration_ms: 999\n",
-        ssv::SsvConfigErrorKind::InvalidValue,
-        "evidence_cache.segment_duration_ms");
-    expect_config_error(
-        prefix + "  retention_ms: 999\n",
-        ssv::SsvConfigErrorKind::InvalidValue,
-        "evidence_cache.retention_ms");
-    expect_config_error(
-        prefix + "  segment_duration_ms: 5000\n  retention_ms: 1000\n",
-        ssv::SsvConfigErrorKind::InvalidValue,
-        "evidence_cache.retention_ms");
-    expect_config_error(
-        prefix + "  max_bytes_mb: 0\n",
-        ssv::SsvConfigErrorKind::InvalidValue,
-        "evidence_cache.max_bytes_mb");
-    expect_config_error(
-        prefix + "  unknown: true\n",
-        ssv::SsvConfigErrorKind::UnknownKey,
-        "evidence_cache.unknown");
-}
-
 void test_rejects_invalid_event_db_path()
 {
     struct Case {

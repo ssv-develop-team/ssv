@@ -148,27 +148,6 @@ ssv::SsvPipelinePlan make_rtsp_plan(const ssv::SsvConfig &config)
         config, ssv::SsvCapabilitySnapshot(capabilities));
 }
 
-ssv::SsvConfig make_rtsp_config()
-{
-    auto config = make_headless_config();
-    config.display.enabled = true;
-    config.display.backend = ssv::SsvDisplayBackend::RtspClientSink;
-    config.display.rtsp.location = "rtsp://127.0.0.1:8554/ssv";
-    return config;
-}
-
-ssv::SsvPipelinePlan make_rtsp_plan(const ssv::SsvConfig &config)
-{
-    ssv::SsvHardwareCapabilities capabilities;
-    capabilities.gstreamer_elements = {
-        "avdec_h264",
-        "openh264enc",
-        "rtph264pay",
-        "rtspclientsink",
-    };
-    return ssv::SsvPipelinePlan::resolve(config, capabilities);
-}
-
 void post_fake_bus_error(GstElement *pipeline)
 {
     GError *error = g_error_new_literal(
