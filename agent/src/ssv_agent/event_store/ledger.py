@@ -239,6 +239,42 @@ class EpisodeObservation:
 
 
 @dataclass(frozen=True)
+class EventEpisode:
+    """从账本重建出的 episode 生命周期快照。"""
+
+    episode_id: str
+    canonical_event_id: str
+    source: str
+    event_type: str | None
+    rule_id: str | None
+    rule_version: str | None
+    stream_generation: int
+    start_pts: int
+    last_seen_pts: int
+    last_seen_timestamp_ms: int
+    end_pts: int | None
+    state: EpisodeState
+    close_reason: EpisodeCloseReason | None
+    evidence_window_start: int | None
+    evidence_window_end: int | None
+    event_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EpisodeObservation:
+    """一次已接收的 Redis 观测，按 ingress 和 event ID 幂等。"""
+
+    episode_id: str
+    event_id: str
+    ingress_id: str
+    source_pts: int | None
+    timestamp_ms: int
+    event_phase: str | None
+    track_states: tuple[str, ...]
+    dedup_decision: str
+
+
+@dataclass(frozen=True)
 class RecordOutcome:
     """一次幂等 record 的结果。"""
 
