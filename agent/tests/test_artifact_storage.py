@@ -436,13 +436,14 @@ def test_remote_read_releases_response_stream() -> None:
     assert captured[0].released is True
 
 
-def test_missing_bucket_is_created_before_first_upload() -> None:
+def test_missing_bucket_fails_without_attempting_creation() -> None:
     client = FakeMinioClient()
     client.bucket_exists = False
     artifact = _record(b"payload")
 
-    _minio_store(client).ensure_uploaded(artifact, io.BytesIO(b"payload"))
+    with pytest.raises(ArtifactStoreUnavailableError):
+        _minio_store(client).ensure_uploaded(artifact, io.BytesIO(b"payload"))
 
-    assert client.make_bucket_calls == 1
-    assert client.put_calls == 1
-    assert client.objects[artifact.object_key][0] == b"payload"
+    assert client.make_bucket_calls == 0
+    assert client.put_calls == 0
+    assert client.objects == {}

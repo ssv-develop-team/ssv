@@ -456,36 +456,38 @@ PY
 agent:
   storage:
     backend: "minio"          # local 保持既有本地写入；缺省 local
-    minio:
-      endpoint: "http://127.0.0.1:9000"
-      bucket: "ssv-artifacts"          # 缺省读取 SSV_MINIO_BUCKET
-      prefix: "ssv/v1"
-      access_key_env: "SSV_MINIO_ACCESS_KEY"
-      secret_key_env: "SSV_MINIO_SECRET_KEY"
-      connect_timeout_seconds: 5
-      read_timeout_seconds: 15
-    upload:
-      poll_interval_ms: 1000
-      lease_ms: 30000
-      max_retries: 3
-      retry_delay_ms: 1000
+    prefix: "ssv/v1"
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000
 ```
 
-- 配置模型只保存凭据环境变量名；访问键和密钥通过环境变量注入，不写入 YAML、日志或 Web 响应。当前部署使用 MinIO root 账号：`.env` 中的 `SSV_MINIO_ACCESS_KEY` / `SSV_MINIO_SECRET_KEY` 应与 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 相同，Agent 首次上传时通过 SDK 幂等创建私有 bucket。
-- 复核完成与上传完成是两个状态。MinIO 不可用时复核和报告照常提交，文件保留在暂存区，由上传 worker 按 `upload.retry_delay_ms` 退避重试；恢复后自动补传，不重新调用模型。
+- 两组凭据统一放在根 `.env`，不放在 `docker/.env` 或 YAML。`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 仅供 MinIO 服务和初始化容器使用；Agent 入口过滤 root 变量，使用独立的 `SSV_MINIO_ACCESS_KEY` / `SSV_MINIO_SECRET_KEY`。root 用户和应用访问键必须不同，两者至少 3 个字符，密码/密钥至少 8 个字符。
+- `minio-init` 创建私有 bucket 和应用账号，应用仅能对指定 bucket 查询位置、列举、读取和上传对象，没有删除或管理权限；Agent 不再创建 bucket。bucket 缺失按存储故障进入现有上传重试。
+- bucket 统一通过根 `.env` 中可选的 `SSV_MINIO_BUCKET` 配置，缺省 `ssv-artifacts`。已登记产物继续按账本中的 bucket 读取。
+- 本地 endpoint 默认使用 `http://127.0.0.1:<MINIO_API_PORT>`，端口从进程环境、根 `.env` 或 `docker/.env` 取得，缺省 `9000`。根文件优先于 Docker 端口文件。
+- MinIO endpoint、bucket、凭据环境变量名和连接超时使用环境变量与内置默认值；常规本地部署无需在 YAML 中填写。
+- 复核完成与上传完成是两个状态。MinIO 不可用时复核和报告照常提交，文件保留在暂存区，由上传 worker 按 `storage.retry_delay_ms` 退避重试；恢复后自动补传，不重新调用模型。
 - 上传成功后必须通过远端实际字节的大小、SHA-256 和 Content-Type 校验，才允许删除本地暂存；删除失败保留 `artifact_cleanup_failed` 日志并由后续轮询重试。
 - `backend=local` 只停止登记新产物；账本中已有的待上传或待清理责任仍会继续处理。
 - 历史产物（启用 MinIO 前登记的文件）不回填、不迁移，继续按原本地路径读取。
 
-部署时用显式环境文件启动 Compose：
+推荐使用 `./ssv infra start`，每次启动都会重新运行初始化并确认退出成功。直接使用 Compose 时，在项目根目录执行；最后的 `wait` 返回零才表示初始化成功，`up -d` 本身不代表就绪：
 
 ```bash
-docker compose --env-file docker/.env -f docker/compose.yaml up -d
+docker compose --env-file .env --env-file docker/.env -f docker/compose.yaml up -d --build redis qdrant minio
+docker compose --env-file .env --env-file docker/.env -f docker/compose.yaml up -d --force-recreate minio-init
+docker compose --env-file .env --env-file docker/.env -f docker/compose.yaml wait minio-init
+# 初始化失败时查看原因：
+docker compose --env-file .env --env-file docker/.env -f docker/compose.yaml logs minio-init
 ```
 
-本地 MinIO 使用 `ghcr.io/ssv-develop-team/ssv-minio` 镜像（由仓库内 `docker/minio/Dockerfile` 从固定上游版本构建，CI 在 main 分支发布）；`./ssv redis start` 在镜像缺失时先尝试拉取，失败则本地构建。
+本地 MinIO 使用 `ghcr.io/ssv-develop-team/ssv-minio` 镜像（由仓库内 `docker/minio/Dockerfile` 从固定上游版本构建，CI 在 main 分支发布）；`./ssv infra start` 在镜像缺失时先尝试拉取，失败则本地构建。
 
-镜像不包含 `mc`；因此不运行独立初始化容器，bucket 由 Agent 在首次上传时创建。可用 `SSV_MINIO_IMAGE` 覆盖镜像地址，例如内网 registry：`SSV_MINIO_IMAGE=registry.internal/ssv/minio:<tag>`；已有本地 `ssv-minio:minio` 时可设为该名称复用。GHCR 包若为私有，首次拉取前需 `docker login ghcr.io`。部署凭据拥有管理权限，这是当前阶段的明确取舍：简化本地镜像依赖，后续如恢复最小权限应用账号，需要重新引入 Admin API 初始化步骤。
+镜像 tag 为 `RELEASE.2025-04-22T22-12-26Z-mc1`，包含 MinIO、固定版 `mc` 和解析初始化输出所需的 `jq`；服务和初始化使用同一镜像，不自动复用旧的 `ssv-minio:minio`。可用根 `.env` 的 `SSV_MINIO_IMAGE` 覆盖镜像地址，覆盖镜像同样必须提供 `minio`、`mc`、`jq` 和 `/bin/sh`。GHCR 包若为私有，首次拉取前需 `docker login ghcr.io`。
+
+从旧部署升级时，保留原 root 凭据和数据卷，在根 `.env` 设置新的独立应用访问键及密钥，再执行启动命令；不要删除 volume。已有同名应用账号若绑定其他策略、加入任何组或处于禁用状态，初始化会失败；改用独立的新账号，或先由管理员检查并处理权限。项目策略名为 `ssv-artifacts-<bucket>`，已有同名策略若与所需权限不一致也会失败，避免改动其他账号的权限。重复初始化保留已有对象和其他账号；历史文件不回填。
 
 上传任务耗尽重试后进入 `dead`，可按产物 ID 人工重试（仅接受 `dead` 状态）：
 

@@ -149,19 +149,10 @@ agent:
     qdrant_path: "data/qdrant"
     qdrant_url: "http://localhost:6333"
     min_score: 0.5
-  # 新产物的长期存储；示例启用 MinIO。凭据只通过环境变量提供，不写入本文件。
   storage:
     backend: "minio"
-    minio:
-      endpoint: "http://127.0.0.1:9000"
-      bucket: "ssv-artifacts"
-      prefix: "ssv/v1"
-      access_key_env: "SSV_MINIO_ACCESS_KEY"
-      secret_key_env: "SSV_MINIO_SECRET_KEY"
-      connect_timeout_seconds: 5
-      read_timeout_seconds: 15
-    upload:
-      poll_interval_ms: 1000
-      lease_ms: 30000
-      max_retries: 3
-      retry_delay_ms: 1000
+    prefix: "ssv/v1"
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000

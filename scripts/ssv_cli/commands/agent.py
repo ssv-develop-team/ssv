@@ -29,5 +29,10 @@ def run(context: ProjectContext, args: Namespace) -> int:
     if args.log_level:
         command.extend(["--log-level", args.log_level])
     info("按 Ctrl+C 停止")
-    exec_command(context, command, cwd=agent_dir)
+    environment = {
+        key: value
+        for key, value in context.environment.items()
+        if key not in {"MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"}
+    }
+    exec_command(context, command, cwd=agent_dir, environment=environment)
     return 0

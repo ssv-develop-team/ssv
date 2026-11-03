@@ -84,13 +84,16 @@ cp config/ssv.example.yaml config/ssv.yaml
 ### 4. 启动 Redis、Qdrant、MinIO 并运行
 
 ```bash
+cp .env.example .env
 cp docker/.env.example docker/.env
-# 填写 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD，并把 SSV_MINIO_ACCESS_KEY / SSV_MINIO_SECRET_KEY 设为相同值
+# 在根 .env 填写两组独立凭据：MINIO_ROOT_USER / MINIO_ROOT_PASSWORD、SSV_MINIO_ACCESS_KEY / SSV_MINIO_SECRET_KEY
+# SSV_MINIO_ACCESS_KEY 必须与 MINIO_ROOT_USER 不同；密码/密钥至少 8 个字符
+# docker/.env 只配置端口；已有凭据需移到根 .env
 ./ssv infra start
 ./ssv run --headless
 ```
 
-`./ssv infra start` 同时启动 Redis、Qdrant 和 MinIO；Agent 首次上传时会自动创建私有 bucket。正常 `stop` 保留 MinIO 数据卷。MinIO 镜像默认从 `ghcr.io/ssv-develop-team/ssv-minio` 拉取；无法访问镜像仓库时会使用仓库内 `docker/minio/Dockerfile` 在本地构建（首次构建需要网络）。MinIO 默认只监听 `127.0.0.1:9000`（S3 API）和 `127.0.0.1:9001`（控制台）。
+`./ssv infra start` 同时启动 Redis、Qdrant 和 MinIO，并等待 `minio-init` 创建私有 bucket、独立应用账号和限定该 bucket 的读写策略；初始化失败会返回错误。Agent 只读写已创建的 bucket。正常 `infra stop` 保留 MinIO 数据卷。MinIO 镜像默认从 `ghcr.io/ssv-develop-team/ssv-minio` 拉取；无法访问镜像仓库时会使用仓库内 `docker/minio/Dockerfile` 在本地构建（首次构建需要网络）。MinIO 默认只监听 `127.0.0.1:9000`（S3 API）和 `127.0.0.1:9001`（控制台）。迁移及直接 Compose 操作见 [Agent 配置](docs/Agent配置.md#产物-minio-存储)。
 
 有桌面会话时可运行：
 

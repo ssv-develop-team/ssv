@@ -1068,7 +1068,10 @@ def test_artifact_worker_starts_for_minio_and_store_is_closed(monkeypatch) -> No
             "agent": {
                 "storage": {
                     "backend": "minio",
-                    "upload": {"poll_interval_ms": 250, "lease_ms": 5000},
+                    "poll_interval_ms": 250,
+                    "lease_ms": 5000,
+                    "max_retries": 4,
+                    "retry_delay_ms": 2000,
                 }
             }
         }
@@ -1085,6 +1088,8 @@ def test_artifact_worker_starts_for_minio_and_store_is_closed(monkeypatch) -> No
     runtime.stop(join_timeout_seconds=1)
 
     assert observed["lease_ms"] == 5000
+    assert observed["max_retries"] == 4
+    assert observed["retry_delay_ms"] == 2000
     assert observed["poll_interval_seconds"] == 0.25
     assert store.closed is True
 

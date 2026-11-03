@@ -423,10 +423,10 @@ class AgentService:
             ledger_factory=self._ledger_factory,
             store=store,
             worker_id="ssv-artifact-upload-0",
-            lease_ms=storage.upload.lease_ms,
-            max_retries=storage.upload.max_retries,
-            retry_delay_ms=storage.upload.retry_delay_ms,
-            poll_interval_seconds=storage.upload.poll_interval_ms / 1000,
+            lease_ms=storage.lease_ms,
+            max_retries=storage.max_retries,
+            retry_delay_ms=storage.retry_delay_ms,
+            poll_interval_seconds=storage.poll_interval_ms / 1000,
             staging_roots=_artifact_roots(self._config),
         )
         if self._stopping.is_set():

@@ -11,6 +11,7 @@ from pathlib import Path
 from .output import CliError
 
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DOCKER_PORT_KEYS = frozenset({"REDIS_PORT", "QDRANT_PORT", "MINIO_API_PORT", "MINIO_CONSOLE_PORT"})
 
 
 def _parse_dotenv_value(value: str) -> str:
@@ -67,8 +68,11 @@ class ProjectContext:
         project_root = (root or Path(__file__).resolve().parents[2]).resolve()
         environment = dict(os.environ)
         load_dotenv(project_root / ".env", environment)
-        # 本地 MinIO 凭据只写在 docker/.env；显式加载，且不覆盖进程或根 .env。
-        load_dotenv(project_root / "docker" / ".env", environment)
+        docker_environment: dict[str, str] = {}
+        load_dotenv(project_root / "docker" / ".env", docker_environment)
+        for key in _DOCKER_PORT_KEYS:
+            if key in docker_environment:
+                environment.setdefault(key, docker_environment[key])
 
         configured_path = environment.get("SSV_CONFIG_PATH")
         config_path: Path | None = None

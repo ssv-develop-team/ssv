@@ -58,6 +58,7 @@ jobs:
             liblapack-dev \
             libprotobuf-dev \
             libtbb-dev \
+            jq \
             meson \
             ninja-build \
             nlohmann-json3-dev \
@@ -112,5 +113,5 @@ jobs:
           context: docker/minio
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/ssv-minio:RELEASE.2025-04-22T22-12-26Z
+            ghcr.io/${{ github.repository_owner }}/ssv-minio:RELEASE.2025-04-22T22-12-26Z-mc1
             ghcr.io/${{ github.repository_owner }}/ssv-minio:sha-${{ github.sha }}

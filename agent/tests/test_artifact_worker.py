@@ -220,8 +220,7 @@ def _invoke_cli(monkeypatch, argv: list[str]) -> None:
 
     from ssv_agent import cli
 
-    monkeypatch.setattr(cli, "find_dotenv", lambda: "")
-    monkeypatch.setattr(cli, "load_dotenv", lambda _: False)
+    monkeypatch.setattr(cli, "_load_environment", lambda: None)
     monkeypatch.setattr(sys, "argv", argv)
     cli.main()
 

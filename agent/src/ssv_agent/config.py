@@ -112,10 +112,17 @@ def _default_minio_bucket() -> str:
     return os.environ.get("SSV_MINIO_BUCKET") or _DEFAULT_MINIO_BUCKET
 
 
+def _default_minio_endpoint() -> str:
+    port = os.environ.get("MINIO_API_PORT") or "9000"
+    return f"http://127.0.0.1:{port}"
+
+
 class MinioStorageConfig(_StrictConfigModel):
     """MinIO/S3 连接与命名配置；凭据只保存环境变量名。"""
 
-    endpoint: str = "http://127.0.0.1:9000"
+    model_config = ConfigDict(validate_default=True)
+
+    endpoint: str = Field(default_factory=_default_minio_endpoint)
     bucket: str = Field(default_factory=_default_minio_bucket)
     prefix: str = "ssv/v1"
     access_key_env: str = "SSV_MINIO_ACCESS_KEY"
@@ -129,6 +136,8 @@ class MinioStorageConfig(_StrictConfigModel):
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("agent.storage.minio.endpoint must be an http(s) URL")
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("agent.storage.minio.endpoint port must be between 1 and 65535")
         if parsed.username or parsed.password:
             raise ValueError("agent.storage.minio.endpoint must not embed credentials")
         if parsed.params or parsed.query or parsed.fragment:
@@ -143,6 +152,15 @@ class MinioStorageConfig(_StrictConfigModel):
         if not _BUCKET_PATTERN.fullmatch(value):
             raise ValueError("agent.storage.minio.bucket must be a valid S3 bucket name")
         return value
+
+    @model_validator(mode="after")
+    def validate_shared_bucket(self) -> Self:
+        if self.bucket != _default_minio_bucket():
+            raise ValueError(
+                "agent.storage.minio.bucket conflicts with SSV_MINIO_BUCKET; "
+                "set SSV_MINIO_BUCKET and remove bucket from YAML"
+            )
+        return self
 
     @field_validator("prefix")
     @classmethod
@@ -167,16 +185,35 @@ class MinioStorageConfig(_StrictConfigModel):
         return value
 
 
-class UploadWorkerConfig(PollingWorkerConfig):
-    """上传任务的领取、续租和有限重试策略。"""
-
-
 class ArtifactStorageConfig(_StrictConfigModel):
     """产物存储后端选择。"""
 
     backend: Literal["local", "minio"] = "local"
-    minio: MinioStorageConfig = Field(default_factory=MinioStorageConfig)
-    upload: UploadWorkerConfig = Field(default_factory=UploadWorkerConfig)
+    prefix: str = "ssv/v1"
+    poll_interval_ms: int = Field(default=1000, gt=0)
+    lease_ms: int = Field(default=30_000, gt=0)
+    max_retries: int = Field(default=3, ge=1)
+    retry_delay_ms: int = Field(default=1000, ge=0)
+
+    @property
+    def minio(self) -> MinioStorageConfig:
+        """根据扁平存储配置构造 MinIO 客户端配置。"""
+        return MinioStorageConfig(prefix=self.prefix)
+
+    @field_validator("prefix")
+    @classmethod
+    def validate_prefix(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            not value
+            or value.startswith("/")
+            or value.endswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError(
+                "agent.storage.prefix must be a relative path without empty, '.' or '..' parts"
+            )
+        return value
 
     @model_validator(mode="after")
     def validate_minio_credentials(self) -> Self:
@@ -286,7 +323,7 @@ class SsvConfig(_StrictConfigModel):
     redis: RedisConfig = RedisConfig()
     sources: list[AgentSourceConfig] = Field(default_factory=list)
     evidence_cache: EvidenceCacheConfig = Field(default_factory=EvidenceCacheConfig)
-    agent: AgentConfig = AgentConfig()
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
     @model_validator(mode="before")
     @classmethod

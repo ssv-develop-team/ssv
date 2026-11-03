@@ -24,12 +24,7 @@ from ssv_agent.event_store.ledger import ArtifactRecord
 _CHUNK_SIZE = 1024 * 1024
 _SPOOL_LIMIT_BYTES = 8 * 1024 * 1024
 _MISSING_CODES = frozenset({"NoSuchKey", "NoSuchObject", "NoSuchVersion"})
-_BUCKET_EXISTS_CODES = frozenset({"BucketAlreadyOwnedByYou", "BucketAlreadyExists"})
 _INTERNAL_RETRIES = 2
-
-
-class _BucketMissing(Exception):
-    """bucket 尚未创建；首次上传时按需创建。"""
 
 
 class MinioObjectStore:
@@ -46,12 +41,7 @@ class MinioObjectStore:
 
     def ensure_uploaded(self, artifact: ArtifactRecord, source: IO[bytes]) -> None:
         """对象不存在则上传；已存在则读取并校验，绝不覆盖不同内容。"""
-        try:
-            existing = self._stat(artifact)
-            bucket_missing = False
-        except _BucketMissing:
-            existing = None
-            bucket_missing = True
+        existing = self._stat(artifact)
         if existing is not None:
             remote = self._read_all(artifact)
             self._verify(artifact, remote, existing.content_type)
@@ -59,17 +49,10 @@ class MinioObjectStore:
 
         data = source.read()
         self._verify(artifact, data, artifact.mime_type)
-        if bucket_missing:
-            self._ensure_bucket(artifact.bucket)
         try:
             self._put(artifact, data)
         except Exception as exc:
-            if getattr(exc, "code", None) == "NoSuchBucket":
-                # 并发或首次启动场景：bucket 可能在上传瞬间才创建完成。
-                self._ensure_bucket(artifact.bucket)
-                self._put(artifact, data)
-            else:
-                raise _translate(exc) from exc
+            raise _translate(exc) from exc
 
         uploaded = self._stat(artifact)
         if uploaded is None:
@@ -123,14 +106,6 @@ class MinioObjectStore:
             content_type=artifact.mime_type,
         )
 
-    def _ensure_bucket(self, bucket: str) -> None:
-        """幂等创建私有 bucket；对象权限由部署凭据决定。"""
-        try:
-            self._client.make_bucket(bucket)
-        except Exception as exc:
-            if getattr(exc, "code", None) not in _BUCKET_EXISTS_CODES:
-                raise _translate(exc) from exc
-
     def _stat(self, artifact: ArtifactRecord) -> Any | None:
         try:
             return self._client.stat_object(artifact.bucket, artifact.object_key)
@@ -138,8 +113,6 @@ class MinioObjectStore:
             code = getattr(exc, "code", None)
             if code in _MISSING_CODES:
                 return None
-            if code == "NoSuchBucket":
-                raise _BucketMissing from exc
             raise _translate(exc) from exc
 
     def _read_all(self, artifact: ArtifactRecord) -> bytes:
