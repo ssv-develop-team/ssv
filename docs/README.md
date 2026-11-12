@@ -9,6 +9,7 @@
 - [依赖与构建](依赖与构建.md)：系统包、Python 环境、`uv`、runtime profile、ONNX Runtime/OpenCV/TensorRT provider 和构建缓存。
 - [检测前端配置](检测前端配置.md)：实时输入、解码、GTK 显示、overlay、推理、模型、跟踪和调试。
 - [Agent 配置](Agent配置.md)：Redis 消费、SQLite 账本、复核 worker、索引 worker、DeerFlow 模型、证据和 Qdrant。
+- [通用知识库](通用知识库.md)：一句话、Markdown、TXT 独立入库与向量检索，不依赖事件或规则流程。
 - [YOLO 推理链路说明](yolo推理链路说明.md)：模型输入、输出、推理设备和常见失败。
 - [安全帽模型验证说明](安全帽模型验证说明.md)：安全帽模型验证、label map 和模型接入。
 
