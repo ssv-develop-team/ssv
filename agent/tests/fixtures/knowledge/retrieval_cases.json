@@ -1,0 +1,17 @@
+[
+  {"query": "去哪里找设备的保养资料？", "category": "改写", "evidence": "纸质手册放在资料室第二层书架。"},
+  {"query": "借设备保养资料应该打哪个内线？", "category": "相近主题", "evidence": "负责人为周宁，内线是 6102。"},
+  {"query": "设备手册电子副本谁负责？", "category": "改写", "evidence": "负责人为周宁，内线是 6102。"},
+  {"query": "采购申请找谁联系，电话号码是多少？", "category": "相近主题", "evidence": "负责人为林悦，内线是 6208。"},
+  {"query": "林悦的内线是多少？", "category": "精确查询", "evidence": "负责人为林悦，内线是 6208。"},
+  {"query": "采购材料交齐后一般多久审批完？", "category": "相近主题", "evidence": "审批应在三个工作日内完成。"},
+  {"query": "设备坏了应该找谁，内线是多少？", "category": "相近主题", "evidence": "负责人为陈墨，内线是 6309。"},
+  {"query": "维修报修登记以后多久有人响应？", "category": "相近主题", "evidence": "应在四小时内响应"},
+  {"query": "午饭几点可以去餐厅吃？", "category": "改写", "evidence": "午餐每天中午十二点开放"},
+  {"query": "食堂下午一点半以后还能打饭吗？", "category": "改写", "evidence": "十三点三十分停止供餐"},
+  {"query": "AX-17 多久维护一次？", "category": "精确查询", "evidence": "| AX-17 | 每 90 天一次 | 蓝色文件夹 |"},
+  {"query": "AX-71 的维护记录在哪个颜色的文件夹？", "category": "精确查询", "evidence": "| AX-71 | 每 180 天一次 | 绿色文件夹 |"},
+  {"query": "员工年终奖按什么比例计算？", "category": "无答案", "evidence": null},
+  {"query": "食堂周末营业吗？", "category": "无答案", "evidence": null},
+  {"query": "AX-17 的厂家保修期是几年？", "category": "无答案", "evidence": null}
+]
