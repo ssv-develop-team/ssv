@@ -1819,6 +1819,7 @@ SsvConfig parse_and_validate(const YAML::Node &root)
                 "reporting",
                 "recording_evidence",
                 "knowledge",
+                "storage",
             });
         config.agent.state_machine_timeout = get_or<int>(
             agent,

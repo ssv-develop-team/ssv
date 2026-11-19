@@ -1032,3 +1032,86 @@ def test_consumer_exception_stops_workers_and_is_reported_without_message() -> N
     assert "OSError" in str(error.value)
     assert "sensitive Redis credentials" not in str(error.value)
     assert consumer.stopped.is_set()
+
+
+def test_artifact_worker_starts_for_minio_and_store_is_closed(monkeypatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "secret")
+
+    class FakeConsumer:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.started = Event()
+
+        def run(self, stopping: Event) -> None:
+            self.started.set()
+            stopping.wait()
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    worker = FakeWorker()
+    store = FakeStore()
+    observed: dict[str, object] = {}
+    cfg = SsvConfig.model_validate(
+        {
+            "agent": {
+                "storage": {
+                    "backend": "minio",
+                    "poll_interval_ms": 250,
+                    "lease_ms": 5000,
+                    "max_retries": 4,
+                    "retry_delay_ms": 2000,
+                }
+            }
+        }
+    )
+
+    runtime = service.AgentService(
+        cfg,
+        consumer_factory=lambda _: FakeConsumer(),
+        artifact_worker_factory=lambda **kwargs: observed.update(kwargs) or worker,
+        artifact_store_factory=lambda _config: store,
+    )
+    runtime.start()
+    assert worker.started.wait(1)
+    runtime.stop(join_timeout_seconds=1)
+
+    assert observed["lease_ms"] == 5000
+    assert observed["max_retries"] == 4
+    assert observed["retry_delay_ms"] == 2000
+    assert observed["poll_interval_seconds"] == 0.25
+    assert store.closed is True
+
+
+def test_artifact_worker_is_not_started_for_local_backend_without_work(
+    monkeypatch,
+) -> None:
+    class FakeConsumer:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    def unexpected_store(_config):
+        raise AssertionError("MinIO store must not be created")
+
+    runtime = service.AgentService(
+        SsvConfig(),
+        consumer_factory=lambda _: FakeConsumer(),
+        artifact_store_factory=unexpected_store,
+        artifact_worker_factory=lambda **_: pytest.fail("worker must not start"),
+    )
+    runtime.start()
+    runtime.stop(join_timeout_seconds=1)

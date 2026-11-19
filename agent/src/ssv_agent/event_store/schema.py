@@ -131,6 +131,48 @@ CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_detections_event ON detections(event_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_event ON evidence(event_id);
 
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    kind TEXT NOT NULL
+        CHECK (kind IN ('review_json', 'report_markdown', 'evidence_frame')),
+    storage_backend TEXT NOT NULL CHECK (storage_backend IN ('minio')),
+    bucket TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    mime_type TEXT NOT NULL,
+    staging_path TEXT,
+    created_ms INTEGER NOT NULL,
+    uploaded_ms INTEGER,
+    local_cleaned_ms INTEGER,
+    UNIQUE (bucket, object_key)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_staging_path
+    ON artifacts(staging_path) WHERE staging_path IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artifacts_event ON artifacts(event_id, created_ms);
+
+CREATE TABLE IF NOT EXISTS artifact_upload_jobs (
+    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(artifact_id),
+    state TEXT NOT NULL
+        CHECK (state IN ('pending', 'processing', 'completed', 'dead')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_owner TEXT,
+    lease_expires_ms INTEGER,
+    available_at_ms INTEGER NOT NULL,
+    last_error TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    failed_at_ms INTEGER,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_upload_jobs_claim
+    ON artifact_upload_jobs(state, available_at_ms, lease_expires_ms, job_id);
+
 CREATE TABLE IF NOT EXISTS episodes (
     episode_id TEXT PRIMARY KEY,
     canonical_event_id TEXT NOT NULL REFERENCES events(event_id),
@@ -195,6 +237,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "source_pts_end": "INTEGER",
         "stream_generation": "INTEGER",
         "coverage": "TEXT NOT NULL DEFAULT 'unknown' CHECK (coverage IN ('unknown', 'exact_window', 'anchor_only'))",
+        "artifact_id": "TEXT REFERENCES artifacts(artifact_id)",
     },
     "review_results": {
         "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -206,6 +249,10 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "policy_id": "TEXT",
         "model_id": "TEXT",
         "rule_citations_json": "TEXT NOT NULL DEFAULT '[]'",
+        "artifact_id": "TEXT REFERENCES artifacts(artifact_id)",
+    },
+    "reports": {
+        "artifact_id": "TEXT REFERENCES artifacts(artifact_id)",
     },
     "durable_jobs": {
         "error_code": "TEXT",

@@ -18,6 +18,7 @@ import structlog
 
 from deerflow.client import DeerFlowClient
 
+from ssv_agent.artifact_worker import ArtifactUploadWorker
 from ssv_agent.config import SsvConfig
 from ssv_agent.embedding.registry import create_provider
 from ssv_agent.evidence_provider import EvidenceExtractor
@@ -25,6 +26,7 @@ from ssv_agent.event_consumer import EventConsumer
 from ssv_agent.event_episode import EventEpisodeAggregator
 from ssv_agent.event_store import EventLedger
 from ssv_agent.event_store.qdrant_store import SsvQdrantStore
+from ssv_agent.minio_store import MinioObjectStore
 from ssv_agent.ssv_cache_evidence import SsvCacheEvidenceExtractor
 from ssv_agent.knowledge.registry import get_retriever
 from ssv_agent.review_runtime import (
@@ -35,6 +37,7 @@ from ssv_agent.review_runtime import (
 from ssv_agent.runner import run_review
 from ssv_agent.runtime import (
     agent_root as _agent_root,
+    resolve_agent_path as _resolve_agent_path,
     runtime_environment as _runtime_environment,
     embedding_settings as _embedding_settings,
 )
@@ -66,6 +69,17 @@ def _set_deerflow_env(config: SsvConfig) -> None:
         os.environ.setdefault("SSV_AGENT_MODEL", config.agent.model_name)
 
 
+def _artifact_roots(config: SsvConfig) -> tuple[Path, ...]:
+    """产物暂存允许根：outputs 与已配置证据根的并集。"""
+    outputs_root = _resolve_agent_path(config.agent.output_dir).resolve(strict=False)
+    roots = [outputs_root]
+    for root in config.agent.evidence_roots:
+        resolved = Path(root).resolve(strict=False)
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
 def _close_resource(resource: object | None) -> None:
     close = getattr(resource, "close", None)
     if not callable(close):
@@ -87,6 +101,8 @@ class AgentService:
         index_worker_factory: Callable[..., IndexWorker] = IndexWorker,
         report_worker_factory: Callable[..., ReportWorker] = ReportWorker,
         recording_evidence_worker_factory: Callable[..., RecordingEvidenceWorker] = RecordingEvidenceWorker,
+        artifact_worker_factory: Callable[..., ArtifactUploadWorker] = ArtifactUploadWorker,
+        artifact_store_factory: Callable[..., Any] = MinioObjectStore,
         evidence_extractor_factory: Callable[..., EvidenceExtractor] = SsvCacheEvidenceExtractor,
         client_factory: Callable[[], Any] = DeerFlowClient,
         embedding_factory: Callable[..., Any] = create_provider,
@@ -98,6 +114,8 @@ class AgentService:
         self._index_worker_factory = index_worker_factory
         self._report_worker_factory = report_worker_factory
         self._recording_evidence_worker_factory = recording_evidence_worker_factory
+        self._artifact_worker_factory = artifact_worker_factory
+        self._artifact_store_factory = artifact_store_factory
         self._evidence_extractor_factory = evidence_extractor_factory
         self._client_factory = client_factory
         self._embedding_factory = embedding_factory
@@ -110,6 +128,7 @@ class AgentService:
         self._consumer_thread: Thread | None = None
         self._worker_threads: list[Thread] = []
         self._deerflow_client: object | None = None
+        self._artifact_store: Any | None = None
         self._review_config_dir: Path | None = None
         self._extensions_config_path: Path | None = None
         self._environment: dict[str, str | object] = {}
@@ -126,6 +145,9 @@ class AgentService:
                     return
                 self._configure_runtime_environment(include_deerflow=False)
                 self._start_recording_evidence_worker()
+                if self._stopping.is_set():
+                    return
+                self._start_artifact_worker()
                 if self._stopping.is_set():
                     return
                 self._start_review_worker()
@@ -237,6 +259,14 @@ class AgentService:
         finally:
             self._deerflow_client = None
 
+        artifact_store = self._artifact_store
+        try:
+            _close_resource(artifact_store)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            self._artifact_store = None
+
         self._restore_environment(errors)
         self._reset_deerflow_runtime_caches(errors)
 
@@ -291,6 +321,7 @@ class AgentService:
             policy_id=worker_config.policy_id,
             model_id=worker_config.model_id or self._config.agent.model_name,
             rule_retriever=get_retriever(self._config.agent.knowledge.backend),
+            artifact_store=self._artifact_store,
         )
         if self._stopping.is_set():
             return
@@ -379,6 +410,33 @@ class AgentService:
             return
         self._start_worker_thread("ssv-agent-report", worker.run)
 
+    def _start_artifact_worker(self) -> None:
+        """在当前进程持有产物上传 worker 与唯一的对象存储客户端。"""
+        storage = self._config.agent.storage
+        if storage.backend != "minio" and not self._has_artifact_work():
+            return
+        store = self._artifact_store_factory(storage.minio)
+        if self._stopping.is_set():
+            return
+        self._artifact_store = store
+        worker = self._artifact_worker_factory(
+            ledger_factory=self._ledger_factory,
+            store=store,
+            worker_id="ssv-artifact-upload-0",
+            lease_ms=storage.lease_ms,
+            max_retries=storage.max_retries,
+            retry_delay_ms=storage.retry_delay_ms,
+            poll_interval_seconds=storage.poll_interval_ms / 1000,
+            staging_roots=_artifact_roots(self._config),
+        )
+        if self._stopping.is_set():
+            return
+        self._start_worker_thread("ssv-agent-artifact-upload", worker.run)
+
+    def _has_artifact_work(self) -> bool:
+        with self._ledger_factory() as ledger:
+            return ledger.has_artifact_work()
+
     def _build_embedding(self) -> Any:
         backend, model = _embedding_settings(self._config)
         if model is None or backend == "mock":
@@ -391,6 +449,7 @@ class AgentService:
         return EventLedger(
             evidence_roots=self._config.agent.evidence_roots,
             recording_evidence=self._config.agent.recording_evidence,
+            artifact_storage=self._config.agent.storage,
         )
 
     def _configure_runtime_environment(self, *, include_deerflow: bool) -> None:

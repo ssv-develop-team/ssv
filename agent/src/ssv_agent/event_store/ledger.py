@@ -6,6 +6,8 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
+import shutil
 import stat
 import time
 import uuid
@@ -14,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ssv_agent.config import RecordingEvidenceConfig
+from ssv_agent.config import ArtifactStorageConfig, RecordingEvidenceConfig
 from ssv_agent.event_store.sqlite_store import SsvEventStore
 
 if TYPE_CHECKING:
@@ -23,6 +25,18 @@ if TYPE_CHECKING:
     from ssv_agent.evidence_provider import EvidenceArtifact
     from ssv_agent.report import ReportArtifact
 from ssv_agent.review_context import Detection, ReviewContext
+
+
+_ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _row_value(row: Any, key: str) -> Any:
+    """兼容 dict 与 sqlite3.Row 的可选列读取。"""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 class JobKind(StrEnum):
@@ -41,6 +55,20 @@ class JobState(StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     DEAD = "dead"
+
+
+class ArtifactKind(StrEnum):
+    """长期存储中不可变业务产物的类型。"""
+
+    REVIEW_JSON = "review_json"
+    REPORT_MARKDOWN = "report_markdown"
+    EVIDENCE_FRAME = "evidence_frame"
+
+
+class StorageBackend(StrEnum):
+    """产物登记时确定的存储后端。"""
+
+    MINIO = "minio"
 
 
 class EpisodeState(StrEnum):
@@ -83,6 +111,7 @@ class EvidenceRef:
     source_pts_end: int | None
     stream_generation: int | None
     coverage: str = "unknown"
+    artifact_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,14 +147,22 @@ class EventCase:
     evidence_window_end: int | None = None
     event_phase: str | None = None
 
-    def to_review_context(self) -> ReviewContext:
-        """从权威案件重建模型可读的输入，不暴露未登记的新路径。"""
+    def to_review_context(self, *, frame_path: str | None = None) -> ReviewContext:
+        """从权威案件重建模型可读的输入，不暴露未登记的新路径。
+
+        ``frame_path`` 由调用方通过受控读取边界创建的工作副本指定；省略时沿用以
+        前登记的本地路径。
+        """
         detections: list[Detection] = []
         for detection in self.detections:
             copied = dict(detection)
             copied["bbox"] = _json_value(copied.pop("bbox_json", "[]"), [])
             detections.append(Detection.model_validate(copied))
-        frame = next((item.path for item in self.evidence if item.kind == "frame"), None)
+        resolved_frame = (
+            frame_path
+            if frame_path is not None
+            else next((item.path for item in self.evidence if item.kind == "frame"), None)
+        )
         clip = next((item.path for item in self.evidence if item.kind == "clip"), None)
         return ReviewContext(
             event_id=self.event_id,
@@ -142,7 +179,7 @@ class EventCase:
             rule_version=self.rule_version,
             rule_facts=self.rule_facts,
             detections=detections,
-            frame_path=frame,
+            frame_path=resolved_frame,
             clip_path=clip,
             evidence_ids=[item.evidence_id for item in self.evidence if item.available],
         )
@@ -185,6 +222,7 @@ class ReviewRecord:
     model_id: str | None
     result_path: str | None
     created_ms: int
+    artifact_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +238,58 @@ class ReportRecord:
     artifact_path: str
     size_bytes: int
     created_ms: int
+    artifact_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    """一个不可变业务产物的登记信息。"""
+
+    artifact_id: str
+    event_id: str
+    kind: ArtifactKind
+    storage_backend: StorageBackend
+    bucket: str
+    object_key: str
+    sha256: str
+    size_bytes: int
+    mime_type: str
+    staging_path: str | None
+    created_ms: int
+    uploaded_ms: int | None
+    local_cleaned_ms: int | None
+
+
+@dataclass(frozen=True)
+class StagedArtifact:
+    """生产者在业务提交事务内登记的待上传产物。"""
+
+    artifact_id: str
+    event_id: str
+    kind: ArtifactKind
+    path: str
+    sha256: str
+    size_bytes: int
+    mime_type: str
+
+
+@dataclass(frozen=True)
+class ArtifactUploadJob:
+    """按产物唯一关联的持久上传任务。"""
+
+    job_id: int
+    artifact_id: str
+    state: JobState
+    attempts: int
+    lease_owner: str | None
+    lease_expires_ms: int | None
+    available_at_ms: int
+    last_error: str | None
+    error_code: str | None
+    error_message: str | None
+    failed_at_ms: int | None
+    created_ms: int
+    updated_ms: int
 
 
 @dataclass(frozen=True)
@@ -358,15 +448,31 @@ class EventLedger:
         db_path: str | os.PathLike[str] | None = None,
         evidence_roots: list[str] | None = None,
         recording_evidence: RecordingEvidenceConfig | None = None,
+        artifact_storage: ArtifactStorageConfig | None = None,
+        outputs_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self._evidence_roots = _load_evidence_roots(evidence_roots)
         self._recording_evidence = recording_evidence
+        self._artifact_storage = artifact_storage
+        self._outputs_dir = Path(
+            outputs_dir if outputs_dir is not None else os.getenv("SSV_OUTPUTS_DIR", "outputs")
+        ).resolve(strict=False)
         self._store = SsvEventStore(db_path)
 
     @property
     def evidence_roots(self) -> tuple[Path, ...]:
         """返回已规范化的可信证据根目录。"""
         return self._evidence_roots
+
+    @property
+    def artifact_storage(self) -> ArtifactStorageConfig | None:
+        """返回产物存储配置；None 表示沿用纯本地行为。"""
+        return self._artifact_storage
+
+    @property
+    def staging_enabled(self) -> bool:
+        """新产物是否应登记为 MinIO 待上传暂存。"""
+        return self._artifact_storage is not None and self._artifact_storage.backend == "minio"
 
     def resolve_evidence_path(self, path: str | os.PathLike[str]) -> Path | None:
         """解析并验证证据路径；越界、相对或无法解析的路径返回 None。"""
@@ -396,6 +502,10 @@ class EventLedger:
     def record(self, context: ReviewContext) -> RecordOutcome:
         """原子登记一件案件及其首批 review/index 工作。"""
         now_ms = _now_ms()
+        staged: StagedArtifact | None = None
+        prepared = self._prepare_ingress_artifact(context)
+        if prepared is not None:
+            context, staged = prepared
         event_id = context.event_id
         with self._store.transaction(immediate=True) as connection:
             created = self._record_event_in_transaction(
@@ -403,6 +513,7 @@ class EventLedger:
                 context,
                 now_ms=now_ms,
                 create_jobs=True,
+                ingress_artifact=staged,
             )
 
         case = self.get_case(event_id)
@@ -422,6 +533,7 @@ class EventLedger:
         now_ms: int,
         create_jobs: bool,
         episode_id: str | None = None,
+        ingress_artifact: StagedArtifact | None = None,
     ) -> bool:
         """在当前事务内幂等登记 canonical event。"""
         event_id = context.event_id
@@ -464,7 +576,7 @@ class EventLedger:
             ),
         )
         self._record_detections(connection, event_id, context)
-        self._record_evidence(connection, event_id, context)
+        self._record_evidence(connection, event_id, context, ingress_artifact=ingress_artifact)
         if create_jobs:
             jobs_to_create: tuple[tuple[JobKind, int], ...]
             if self._recording_evidence is not None:
@@ -527,6 +639,7 @@ class EventLedger:
                 source_pts_end=row["source_pts_end"],
                 stream_generation=row["stream_generation"],
                 coverage=row["coverage"],
+                artifact_id=row.get("artifact_id"),
             )
             for row in stored["evidence"]
         )
@@ -582,7 +695,430 @@ class EventLedger:
             model_id=row["model_id"],
             result_path=row["result_path"],
             created_ms=row["created_ms"],
+            artifact_id=row.get("artifact_id"),
         )
+
+    def list_artifacts(self) -> tuple[ArtifactRecord, ...]:
+        """返回账本登记的全部产物。"""
+        return tuple(self._artifact_from_row(row) for row in self._store.list_artifacts())
+
+    def get_artifact(self, artifact_id: str) -> ArtifactRecord | None:
+        """按产物 ID 返回不可变登记信息。"""
+        row = self._store.get_artifact(artifact_id)
+        return self._artifact_from_row(row) if row is not None else None
+
+    def get_review_artifact(self, event_id: str, revision: int) -> ArtifactRecord | None:
+        """按事件和 revision 返回已关联的复核产物。"""
+        row = self._store.get_review_artifact(event_id, revision)
+        return self._artifact_from_row(row) if row is not None else None
+
+    def get_artifact_for_evidence(
+        self, event_id: str, evidence_id: str
+    ) -> ArtifactRecord | None:
+        """按事件和稳定证据 ID 返回已关联的图片产物。"""
+        row = self._store.get_artifact_for_evidence(event_id, evidence_id)
+        return self._artifact_from_row(row) if row is not None else None
+
+    def get_artifact_upload_job(self, artifact_id: str) -> ArtifactUploadJob | None:
+        """返回产物唯一关联的上传任务。"""
+        row = self._store.get_artifact_upload_job(artifact_id)
+        return self._artifact_upload_job_from_row(row) if row is not None else None
+
+    def register_artifact(
+        self,
+        staged: StagedArtifact,
+        *,
+        bucket: str,
+        object_key: str,
+    ) -> ArtifactRecord:
+        """独立事务中登记产物与待上传任务，供测试与外部登记使用。"""
+        with self._store.transaction(immediate=True) as connection:
+            return self._register_artifact_in_transaction(
+                connection,
+                staged,
+                bucket=bucket,
+                object_key=object_key,
+                now_ms=_now_ms(),
+            )
+
+    def claim_artifact_upload_job(
+        self,
+        worker_id: str,
+        lease_ms: int,
+    ) -> ArtifactUploadJob | None:
+        """领取一条到期的待上传或租约过期任务。"""
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            row = connection.execute(
+                """
+                SELECT * FROM artifact_upload_jobs
+                WHERE (state = 'pending' AND available_at_ms <= ?)
+                   OR (state = 'processing' AND lease_expires_ms <= ?)
+                ORDER BY job_id
+                LIMIT 1
+                """,
+                (now_ms, now_ms),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE artifact_upload_jobs
+                SET state = 'processing', attempts = attempts + 1,
+                    lease_owner = ?, lease_expires_ms = ?, updated_ms = ?
+                WHERE job_id = ?
+                """,
+                (worker_id, now_ms + max(lease_ms, 0), now_ms, row["job_id"]),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM artifact_upload_jobs WHERE job_id = ?", (row["job_id"],)
+            ).fetchone()
+        return self._artifact_upload_job_from_row(claimed)
+
+    def renew_artifact_upload_job(
+        self,
+        job: ArtifactUploadJob,
+        worker_id: str,
+        lease_ms: int,
+    ) -> None:
+        """仅允许当前未过期 attempt 延长上传任务租约。"""
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            cursor = connection.execute(
+                """
+                UPDATE artifact_upload_jobs
+                SET lease_expires_ms = ?, updated_ms = ?
+                WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
+                    AND attempts = ? AND lease_expires_ms > ?
+                """,
+                (
+                    now_ms + max(lease_ms, 0),
+                    now_ms,
+                    job.job_id,
+                    worker_id,
+                    job.attempts,
+                    now_ms,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLostError(f"lost lease for artifact upload job {job.job_id}")
+
+    def complete_artifact_upload_job(
+        self,
+        job: ArtifactUploadJob,
+        worker_id: str,
+    ) -> ArtifactRecord:
+        """以 claim fence 原子完成任务并登记上传时间。"""
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            cursor = connection.execute(
+                """
+                UPDATE artifact_upload_jobs
+                SET state = 'completed', lease_owner = NULL, lease_expires_ms = NULL,
+                    error_code = NULL, error_message = NULL, failed_at_ms = NULL,
+                    updated_ms = ?
+                WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
+                    AND attempts = ? AND lease_expires_ms > ?
+                """,
+                (now_ms, job.job_id, worker_id, job.attempts, now_ms),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLostError(f"lost lease for artifact upload job {job.job_id}")
+            connection.execute(
+                """
+                UPDATE artifacts SET uploaded_ms = COALESCE(uploaded_ms, ?)
+                WHERE artifact_id = ?
+                """,
+                (now_ms, job.artifact_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?", (job.artifact_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown artifact: {job.artifact_id}")
+            return self._artifact_from_row(row)
+
+    def fail_artifact_upload_job(
+        self,
+        job: ArtifactUploadJob,
+        worker_id: str,
+        *,
+        error: str,
+        max_retries: int,
+        retry_delay_ms: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> JobState:
+        """记录上传失败；耗尽重试预算后进入 dead。"""
+        with self._store.transaction(immediate=True) as connection:
+            now_ms = _now_ms()
+            row = connection.execute(
+                """
+                SELECT attempts FROM artifact_upload_jobs
+                WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
+                    AND attempts = ? AND lease_expires_ms > ?
+                """,
+                (job.job_id, worker_id, job.attempts, now_ms),
+            ).fetchone()
+            if row is None:
+                raise LeaseLostError(f"lost lease for artifact upload job {job.job_id}")
+            next_state = JobState.DEAD if row["attempts"] >= max_retries else JobState.PENDING
+            cursor = connection.execute(
+                """
+                UPDATE artifact_upload_jobs
+                SET state = ?, lease_owner = NULL, lease_expires_ms = NULL,
+                    available_at_ms = ?, last_error = ?, error_code = ?,
+                    error_message = ?, failed_at_ms = ?, updated_ms = ?
+                WHERE job_id = ? AND state = 'processing' AND lease_owner = ?
+                    AND attempts = ? AND lease_expires_ms > ?
+                """,
+                (
+                    next_state.value,
+                    now_ms + max(retry_delay_ms, 0),
+                    error,
+                    error_code,
+                    error_message,
+                    now_ms,
+                    now_ms,
+                    job.job_id,
+                    worker_id,
+                    job.attempts,
+                    now_ms,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLostError(f"lost lease for artifact upload job {job.job_id}")
+            return next_state
+
+    def has_artifact_work(self) -> bool:
+        """是否存在需要上传 worker 继续履行的责任。"""
+        return self._store.has_artifact_work()
+
+    def list_artifacts_pending_cleanup(self) -> tuple[ArtifactRecord, ...]:
+        """返回上传完成但尚未登记本地清理的产物。"""
+        return tuple(
+            self._artifact_from_row(row) for row in self._store.list_artifacts_pending_cleanup()
+        )
+
+    def mark_artifact_cleaned(self, artifact_id: str) -> bool:
+        """登记本地暂存已清理；已清理或未上传时返回 False。"""
+        with self._store.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE artifacts SET local_cleaned_ms = ?, staging_path = NULL
+                WHERE artifact_id = ? AND uploaded_ms IS NOT NULL
+                    AND local_cleaned_ms IS NULL
+                """,
+                (_now_ms(), artifact_id),
+            )
+            return cursor.rowcount == 1
+
+    def retry_dead_artifact_upload(self, artifact_id: str) -> ArtifactUploadJob:
+        """仅将 dead 上传任务重置为 pending，保留产物摘要与对象键。"""
+        with self._store.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM artifact_upload_jobs WHERE artifact_id = ?", (artifact_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown artifact upload job: {artifact_id}")
+            if row["state"] != JobState.DEAD.value:
+                raise ValueError("only dead artifact upload jobs can be retried")
+            now_ms = _now_ms()
+            cursor = connection.execute(
+                """
+                UPDATE artifact_upload_jobs
+                SET state = 'pending', attempts = 0, lease_owner = NULL,
+                    lease_expires_ms = NULL, available_at_ms = ?, last_error = NULL,
+                    error_code = NULL, error_message = NULL, failed_at_ms = NULL,
+                    updated_ms = ?
+                WHERE artifact_id = ? AND state = 'dead'
+                """,
+                (now_ms, now_ms, artifact_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("artifact upload job is no longer dead")
+            retried = connection.execute(
+                "SELECT * FROM artifact_upload_jobs WHERE artifact_id = ?", (artifact_id,)
+            ).fetchone()
+            return self._artifact_upload_job_from_row(retried)
+
+    def _validate_staged_association(
+        self,
+        job: DurableJob,
+        staged: StagedArtifact | None,
+        expected_kind: ArtifactKind,
+    ) -> None:
+        if staged is None:
+            return
+        if staged.event_id != job.entity_id:
+            raise ValueError("staged artifact belongs to another event")
+        if staged.kind != expected_kind:
+            raise ValueError("staged artifact kind does not match the business commit")
+
+    def _register_staged_in_transaction(
+        self,
+        connection: Any,
+        staged: StagedArtifact,
+        now_ms: int,
+    ) -> ArtifactRecord:
+        if self._artifact_storage is None:
+            raise ValueError("artifact storage is not configured")
+        from ssv_agent.artifact_storage import build_object_key
+
+        object_key = build_object_key(
+            self._artifact_storage.minio.prefix,
+            staged.artifact_id,
+            staged.kind,
+            staged.sha256,
+            staged.mime_type,
+            event_id=staged.event_id,
+        )
+        return self._register_artifact_in_transaction(
+            connection,
+            staged,
+            bucket=self._artifact_storage.minio.bucket,
+            object_key=object_key,
+            now_ms=now_ms,
+        )
+
+    def _register_frame_artifact_in_transaction(
+        self,
+        connection: Any,
+        event_id: str,
+        artifact: "EvidenceArtifact",
+        canonical_path: str,
+    ) -> str | None:
+        if artifact.kind != "frame" or not self.staging_enabled:
+            return None
+        mime_type = artifact.mime_type or mimetypes.guess_type(canonical_path)[0]
+        if not mime_type:
+            raise ValueError("frame artifact has no content type")
+        staged = StagedArtifact(
+            artifact_id=uuid.uuid4().hex,
+            event_id=event_id,
+            kind=ArtifactKind.EVIDENCE_FRAME,
+            path=canonical_path,
+            sha256=artifact.sha256,
+            size_bytes=artifact.size,
+            mime_type=mime_type,
+        )
+        self._register_staged_in_transaction(connection, staged, _now_ms())
+        return staged.artifact_id
+
+    def _prepare_ingress_artifact(
+        self,
+        context: ReviewContext,
+    ) -> tuple[ReviewContext, StagedArtifact] | None:
+        """在写事务前把 ingress 帧复制为 Agent 拥有的稳定暂存副本。"""
+        if not self.staging_enabled or not context.frame_path:
+            return None
+        if self._store.get_event(context.event_id) is not None:
+            return None
+        source = self.resolve_evidence_path(context.frame_path)
+        if source is None or not source.is_file():
+            return None
+        artifact_id = uuid.uuid4().hex
+        token = hashlib.sha256(context.event_id.encode("utf-8")).hexdigest()
+        directory = self._outputs_dir / "staging" / "ingress" / token / artifact_id
+        directory.mkdir(parents=True, exist_ok=True)
+        suffix = source.suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,5}", source.suffix) else ".jpg"
+        target = directory / f"frame{suffix}"
+        shutil.copyfile(source, target)
+        content = target.read_bytes()
+        mime_type = mimetypes.guess_type(target.name)[0]
+        if not mime_type:
+            raise ValueError("ingress frame has no content type")
+        staged = StagedArtifact(
+            artifact_id=artifact_id,
+            event_id=context.event_id,
+            kind=ArtifactKind.EVIDENCE_FRAME,
+            path=str(target),
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            mime_type=mime_type,
+        )
+        return context.model_copy(update={"frame_path": str(target)}), staged
+
+    def _register_artifact_in_transaction(
+        self,
+        connection: Any,
+        staged: StagedArtifact,
+        *,
+        bucket: str,
+        object_key: str,
+        now_ms: int,
+    ) -> ArtifactRecord:
+        self._validate_staged_artifact(staged, bucket=bucket, object_key=object_key)
+        record = ArtifactRecord(
+            artifact_id=staged.artifact_id,
+            event_id=staged.event_id,
+            kind=staged.kind,
+            storage_backend=StorageBackend.MINIO,
+            bucket=bucket,
+            object_key=object_key,
+            sha256=staged.sha256,
+            size_bytes=staged.size_bytes,
+            mime_type=staged.mime_type,
+            staging_path=staged.path,
+            created_ms=now_ms,
+            uploaded_ms=None,
+            local_cleaned_ms=None,
+        )
+        connection.execute(
+            """
+            INSERT INTO artifacts (
+                artifact_id, event_id, kind, storage_backend, bucket, object_key,
+                sha256, size_bytes, mime_type, staging_path, created_ms,
+                uploaded_ms, local_cleaned_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                record.artifact_id,
+                record.event_id,
+                record.kind.value,
+                record.storage_backend.value,
+                record.bucket,
+                record.object_key,
+                record.sha256,
+                record.size_bytes,
+                record.mime_type,
+                record.staging_path,
+                record.created_ms,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO artifact_upload_jobs (
+                artifact_id, state, attempts, available_at_ms, created_ms, updated_ms
+            ) VALUES (?, 'pending', 0, ?, ?, ?)
+            """,
+            (record.artifact_id, now_ms, now_ms, now_ms),
+        )
+        return record
+
+    @staticmethod
+    def _validate_staged_artifact(
+        staged: StagedArtifact,
+        *,
+        bucket: str,
+        object_key: str,
+    ) -> None:
+        if not _ARTIFACT_ID_PATTERN.fullmatch(staged.artifact_id):
+            raise ValueError("artifact_id must be a safe server-generated identifier")
+        if not isinstance(staged.kind, ArtifactKind):
+            raise ValueError("artifact kind is invalid")
+        if not _SHA256_PATTERN.fullmatch(staged.sha256):
+            raise ValueError("artifact sha256 must be lowercase hexadecimal")
+        if staged.size_bytes < 0:
+            raise ValueError("artifact size_bytes must not be negative")
+        if not staged.path or not staged.mime_type:
+            raise ValueError("artifact staging path and mime type are required")
+        if not bucket or not object_key or object_key.startswith("/"):
+            raise ValueError("artifact bucket and relative object key are required")
+        if any(part in {"", ".", ".."} for part in object_key.split("/")):
+            raise ValueError("artifact object key must not contain empty, '.' or '..' parts")
+        if staged.event_id != staged.event_id.strip() or not staged.event_id:
+            raise ValueError("artifact event_id is required")
 
     def get_report_for_review(
         self,
@@ -1086,10 +1622,13 @@ class EventLedger:
         worker_id: str,
         result: Any,
         result_path: str,
+        *,
+        staged: StagedArtifact | None = None,
     ) -> int:
         """以持有者 fence 原子提交 review、投影、派生任务和 job 完成状态。"""
         if job.kind != JobKind.REVIEW:
             raise ValueError("complete_review_job requires a review job")
+        self._validate_staged_association(job, staged, ArtifactKind.REVIEW_JSON)
 
         with self._store.transaction(immediate=True) as connection:
             now_ms = _now_ms()
@@ -1109,6 +1648,10 @@ class EventLedger:
                 )
             self._refresh_evidence_in_transaction(connection, job.entity_id)
 
+            artifact_id = None
+            if staged is not None:
+                self._register_staged_in_transaction(connection, staged, now_ms)
+                artifact_id = staged.artifact_id
             revision = self._append_review_in_transaction(
                 connection,
                 job.entity_id,
@@ -1116,6 +1659,7 @@ class EventLedger:
                 result,
                 result_path,
                 now_ms,
+                artifact_id=artifact_id,
             )
             self._complete_owned_job(connection, job, worker_id)
         return revision
@@ -1126,12 +1670,22 @@ class EventLedger:
         worker_id: str,
         artifact: ReportArtifact,
         template_version: str,
+        *,
+        staged: StagedArtifact | None = None,
     ) -> ReportRecord:
         """原子登记报告元数据并完成当前 lease 持有的 report job。"""
         if job.kind != JobKind.REPORT:
             raise ValueError("complete_report_job requires a report job")
         if not template_version:
             raise ValueError("template_version must not be empty")
+        self._validate_staged_association(job, staged, ArtifactKind.REPORT_MARKDOWN)
+        if staged is not None:
+            if (
+                str(staged.path) != str(artifact.path)
+                or staged.sha256 != artifact.sha256
+                or staged.size_bytes != artifact.size_bytes
+            ):
+                raise ValueError("staged report artifact does not match the written report")
 
         artifact_path = str(artifact.path)
         sha256 = artifact.sha256
@@ -1176,17 +1730,23 @@ class EventLedger:
                 if previous is None:
                     raise LeaseLostError(f"completed report job {job.job_id} has no report record")
                 previous_record = self._report_record_from_row(previous)
+                expected_artifact_id = staged.artifact_id if staged is not None else None
                 if (
                     previous_record.template_version != template_version
                     or previous_record.sha256 != sha256
                     or previous_record.artifact_path != artifact_path
                     or previous_record.size_bytes != size_bytes
+                    or previous_record.artifact_id != expected_artifact_id
                 ):
                     raise ValueError("report artifact conflicts with the completed report")
                 return previous_record
 
             self._validate_report_lease(current_job, job, worker_id, now_ms)
 
+            artifact_id = None
+            if staged is not None:
+                self._register_staged_in_transaction(connection, staged, now_ms)
+                artifact_id = staged.artifact_id
             report = ReportRecord(
                 report_id=uuid.uuid4().hex,
                 event_id=job.entity_id,
@@ -1197,13 +1757,15 @@ class EventLedger:
                 artifact_path=artifact_path,
                 size_bytes=size_bytes,
                 created_ms=now_ms,
+                artifact_id=artifact_id,
             )
             connection.execute(
                 """
                 INSERT INTO reports (
                     report_id, event_id, review_id, review_revision,
-                    template_version, sha256, artifact_path, size_bytes, created_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    template_version, sha256, artifact_path, size_bytes, created_ms,
+                    artifact_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     report.report_id,
@@ -1215,6 +1777,7 @@ class EventLedger:
                     report.artifact_path,
                     report.size_bytes,
                     report.created_ms,
+                    artifact_id,
                 ),
             )
             self._complete_owned_job_kind(connection, job, worker_id, JobKind.REPORT)
@@ -1319,13 +1882,16 @@ class EventLedger:
             raise ValueError("evidence artifact path or metadata is invalid")
         canonical = str(resolved)
         evidence_id = _evidence_id(event_id, artifact.kind, canonical)
+        artifact_id = self._register_frame_artifact_in_transaction(
+            connection, event_id, artifact, canonical
+        )
         connection.execute(
             """
             INSERT INTO evidence (
                 event_id, evidence_id, kind, path, mime_type, available,
                 size, mtime, sha256, source_pts_start, source_pts_end,
-                stream_generation, coverage
-            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                stream_generation, coverage, artifact_id
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id, kind, path) DO UPDATE SET
                 evidence_id = excluded.evidence_id, mime_type = excluded.mime_type,
                 available = 1, size = excluded.size, mtime = excluded.mtime,
@@ -1333,12 +1899,13 @@ class EventLedger:
                 source_pts_start = excluded.source_pts_start,
                 source_pts_end = excluded.source_pts_end,
                 stream_generation = excluded.stream_generation,
-                coverage = excluded.coverage
+                coverage = excluded.coverage,
+                artifact_id = COALESCE(excluded.artifact_id, evidence.artifact_id)
             """,
             (event_id, evidence_id, artifact.kind, canonical,
              artifact.mime_type, artifact.size, artifact.mtime, artifact.sha256,
              artifact.source_pts_start, artifact.source_pts_end,
-             artifact.stream_generation, artifact.coverage),
+             artifact.stream_generation, artifact.coverage, artifact_id),
         )
 
     def fail_evidence_extract_job(
@@ -1546,6 +2113,8 @@ class EventLedger:
         result: Any,
         result_path: str,
         now_ms: int,
+        *,
+        artifact_id: str | None = None,
     ) -> int:
         evidence_ids = tuple(getattr(result, "evidence_ids", ()))
         claims = [
@@ -1568,8 +2137,9 @@ class EventLedger:
             INSERT INTO reviews (
                 review_id, event_id, revision, policy_id, model_id, verdict,
                 confidence, evidence_status, explanation, evidence_ids_json,
-                claims_json, rule_citations_json, result_path, created_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                claims_json, rule_citations_json, result_path, created_ms,
+                artifact_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 review_id,
@@ -1586,6 +2156,7 @@ class EventLedger:
                 json.dumps(rule_citations, ensure_ascii=False),
                 result_path,
                 now_ms,
+                artifact_id,
             ),
         )
         connection.execute(
@@ -1835,13 +2406,21 @@ class EventLedger:
         event_id: str,
         evidence_id: str | None = None,
     ) -> int:
-        query = "SELECT id, path FROM evidence WHERE event_id = ?"
+        query = (
+            "SELECT evidence.id, evidence.path, artifacts.uploaded_ms "
+            "FROM evidence "
+            "LEFT JOIN artifacts ON artifacts.artifact_id = evidence.artifact_id "
+            "WHERE evidence.event_id = ?"
+        )
         params: list[str] = [event_id]
         if evidence_id is not None:
-            query += " AND evidence_id = ?"
+            query += " AND evidence.evidence_id = ?"
             params.append(evidence_id)
         rows = connection.execute(query, params).fetchall()
         for row in rows:
+            if row["uploaded_ms"] is not None:
+                # 已上传产物的可用性由账本确认，本地清理不改变历史结论。
+                continue
             available, size, mtime = self._evidence_metadata(row["path"])
             connection.execute(
                 """
@@ -1869,21 +2448,51 @@ class EventLedger:
         connection: Any,
         event_id: str,
         context: ReviewContext,
+        *,
+        ingress_artifact: StagedArtifact | None = None,
     ) -> None:
+        registered: ArtifactRecord | None = None
+        if ingress_artifact is not None:
+            registered = self._register_staged_in_transaction(
+                connection, ingress_artifact, _now_ms()
+            )
         for kind, path in (("frame", context.frame_path), ("clip", context.clip_path)):
             if not path:
                 continue
-            resolved = self.resolve_evidence_path(path)
-            if resolved is None:
-                continue
-            canonical_path = str(resolved)
-            available, size, mtime = self._evidence_metadata(canonical_path)
+            staged_frame = (
+                ingress_artifact is not None
+                and kind == "frame"
+                and path == ingress_artifact.path
+            )
+            available: bool
+            size: int | None
+            mtime: float | None
+            if staged_frame:
+                canonical_path = str(Path(path).resolve(strict=False))
+                try:
+                    metadata = Path(canonical_path).stat()
+                except OSError as exc:
+                    raise ValueError("staged ingress frame is missing") from exc
+                available, size, mtime = True, metadata.st_size, metadata.st_mtime
+            else:
+                resolved = self.resolve_evidence_path(path)
+                if resolved is None:
+                    continue
+                canonical_path = str(resolved)
+                available, size, mtime = self._evidence_metadata(canonical_path)
+            artifact_id = (
+                registered.artifact_id
+                if registered is not None
+                and kind == "frame"
+                and canonical_path == registered.staging_path
+                else None
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO evidence (
                     event_id, evidence_id, kind, path, mime_type, available, size, mtime,
-                    source_pts_start, source_pts_end, stream_generation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_pts_start, source_pts_end, stream_generation, artifact_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -1900,6 +2509,7 @@ class EventLedger:
                     None,
                     None,
                     None,
+                    artifact_id,
                 ),
             )
 
@@ -1920,6 +2530,43 @@ class EventLedger:
             artifact_path=row["artifact_path"],
             size_bytes=row["size_bytes"],
             created_ms=row["created_ms"],
+            artifact_id=_row_value(row, "artifact_id"),
+        )
+
+    @staticmethod
+    def _artifact_from_row(row: Any) -> ArtifactRecord:
+        return ArtifactRecord(
+            artifact_id=row["artifact_id"],
+            event_id=row["event_id"],
+            kind=ArtifactKind(row["kind"]),
+            storage_backend=StorageBackend(row["storage_backend"]),
+            bucket=row["bucket"],
+            object_key=row["object_key"],
+            sha256=row["sha256"],
+            size_bytes=row["size_bytes"],
+            mime_type=row["mime_type"],
+            staging_path=row["staging_path"],
+            created_ms=row["created_ms"],
+            uploaded_ms=row["uploaded_ms"],
+            local_cleaned_ms=row["local_cleaned_ms"],
+        )
+
+    @staticmethod
+    def _artifact_upload_job_from_row(row: Any) -> ArtifactUploadJob:
+        return ArtifactUploadJob(
+            job_id=row["job_id"],
+            artifact_id=row["artifact_id"],
+            state=JobState(row["state"]),
+            attempts=row["attempts"],
+            lease_owner=row["lease_owner"],
+            lease_expires_ms=row["lease_expires_ms"],
+            available_at_ms=row["available_at_ms"],
+            last_error=row["last_error"],
+            error_code=row["error_code"],
+            error_message=row["error_message"],
+            failed_at_ms=row["failed_at_ms"],
+            created_ms=row["created_ms"],
+            updated_ms=row["updated_ms"],
         )
 
     @staticmethod

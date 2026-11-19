@@ -228,6 +228,86 @@ class SsvEventStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_artifacts(self) -> list[dict[str, Any]]:
+        """按登记顺序返回全部产物。"""
+        rows = self._conn.execute(
+            "SELECT * FROM artifacts ORDER BY created_ms, artifact_id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        """按产物 ID 返回登记信息。"""
+        row = self._conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_review_artifact(self, event_id: str, revision: int) -> dict[str, Any] | None:
+        """返回关联指定复核 revision 的产物。"""
+        row = self._conn.execute(
+            """
+            SELECT artifacts.* FROM reviews
+            JOIN artifacts ON artifacts.artifact_id = reviews.artifact_id
+            WHERE reviews.event_id = ? AND reviews.revision = ?
+            """,
+            (event_id, revision),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_artifact_for_evidence(
+        self, event_id: str, evidence_id: str
+    ) -> dict[str, Any] | None:
+        """返回关联指定证据记录的产物。"""
+        row = self._conn.execute(
+            """
+            SELECT artifacts.* FROM evidence
+            JOIN artifacts ON artifacts.artifact_id = evidence.artifact_id
+            WHERE evidence.event_id = ? AND evidence.evidence_id = ?
+            """,
+            (event_id, evidence_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_artifact_upload_job(self, artifact_id: str) -> dict[str, Any] | None:
+        """返回产物唯一关联的上传任务。"""
+        row = self._conn.execute(
+            "SELECT * FROM artifact_upload_jobs WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def has_artifact_work(self) -> bool:
+        """是否存在待上传或待清理的 MinIO 产物责任。"""
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM artifact_upload_jobs
+            WHERE state IN ('pending', 'processing')
+            UNION ALL
+            SELECT 1 FROM artifacts
+            JOIN artifact_upload_jobs
+                ON artifact_upload_jobs.artifact_id = artifacts.artifact_id
+            WHERE artifact_upload_jobs.state = 'completed'
+                AND artifacts.local_cleaned_ms IS NULL
+                AND artifacts.staging_path IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
+
+    def list_artifacts_pending_cleanup(self) -> list[dict[str, Any]]:
+        """返回上传已完成但本地暂存尚未登记清理的产物。"""
+        rows = self._conn.execute(
+            """
+            SELECT artifacts.* FROM artifacts
+            JOIN artifact_upload_jobs
+                ON artifact_upload_jobs.artifact_id = artifacts.artifact_id
+            WHERE artifact_upload_jobs.state = 'completed'
+                AND artifacts.local_cleaned_ms IS NULL
+                AND artifacts.staging_path IS NOT NULL
+            ORDER BY artifacts.created_ms, artifacts.artifact_id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_episode(self, episode_id: str) -> dict[str, Any] | None:
         """按 episode ID 返回生命周期原始记录。"""
         row = self._conn.execute(

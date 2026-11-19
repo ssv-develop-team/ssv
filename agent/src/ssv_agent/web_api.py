@@ -12,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ssv_agent.config import SsvConfig
 from ssv_agent.event_store.readonly import (
+    ArtifactStoreUnavailable,
     EvidenceNotFound,
     EvidenceNotImage,
     EvidenceUnavailable,
@@ -96,6 +97,7 @@ class EvidenceResponse(BaseModel):
     status: Literal["available", "unavailable"]
     mime_type: str | None
     size: int | None
+    storage_status: Literal["local", "pending", "uploading", "uploaded", "failed"] = "local"
     coverage: str | None = None
 
 
@@ -124,6 +126,8 @@ def create_app(config: SsvConfig) -> FastAPI:
     event_store = ReadOnlyEventStore(
         resolve_agent_path(config.agent.event_db_path),
         config.agent.evidence_roots,
+        artifact_storage=config.agent.storage,
+        outputs_dir=resolve_agent_path(config.agent.output_dir),
     )
     app.state.event_store = event_store
 
@@ -152,6 +156,14 @@ def create_app(config: SsvConfig) -> FastAPI:
     @app.exception_handler(EvidenceNotImage)
     async def evidence_not_image_handler(_request: Request, _exc: EvidenceNotImage) -> JSONResponse:
         return _error_response(415, "evidence_not_image", "该证据不是可读取的图片")
+
+    @app.exception_handler(ArtifactStoreUnavailable)
+    async def artifact_store_error_handler(
+        _request: Request, _exc: ArtifactStoreUnavailable
+    ) -> JSONResponse:
+        return _error_response(
+            503, "artifact_store_unavailable", "产物存储暂时不可用"
+        )
 
     @app.exception_handler(EvidenceUnavailable)
     async def evidence_unavailable_handler(

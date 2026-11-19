@@ -22,9 +22,104 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
+  minio:
+    image: ${SSV_MINIO_IMAGE:-ghcr.io/ssv-develop-team/ssv-minio:RELEASE.2025-04-22T22-12-26Z-mc1}
+    build:
+      context: ./minio
+    container_name: ssv-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式提供}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式提供}
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          printf 'GET /minio/health/live HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3
+          IFS= read -r line <&3
+          case "$$line" in *' 200 '*) exit 0;; *) exit 1;; esac
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  minio-init:
+    image: ${SSV_MINIO_IMAGE:-ghcr.io/ssv-develop-team/ssv-minio:RELEASE.2025-04-22T22-12-26Z-mc1}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式提供}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式提供}
+      SSV_MINIO_ACCESS_KEY: ${SSV_MINIO_ACCESS_KEY:?SSV_MINIO_ACCESS_KEY 必须显式提供}
+      SSV_MINIO_SECRET_KEY: ${SSV_MINIO_SECRET_KEY:?SSV_MINIO_SECRET_KEY 必须显式提供}
+      SSV_MINIO_BUCKET: ${SSV_MINIO_BUCKET:-ssv-artifacts}
+      # Docker 客户端可能自动注入代理；MinIO 服务名必须走 Compose 内网。
+      NO_PROXY: minio
+      no_proxy: minio
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        fail() { printf '%s\n' "$$1" >&2; exit 1; }
+        mc_safe() {
+          stage="$$1"
+          shift
+          mc "$$@" >/dev/null 2>&1 || fail "MinIO 初始化阶段失败：$$stage"
+        }
+        [ "$${#MINIO_ROOT_USER}" -ge 3 ] && [ "$${#MINIO_ROOT_PASSWORD}" -ge 8 ] || fail 'MinIO 初始化阶段失败：校验 root 凭据'
+        [ "$${#SSV_MINIO_ACCESS_KEY}" -ge 3 ] && [ "$${#SSV_MINIO_SECRET_KEY}" -ge 8 ] || fail 'MinIO 初始化阶段失败：校验应用凭据'
+        [ "$$MINIO_ROOT_USER" != "$$SSV_MINIO_ACCESS_KEY" ] || fail 'MinIO 初始化阶段失败：校验账号隔离'
+        MC_CONFIG_DIR="$$(mktemp -d)" || fail 'MinIO 初始化阶段失败：准备临时配置'
+        export MC_CONFIG_DIR
+        trap 'rm -rf "$$MC_CONFIG_DIR"' EXIT
+        mc_safe '配置 root 连接' alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        # 每个 bucket 使用项目专属策略；已有策略必须与预期一致，避免改动其他账号权限。
+        policy_name="ssv-artifacts-$$SSV_MINIO_BUCKET"
+        jq -n --arg bucket "$$SSV_MINIO_BUCKET" '{
+          Version: "2012-10-17",
+          Statement: [
+            {Effect: "Allow", Action: ["s3:GetBucketLocation", "s3:ListBucket"],
+             Resource: ["arn:aws:s3:::" + $$bucket]},
+            {Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject"],
+             Resource: ["arn:aws:s3:::" + $$bucket + "/*"]}
+          ]
+        }' > "$$MC_CONFIG_DIR/policy.json" || fail 'MinIO 初始化阶段失败：生成项目策略'
+        users="$$(mc --json admin user list local 2>/dev/null)" || fail 'MinIO 初始化阶段失败：查询应用账号'
+        printf '%s\n' "$$users" | jq -se 'all(.[]; .status == "success" and (.accessKey | type) == "string")' >/dev/null || fail 'MinIO 初始化阶段失败：解析账号列表'
+        if printf '%s\n' "$$users" | jq -se --arg user "$$SSV_MINIO_ACCESS_KEY" 'any(.[]; .accessKey == $$user)' >/dev/null; then
+          user_info="$$(mc --json admin user info local "$$SSV_MINIO_ACCESS_KEY" 2>/dev/null)" || fail 'MinIO 初始化阶段失败：查询应用账号'
+          printf '%s\n' "$$user_info" | jq -e --arg policy "$$policy_name" '
+            .status == "success" and .userStatus == "enabled" and
+            ((.memberOf // []) | type) == "array" and ((.memberOf // []) | length) == 0 and
+            ((.policyName // "") == "" or .policyName == $$policy)
+          ' >/dev/null || fail 'MinIO 初始化阶段失败：校验应用账号权限'
+        fi
+        policies="$$(mc --json admin policy list local 2>/dev/null)" || fail 'MinIO 初始化阶段失败：查询策略'
+        printf '%s\n' "$$policies" | jq -se 'all(.[]; .status == "success" and (.policy | type) == "string")' >/dev/null || fail 'MinIO 初始化阶段失败：解析策略列表'
+        if printf '%s\n' "$$policies" | jq -se --arg policy "$$policy_name" 'any(.[]; .policy == $$policy)' >/dev/null; then
+          mc admin policy info local "$$policy_name" --policy-file "$$MC_CONFIG_DIR/existing-policy.json" >/dev/null 2>&1 || fail 'MinIO 初始化阶段失败：读取项目策略'
+          jq -e -s 'def canonical: walk(if type == "array" then sort else . end);
+            length == 2 and (.[0] | canonical) == (.[1] | canonical)
+          ' "$$MC_CONFIG_DIR/policy.json" "$$MC_CONFIG_DIR/existing-policy.json" >/dev/null || fail 'MinIO 初始化阶段失败：校验项目策略'
+        else
+          mc_safe '创建项目策略' admin policy create local "$$policy_name" "$$MC_CONFIG_DIR/policy.json"
+        fi
+        mc_safe '创建 bucket' mb --ignore-existing "local/$$SSV_MINIO_BUCKET"
+        mc_safe '关闭匿名访问' anonymous set none "local/$$SSV_MINIO_BUCKET"
+        mc_safe '创建应用账号' admin user add local "$$SSV_MINIO_ACCESS_KEY" "$$SSV_MINIO_SECRET_KEY"
+        mc_safe '绑定应用策略' admin policy attach local "$$policy_name" --user "$$SSV_MINIO_ACCESS_KEY"
+        printf '%s\n' 'MinIO bucket 与独立应用账号初始化完成'
 volumes:
   redis-data:
   qdrant-data:
+  minio-data:
 
 networks:
   default:

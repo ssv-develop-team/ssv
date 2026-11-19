@@ -8,7 +8,13 @@ import pytest
 
 import ssv_agent.event_store.ledger as ledger_module
 import ssv_agent.workers as workers_module
-from ssv_agent.event_store import DurableJob, EventLedger, JobKind, JobState
+from ssv_agent.event_store import (
+    ArtifactKind,
+    DurableJob,
+    EventLedger,
+    JobKind,
+    JobState,
+)
 from ssv_agent.review_context import ReviewContext
 from ssv_agent.prompt import build_review_prompt
 from ssv_agent.result import ReviewResult
@@ -19,7 +25,7 @@ from ssv_agent.evidence_provider import (
     EvidenceCacheWindowUnavailable,
     EvidenceExtractionError,
 )
-from ssv_agent.config import RecordingEvidenceConfig
+from ssv_agent.config import ArtifactStorageConfig, RecordingEvidenceConfig
 from ssv_agent.workers import (
     _LeaseHeartbeat,
     IndexWorker,
@@ -871,7 +877,7 @@ def test_review_worker_heartbeats_a_long_runner_on_an_independent_ledger(
         lease_ms=60,
         max_retries=2,
         retry_delay_ms=0,
-        result_writer=lambda _event_id, _result: tmp_path / "result.json",
+        result_writer=lambda _event_id, _result, **_kwargs: tmp_path / "result.json",
     )
     outcomes: list[bool] = []
     run_thread = threading.Thread(target=lambda: outcomes.append(worker.run_once()))
@@ -1015,7 +1021,7 @@ def test_review_worker_exposes_heartbeat_failures_without_writing_artifacts(
         lease_ms=60,
         max_retries=2,
         retry_delay_ms=0,
-        result_writer=lambda _event_id, _result: written.append(tmp_path / "result.json")
+        result_writer=lambda _event_id, _result, **_kwargs: written.append(tmp_path / "result.json")
         or tmp_path / "result.json",
     )
 
@@ -1051,7 +1057,7 @@ def test_review_worker_marks_an_over_limit_claim_dead_before_external_calls(
         lease_ms=1_000,
         max_retries=1,
         retry_delay_ms=0,
-        result_writer=lambda _event_id, _result: writer_calls.append(tmp_path / "result.json")
+        result_writer=lambda _event_id, _result, **_kwargs: writer_calls.append(tmp_path / "result.json")
         or tmp_path / "result.json",
     )
 
@@ -1145,7 +1151,7 @@ def test_review_worker_leaves_reclaimed_job_untouched_after_lease_loss(
         lease_ms=1,
         max_retries=3,
         retry_delay_ms=0,
-        result_writer=lambda _event_id, _result: written.append(tmp_path / "result.json")
+        result_writer=lambda _event_id, _result, **_kwargs: written.append(tmp_path / "result.json")
         or tmp_path / "result.json",
     )
 
@@ -1579,3 +1585,222 @@ def test_review_worker_logs_empty_and_failed_rule_retrieval(
     )
     assert queries[0] not in repr(fields)
     assert "private endpoint details" not in repr(fields)
+
+
+def _minio_storage(monkeypatch: pytest.MonkeyPatch) -> ArtifactStorageConfig:
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "secret")
+    return ArtifactStorageConfig(backend="minio")
+
+
+def test_review_commit_registers_json_and_upload_job_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    storage = _minio_storage(monkeypatch)
+    db_path = tmp_path / "events.db"
+    evidence_id = _record_case(db_path, tmp_path / "frame.jpg")
+    result = ReviewResult(
+        verdict="violation",
+        confidence=0.9,
+        evidence_status="available",
+        evidence_ids=[evidence_id],
+        explanation="registered frame supports finding",
+    )
+    worker = ReviewWorker(
+        ledger_factory=lambda: EventLedger(db_path, artifact_storage=storage),
+        runner=lambda _context, _rules=None: result.model_dump_json(),
+        worker_id="reviewer",
+        lease_ms=30_000,
+        max_retries=3,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+    with EventLedger(db_path, artifact_storage=storage) as ledger:
+        artifact = ledger.get_review_artifact("case-1", revision=1)
+        assert artifact is not None
+        job = ledger.get_artifact_upload_job(artifact.artifact_id)
+    assert artifact.kind is ArtifactKind.REVIEW_JSON
+    assert artifact.staging_path is not None
+    assert Path(artifact.staging_path).exists()
+    assert job is not None and job.state is JobState.PENDING
+
+
+def test_report_commit_registers_markdown_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    storage = _minio_storage(monkeypatch)
+    db_path = tmp_path / "events.db"
+    _record_reviewed_case(db_path, tmp_path / "frame.jpg")
+    worker = ReportWorker(
+        ledger_factory=lambda: EventLedger(db_path, artifact_storage=storage),
+        worker_id="reporter",
+        lease_ms=30_000,
+        max_retries=3,
+        retry_delay_ms=0,
+    )
+
+    assert worker.run_once() is True
+
+    with EventLedger(db_path, artifact_storage=storage) as ledger:
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report = ledger.get_report_for_review("case-1", review.review_id)
+        assert report is not None
+        job = ledger.get_artifact_upload_job(report.artifact_id or "")
+    assert report.artifact_id is not None
+    assert job is not None and job.state is JobState.PENDING
+
+
+def test_evidence_commit_queues_frames_but_never_video_or_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = _minio_storage(monkeypatch)
+    root = tmp_path / "evidence"
+    root.mkdir()
+    db_path = tmp_path / "events.db"
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(root)],
+        recording_evidence=RecordingEvidenceConfig(),
+        artifact_storage=storage,
+    ) as ledger:
+        ledger.record(
+            ReviewContext(
+                event_id="case-1",
+                ingress_id="1-0",
+                source="camera-1",
+                timestamp_ms=1000,
+                frame_id=4,
+            )
+        )
+        job = ledger.claim_job(JobKind.EVIDENCE_EXTRACT, "extractor", lease_ms=30_000)
+        assert job is not None
+        ledger.complete_evidence_extract_job(
+            job, "extractor", _recording_artifacts(root)
+        )
+        artifacts = ledger.list_artifacts()
+
+    assert [item.kind for item in artifacts] == [ArtifactKind.EVIDENCE_FRAME] * 3
+    assert len({item.staging_path for item in artifacts}) == 3
+
+
+def test_ingress_frame_is_copied_into_agent_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = _minio_storage(monkeypatch)
+    outputs = tmp_path / "outputs"
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"source-frame")
+    db_path = tmp_path / "events.db"
+
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(tmp_path)],
+        artifact_storage=storage,
+        outputs_dir=outputs,
+    ) as ledger:
+        ledger.record(
+            ReviewContext(
+                event_id="case-1",
+                ingress_id="1-0",
+                source="camera-1",
+                timestamp_ms=1000,
+                frame_id=4,
+                frame_path=str(frame),
+            )
+        )
+        case = ledger.get_case("case-1")
+        assert case is not None
+        artifact = ledger.get_artifact_for_evidence("case-1", case.evidence[0].evidence_id)
+
+    assert artifact is not None
+    assert artifact.staging_path is not None
+    staged = Path(artifact.staging_path)
+    assert staged.is_file()
+    assert staged.read_bytes() == b"source-frame"
+    assert staged != frame
+    assert artifact.sha256 == __import__("hashlib").sha256(b"source-frame").hexdigest()
+
+
+def test_review_worker_materializes_verified_frame_working_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    from contextlib import contextmanager
+
+    storage = _minio_storage(monkeypatch)
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    frame = evidence_root / "frame.jpg"
+    frame.write_bytes(b"frame-bytes")
+    db_path = tmp_path / "events.db"
+
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(evidence_root)],
+        artifact_storage=storage,
+        outputs_dir=outputs,
+    ) as ledger:
+        ledger.record(
+            ReviewContext(
+                event_id="case-1",
+                ingress_id="1-0",
+                source="camera-1",
+                timestamp_ms=1000,
+                frame_id=4,
+                frame_path=str(frame),
+            )
+        )
+        case = ledger.get_case("case-1")
+        assert case is not None
+        artifact = ledger.get_artifact_for_evidence("case-1", case.evidence[0].evidence_id)
+        assert artifact is not None
+        Path(artifact.staging_path or "").unlink()
+        job = ledger.claim_artifact_upload_job("uploader", lease_ms=30_000)
+        assert job is not None
+        ledger.complete_artifact_upload_job(job, "uploader")
+        ledger.mark_artifact_cleaned(artifact.artifact_id)
+
+    class FakeStore:
+        def ensure_uploaded(self, artifact, source) -> None:
+            raise AssertionError("review must not upload")
+
+        @contextmanager
+        def open(self, artifact):
+            assert artifact.object_key == artifact_key
+            yield io.BytesIO(b"frame-bytes")
+
+    artifact_key = artifact.object_key
+    observed: dict[str, Path] = {}
+
+    def runner(context, _rules=None):
+        path = Path(context.frame_path or "")
+        assert path.read_bytes() == b"frame-bytes"
+        observed["path"] = path
+        return ReviewResult(
+            verdict="uncertain",
+            confidence=0.0,
+            evidence_status="missing",
+            explanation="working copy fixture",
+        ).model_dump_json()
+
+    worker = ReviewWorker(
+        ledger_factory=lambda: EventLedger(
+            db_path, artifact_storage=storage, outputs_dir=outputs
+        ),
+        runner=runner,
+        worker_id="reviewer",
+        lease_ms=30_000,
+        max_retries=3,
+        retry_delay_ms=0,
+        artifact_store=FakeStore(),
+    )
+
+    assert worker.run_once() is True
+
+    assert observed["path"].exists() is False

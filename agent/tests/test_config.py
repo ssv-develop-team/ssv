@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 from ssv_agent import cli
 from ssv_agent.config import (
     AgentSourceConfig,
+    MinioStorageConfig,
     RecordingEvidenceConfig,
     RedisConfig,
     SsvConfig,
@@ -493,6 +495,8 @@ def test_load_config_accepts_complete_example(
 ) -> None:
     monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "example-access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "example-secret")
     path = Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml"
 
     cfg = load_config(path)
@@ -528,6 +532,8 @@ def test_example_recording_evidence_defaults(
 ) -> None:
     monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "example-access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "example-secret")
     example = load_config(Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml")
 
     assert example.evidence_cache.directory == "/var/lib/ssv/evidence-cache"
@@ -566,8 +572,7 @@ def test_cli_does_not_pass_example_as_default_config(
     observed_paths: list[str | Path | None] = []
     monkeypatch.delenv("SSV_CONFIG_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["ssv-agent"])
-    monkeypatch.setattr(cli, "find_dotenv", lambda: "")
-    monkeypatch.setattr(cli, "load_dotenv", lambda _: False)
+    monkeypatch.setattr(cli, "_load_environment", lambda: None)
     monkeypatch.setattr(
         cli,
         "load_config",
@@ -586,3 +591,244 @@ def test_removed_evidence_switches_are_rejected() -> None:
         SsvConfig.model_validate({"agent": {"recording_evidence": {"enabled": True}}})
     with pytest.raises(ValidationError, match="enabled"):
         SsvConfig.model_validate({"evidence_cache": {"enabled": False}})
+
+
+def test_artifact_storage_defaults_to_local_with_flattened_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSV_MINIO_BUCKET", raising=False)
+
+    config = SsvConfig.model_validate({"version": "2.0", "agent": {"output_dir": "outputs"}})
+
+    assert config.agent.storage.backend == "local"
+    assert config.agent.storage.prefix == "ssv/v1"
+    assert config.agent.storage.max_retries == 3
+    assert config.agent.storage.poll_interval_ms == 1000
+    assert config.agent.storage.lease_ms == 30_000
+    assert config.agent.storage.retry_delay_ms == 1000
+    assert config.agent.storage.minio.bucket == "ssv-artifacts"
+    assert config.agent.storage.minio.access_key_env == "SSV_MINIO_ACCESS_KEY"
+    assert config.agent.storage.minio.secret_key_env == "SSV_MINIO_SECRET_KEY"
+
+
+def test_artifact_storage_accepts_flattened_settings_and_rejects_nested_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "application")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "application-secret")
+
+    config = SsvConfig.model_validate(
+        {
+            "agent": {
+                "storage": {
+                    "backend": "minio",
+                    "prefix": "custom/v2",
+                    "poll_interval_ms": 250,
+                    "lease_ms": 5000,
+                    "max_retries": 4,
+                    "retry_delay_ms": 2000,
+                }
+            }
+        }
+    )
+
+    assert config.agent.storage.prefix == "custom/v2"
+    assert config.agent.storage.minio.prefix == "custom/v2"
+    assert config.agent.storage.poll_interval_ms == 250
+    assert config.agent.storage.lease_ms == 5000
+    assert config.agent.storage.max_retries == 4
+    assert config.agent.storage.retry_delay_ms == 2000
+
+    with pytest.raises(ValidationError):
+        SsvConfig.model_validate({"agent": {"storage": {"upload": {"lease_ms": 5000}}}})
+    with pytest.raises(ValidationError):
+        SsvConfig.model_validate({"agent": {"storage": {"minio": {"prefix": "custom/v2"}}}})
+
+
+def test_minio_bucket_defaults_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "site-bucket")
+
+    assert MinioStorageConfig().bucket == "site-bucket"
+
+
+def test_minio_bucket_rejects_conflicting_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "site-bucket")
+    with pytest.raises(ValidationError, match="SSV_MINIO_BUCKET"):
+        MinioStorageConfig(bucket="another-bucket")
+    assert MinioStorageConfig(bucket="site-bucket").bucket == "site-bucket"
+
+
+def test_minio_bucket_validates_environment_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "Invalid_Bucket")
+    with pytest.raises(ValidationError):
+        MinioStorageConfig()
+
+
+def test_minio_defaults_use_environment_at_config_load_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "site-bucket")
+    monkeypatch.setenv("MINIO_API_PORT", "9100")
+    config = SsvConfig()
+    assert config.agent.storage.minio.bucket == "site-bucket"
+    assert config.agent.storage.minio.endpoint == "http://127.0.0.1:9100"
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "invalid"])
+def test_minio_defaults_reject_invalid_api_port(
+    port: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINIO_API_PORT", port)
+    with pytest.raises(ValidationError):
+        MinioStorageConfig()
+
+
+def test_example_uses_shared_minio_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "application")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "application-secret")
+    monkeypatch.setenv("SSV_MINIO_BUCKET", "site-bucket")
+    path = Path(__file__).resolve().parents[2] / "config" / "ssv.example.yaml"
+    assert load_config(path).agent.storage.minio.bucket == "site-bucket"
+
+
+def test_agent_environment_loads_shared_values_and_excludes_root_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ssv_agent import runtime
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (tmp_path / "docker").mkdir()
+    (tmp_path / ".env").write_text(
+        "MINIO_ROOT_USER=root-admin\nMINIO_ROOT_PASSWORD=root-secret\n"
+        "SSV_MINIO_ACCESS_KEY=application\nSSV_MINIO_SECRET_KEY='literal${SECRET}'\n"
+        "MINIO_CONSOLE_PORT=9101\nSSV_MINIO_BUCKET=site-bucket\n",
+    )
+    (tmp_path / "docker" / ".env").write_text(
+        "MINIO_API_PORT=9100\nMINIO_CONSOLE_PORT=9201\nSSV_MINIO_BUCKET=wrong-bucket\n"
+        "MINIO_ROOT_PASSWORD=misplaced-secret\n",
+    )
+    (agent_dir / ".env").write_text(
+        "SSV_AGENT_MODEL=fixture-model\nSSV_MINIO_ACCESS_KEY=wrong-application\n",
+    )
+    monkeypatch.setattr(runtime, "_AGENT_ROOT", agent_dir)
+    for name in (
+        "SSV_MINIO_ACCESS_KEY",
+        "SSV_MINIO_SECRET_KEY",
+        "SSV_MINIO_BUCKET",
+        "MINIO_API_PORT",
+        "SSV_AGENT_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MINIO_CONSOLE_PORT", "9301")
+    monkeypatch.setenv("MINIO_ROOT_USER", "inherited-admin")
+    monkeypatch.setenv("MINIO_ROOT_PASSWORD", "inherited-secret")
+
+    cli._load_environment()
+
+    assert os.environ["SSV_MINIO_ACCESS_KEY"] == "application"
+    assert os.environ["SSV_MINIO_SECRET_KEY"] == "literal${SECRET}"
+    assert os.environ["SSV_AGENT_MODEL"] == "fixture-model"
+    assert os.environ["MINIO_CONSOLE_PORT"] == "9301"
+    assert "MINIO_ROOT_USER" not in os.environ
+    assert "MINIO_ROOT_PASSWORD" not in os.environ
+    config = MinioStorageConfig()
+    assert config.bucket == "site-bucket"
+    assert config.endpoint == "http://127.0.0.1:9100"
+
+
+def test_web_cli_loads_shared_environment_before_validating_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ssv_agent import runtime, web_server
+
+    monkeypatch.setattr(os, "environ", {})
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (tmp_path / ".env").write_text(
+        "SSV_MINIO_ACCESS_KEY=application\nSSV_MINIO_SECRET_KEY=application-secret\n",
+    )
+    config_path = tmp_path / "ssv.yaml"
+    config_path.write_text('version: "2.0"\nagent:\n  storage:\n    backend: minio\n')
+    monkeypatch.setattr(runtime, "_AGENT_ROOT", agent_dir)
+    monkeypatch.setattr(sys, "argv", ["ssv-agent", "web", "--config", str(config_path)])
+    monkeypatch.setattr(cli, "setup_logging", lambda _: None)
+    observed: list[SsvConfig] = []
+    monkeypatch.setattr(web_server, "run_web", lambda config: observed.append(config))
+
+    cli.main()
+
+    assert len(observed) == 1
+    assert observed[0].agent.storage.backend == "minio"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "/ssv/v1", "ssv//v1", "ssv/./v1", "ssv/../other", "ssv/v1/"],
+)
+def test_minio_storage_rejects_unsafe_prefix(prefix: str) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig(prefix=prefix)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "127.0.0.1:9000",
+        "ftp://127.0.0.1:9000",
+        "http://user:pass@127.0.0.1:9000",
+        "http://127.0.0.1:9000/?region=us",
+        "http://127.0.0.1:9000/#fragment",
+    ],
+)
+def test_minio_endpoint_rejects_unsafe_values(endpoint: str) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig(endpoint=endpoint)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"connect_timeout_seconds": 0},
+        {"read_timeout_seconds": 0},
+        {"access_key_env": " "},
+        {"secret_key_env": ""},
+        {"bucket": "Invalid_Bucket"},
+        {"unknown": True},
+    ],
+)
+def test_minio_storage_rejects_invalid_settings(settings: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        MinioStorageConfig.model_validate(settings)
+
+
+def test_minio_backend_requires_credentials_in_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSV_MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("SSV_MINIO_SECRET_KEY", raising=False)
+
+    with pytest.raises(ValidationError, match="SSV_MINIO_ACCESS_KEY"):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "minio"}}})
+
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "AKIA-FIXTURE-ACCESS")
+    with pytest.raises(ValidationError, match="SSV_MINIO_SECRET_KEY"):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "minio"}}})
+
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "FIXTURE-SECRET-VALUE")
+    config = SsvConfig.model_validate({"agent": {"storage": {"backend": "minio"}}})
+
+    assert config.agent.storage.backend == "minio"
+    assert config.agent.storage.minio.endpoint == "http://127.0.0.1:9000"
+    assert "AKIA-FIXTURE-ACCESS" not in config.agent.storage.model_dump_json()
+    assert "FIXTURE-SECRET-VALUE" not in config.agent.storage.model_dump_json()
+
+
+def test_artifact_storage_rejects_unknown_backend() -> None:
+    with pytest.raises(ValidationError):
+        SsvConfig.model_validate({"agent": {"storage": {"backend": "s3"}}})
