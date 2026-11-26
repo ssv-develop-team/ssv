@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from scripts.ssv_cli.cli import build_parser, main
+from scripts.ssv_cli.commands import agent as agent_command
 from scripts.ssv_cli.commands import build as build_command
 from scripts.ssv_cli.commands import runtime as cache_command
 from scripts.ssv_cli.commands import test as test_command
@@ -880,3 +881,61 @@ class CommandHandoffTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DockerEnvTest(unittest.TestCase):
+    def test_context_loads_credentials_from_root_and_only_ports_from_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker").mkdir()
+            (root / ".env").write_text(
+                "MINIO_ROOT_USER=root-admin\nSSV_MINIO_ACCESS_KEY=application\n"
+                "MINIO_CONSOLE_PORT=9101\n",
+                encoding="utf-8",
+            )
+            (root / "docker" / ".env").write_text(
+                "MINIO_API_PORT=9100\nMINIO_CONSOLE_PORT=9201\n"
+                "MINIO_ROOT_PASSWORD=misplaced-secret\nSSV_CONFIG_PATH=misplaced.yaml\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"MINIO_CONSOLE_PORT": "9301"}, clear=True):
+                context = ProjectContext.discover(root)
+
+        self.assertEqual(context.environment["MINIO_ROOT_USER"], "root-admin")
+        self.assertEqual(context.environment["SSV_MINIO_ACCESS_KEY"], "application")
+        self.assertEqual(context.environment["MINIO_API_PORT"], "9100")
+        self.assertEqual(context.environment["MINIO_CONSOLE_PORT"], "9301")
+        self.assertNotIn("MINIO_ROOT_PASSWORD", context.environment)
+        self.assertIsNone(context.config_path)
+
+    def test_agent_handoff_excludes_root_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "agent" / ".venv").mkdir(parents=True)
+            context = ProjectContext(
+                root=root,
+                environment={
+                    "MINIO_ROOT_USER": "root-admin",
+                    "MINIO_ROOT_PASSWORD": "root-secret",
+                    "SSV_MINIO_ACCESS_KEY": "application",
+                    "SSV_MINIO_SECRET_KEY": "application-secret",
+                },
+                config_path=None,
+                build_dir=root / "build",
+                compose_file=root / "docker" / "compose.yaml",
+            )
+            with (
+                patch("scripts.ssv_cli.commands.agent.require_command", return_value="uv"),
+                patch("scripts.ssv_cli.commands.agent.exec_command") as handoff,
+            ):
+                agent_command.run(context, Namespace(config=None, log_level=None))
+
+        environment = handoff.call_args.kwargs.get("environment", context.environment)
+        self.assertEqual(
+            environment,
+            {
+                "SSV_MINIO_ACCESS_KEY": "application",
+                "SSV_MINIO_SECRET_KEY": "application-secret",
+            },
+        )
+        self.assertEqual(context.environment["MINIO_ROOT_USER"], "root-admin")

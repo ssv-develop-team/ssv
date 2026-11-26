@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -101,6 +103,135 @@ class AgentWebConfig(_StrictConfigModel):
         return value
 
 
+_DEFAULT_MINIO_BUCKET = "ssv-artifacts"
+_BUCKET_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _default_minio_bucket() -> str:
+    return os.environ.get("SSV_MINIO_BUCKET") or _DEFAULT_MINIO_BUCKET
+
+
+def _default_minio_endpoint() -> str:
+    port = os.environ.get("MINIO_API_PORT") or "9000"
+    return f"http://127.0.0.1:{port}"
+
+
+class MinioStorageConfig(_StrictConfigModel):
+    """MinIO/S3 连接与命名配置；凭据只保存环境变量名。"""
+
+    model_config = ConfigDict(validate_default=True)
+
+    endpoint: str = Field(default_factory=_default_minio_endpoint)
+    bucket: str = Field(default_factory=_default_minio_bucket)
+    prefix: str = "ssv/v1"
+    access_key_env: str = "SSV_MINIO_ACCESS_KEY"
+    secret_key_env: str = "SSV_MINIO_SECRET_KEY"
+    connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    read_timeout_seconds: float = Field(default=15.0, gt=0)
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("agent.storage.minio.endpoint must be an http(s) URL")
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("agent.storage.minio.endpoint port must be between 1 and 65535")
+        if parsed.username or parsed.password:
+            raise ValueError("agent.storage.minio.endpoint must not embed credentials")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("agent.storage.minio.endpoint must not include query or fragment")
+        if parsed.path not in {"", "/"}:
+            raise ValueError("agent.storage.minio.endpoint must not include a path")
+        return value.rstrip("/")
+
+    @field_validator("bucket")
+    @classmethod
+    def validate_bucket(cls, value: str) -> str:
+        if not _BUCKET_PATTERN.fullmatch(value):
+            raise ValueError("agent.storage.minio.bucket must be a valid S3 bucket name")
+        return value
+
+    @model_validator(mode="after")
+    def validate_shared_bucket(self) -> Self:
+        if self.bucket != _default_minio_bucket():
+            raise ValueError(
+                "agent.storage.minio.bucket conflicts with SSV_MINIO_BUCKET; "
+                "set SSV_MINIO_BUCKET and remove bucket from YAML"
+            )
+        return self
+
+    @field_validator("prefix")
+    @classmethod
+    def validate_prefix(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            not value
+            or value.startswith("/")
+            or value.endswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError(
+                "agent.storage.minio.prefix must be a relative path without empty, '.' or '..' parts"
+            )
+        return value
+
+    @field_validator("access_key_env", "secret_key_env")
+    @classmethod
+    def validate_env_name(cls, value: str) -> str:
+        if not _ENV_NAME_PATTERN.fullmatch(value):
+            raise ValueError("credential environment variable names must be valid identifiers")
+        return value
+
+
+class ArtifactStorageConfig(_StrictConfigModel):
+    """产物存储后端选择。"""
+
+    backend: Literal["local", "minio"] = "local"
+    prefix: str = "ssv/v1"
+    poll_interval_ms: int = Field(default=1000, gt=0)
+    lease_ms: int = Field(default=30_000, gt=0)
+    max_retries: int = Field(default=3, ge=1)
+    retry_delay_ms: int = Field(default=1000, ge=0)
+
+    @property
+    def minio(self) -> MinioStorageConfig:
+        """根据扁平存储配置构造 MinIO 客户端配置。"""
+        return MinioStorageConfig(prefix=self.prefix)
+
+    @field_validator("prefix")
+    @classmethod
+    def validate_prefix(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            not value
+            or value.startswith("/")
+            or value.endswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError(
+                "agent.storage.prefix must be a relative path without empty, '.' or '..' parts"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_minio_credentials(self) -> Self:
+        if self.backend != "minio":
+            return self
+        missing = [
+            name
+            for name in (self.minio.access_key_env, self.minio.secret_key_env)
+            if not os.environ.get(name)
+        ]
+        if missing:
+            raise ValueError(
+                "agent.storage.backend=minio requires environment variables: " + ", ".join(missing)
+            )
+        return self
+
+
+
 class RecordingEvidenceConfig(PollingWorkerConfig):
     """由 Agent 持久 worker 读取 SSV cache 并生成上下文证据的配置。"""
 
@@ -175,6 +306,7 @@ class AgentConfig(_StrictConfigModel):
     reporting: ReportWorkerConfig = Field(default_factory=ReportWorkerConfig)
     recording_evidence: RecordingEvidenceConfig = Field(default_factory=RecordingEvidenceConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    storage: ArtifactStorageConfig = Field(default_factory=ArtifactStorageConfig)
 
     @field_validator("evidence_roots")
     @classmethod
@@ -191,7 +323,7 @@ class SsvConfig(_StrictConfigModel):
     redis: RedisConfig = RedisConfig()
     sources: list[AgentSourceConfig] = Field(default_factory=list)
     evidence_cache: EvidenceCacheConfig = Field(default_factory=EvidenceCacheConfig)
-    agent: AgentConfig = AgentConfig()
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
     @model_validator(mode="before")
     @classmethod

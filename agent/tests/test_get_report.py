@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -163,3 +165,77 @@ def test_get_event_includes_report_metadata_without_artifact_path(
     assert payload["reports"][0]["review_id"] == review_id
     assert "artifact_path" not in json.dumps(payload)
     assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_get_report_reads_uploaded_artifact_after_staging_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from ssv_agent.config import ArtifactStorageConfig
+    from ssv_agent.event_store import ArtifactKind, StagedArtifact
+
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "secret")
+    storage = ArtifactStorageConfig(backend="minio")
+    db_path = tmp_path / "events.db"
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("SSV_EVENT_DB_PATH", str(db_path))
+    monkeypatch.setenv("SSV_OUTPUTS_DIR", str(outputs))
+    thread_outputs = tmp_path / "thread-outputs"
+    thread_outputs.mkdir()
+    monkeypatch.setattr(
+        "ssv_agent.tools.get_report.get_thread_data",
+        lambda _runtime: {"outputs_path": str(thread_outputs)},
+    )
+    markdown = "# 视频事件分析报告\n\n已上传产物。\n"
+
+    with EventLedger(db_path, artifact_storage=storage, outputs_dir=outputs) as ledger:
+        ledger.record(_context())
+        review_job = ledger.claim_job(JobKind.REVIEW, "reviewer", lease_ms=10_000)
+        assert review_job is not None
+        ledger.complete_review_job(review_job, "reviewer", _review(), "review.json")
+        review = ledger.get_review_record("case-1", 1)
+        assert review is not None
+        report_job = ledger.claim_job(JobKind.REPORT, "reporter", lease_ms=10_000)
+        assert report_job is not None
+        artifact_id = "a" * 32
+        artifact = write_analysis_report(
+            "case-1", review.review_id, markdown, artifact_id=artifact_id
+        )
+        ledger.complete_report_job(
+            report_job,
+            "reporter",
+            artifact,
+            "report-v1",
+            staged=StagedArtifact(
+                artifact_id=artifact_id,
+                event_id="case-1",
+                kind=ArtifactKind.REPORT_MARKDOWN,
+                path=str(artifact.path),
+                sha256=artifact.sha256,
+                size_bytes=artifact.size_bytes,
+                mime_type="text/markdown",
+            ),
+        )
+        upload = ledger.claim_artifact_upload_job("uploader", lease_ms=30_000)
+        assert upload is not None
+        ledger.complete_artifact_upload_job(upload, "uploader")
+        ledger.mark_artifact_cleaned(artifact_id)
+        artifact.path.unlink()
+
+    class FakeReader:
+        @contextmanager
+        def open(self, artifact_id: str):
+            assert artifact_id == "a" * 32
+            yield io.BytesIO(markdown.encode("utf-8"))
+
+    monkeypatch.setattr(
+        "ssv_agent.tools.get_report.create_artifact_reader",
+        lambda _ledger, _config: FakeReader(),
+    )
+
+    payload = json.loads(get_report_tool.func(None, "case-1"))
+
+    assert payload["found"] is True
+    assert payload["content"] == markdown
+    assert payload["virtual_path"].startswith(f"{VIRTUAL_PATH_PREFIX}/outputs/reports/")

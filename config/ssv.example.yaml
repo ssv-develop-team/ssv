@@ -149,3 +149,10 @@ agent:
     qdrant_path: "data/qdrant"
     qdrant_url: "http://localhost:6333"
     min_score: 0.5
+  storage:
+    backend: "minio"
+    prefix: "ssv/v1"
+    poll_interval_ms: 1000
+    lease_ms: 30000
+    max_retries: 3
+    retry_delay_ms: 1000

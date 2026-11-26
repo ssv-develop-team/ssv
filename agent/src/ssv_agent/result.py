@@ -17,6 +17,7 @@ from ssv_agent.review_context import RuleRetrievalContext
 
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _SAFE_ARTIFACT_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,149}\Z")
+_SAFE_ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 def _outputs_root() -> Path:
@@ -87,6 +88,28 @@ def write_content_addressed_artifact(
     digest = hashlib.sha256(content).hexdigest()
     filename = f"{filename_prefix}-{digest}.{suffix}"
     return _write_artifact(root, directory, filename, content)
+
+
+def write_staged_artifact(
+    event_id: str,
+    artifact_id: str,
+    suffix: str,
+    content: bytes,
+) -> Path:
+    """在按 artifact_id 隔离的暂存目录原子写入待上传产物。"""
+    if not _SAFE_ARTIFACT_ID.fullmatch(artifact_id):
+        raise ValueError("artifact id is invalid")
+    if not re.fullmatch(r"[a-z0-9]{1,12}", suffix):
+        raise ValueError("artifact suffix is invalid")
+
+    root = _outputs_root()
+    event_dir = _event_output_dir(root, event_id)
+    staging = (event_dir / "staging" / artifact_id).resolve()
+    if not staging.is_relative_to(root):
+        raise ValueError("artifact staging directory escapes outputs root")
+    staging.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(content).hexdigest()
+    return _write_artifact(root, staging, f"{digest}.{suffix}", content)
 
 
 class ReviewClaim(BaseModel):
@@ -249,7 +272,12 @@ def write_result_markdown(event_id: str, text: str) -> Path:
     return write_content_addressed_artifact(event_id, "result", "md", content)
 
 
-def write_result_json(event_id: str, result: ReviewResult) -> Path:
+def write_result_json(
+    event_id: str,
+    result: ReviewResult,
+    *,
+    artifact_id: str | None = None,
+) -> Path:
     """原子写入内容寻址的结构化复核结果。"""
     content = (
         json.dumps(
@@ -260,4 +288,6 @@ def write_result_json(event_id: str, result: ReviewResult) -> Path:
         )
         + "\n"
     ).encode("utf-8")
+    if artifact_id is not None:
+        return write_staged_artifact(event_id, artifact_id, "json", content)
     return write_content_addressed_artifact(event_id, "result", "json", content)

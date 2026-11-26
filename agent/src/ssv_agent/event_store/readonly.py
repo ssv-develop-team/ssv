@@ -17,7 +17,15 @@ from typing import Any, Iterator
 
 from PIL import Image, UnidentifiedImageError
 
-from ssv_agent.event_store.ledger import EvidenceRef, ReviewRecord, _normalise_evidence_roots
+from ssv_agent.config import ArtifactStorageConfig
+from ssv_agent.event_store.ledger import (
+    ArtifactKind,
+    ArtifactRecord,
+    EvidenceRef,
+    ReviewRecord,
+    StorageBackend,
+    _normalise_evidence_roots,
+)
 
 _IMAGE_MIME_BY_FORMAT = {
     "BMP": "image/bmp",
@@ -52,6 +60,10 @@ class EvidenceUnavailable(RuntimeError):
     """登记图片当前不可读取或未通过安全校验。"""
 
 
+class ArtifactStoreUnavailable(RuntimeError):
+    """产物对象存储当前不可访问。"""
+
+
 @dataclass(frozen=True)
 class ImagePayload:
     data: bytes
@@ -61,9 +73,23 @@ class ImagePayload:
 class ReadOnlyEventStore:
     """按请求打开 SQLite `mode=ro` 连接，不运行 EventLedger schema migration。"""
 
-    def __init__(self, db_path: str | os.PathLike[str], evidence_roots: list[str]) -> None:
+    def __init__(
+        self,
+        db_path: str | os.PathLike[str],
+        evidence_roots: list[str],
+        *,
+        artifact_storage: ArtifactStorageConfig | None = None,
+        outputs_dir: str | os.PathLike[str] | None = None,
+    ) -> None:
         self._db_path = Path(db_path).expanduser().resolve(strict=False)
         self._evidence_roots = _normalise_evidence_roots(evidence_roots, source="evidence_roots")
+        self._artifact_storage = artifact_storage
+        self._outputs_root = (
+            Path(outputs_dir).expanduser().resolve(strict=False)
+            if outputs_dir is not None
+            else None
+        )
+        self._object_store_instance: Any | None = None
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -218,6 +244,7 @@ class ReadOnlyEventStore:
                 """,
                 (event_id,),
             ).fetchall()
+            storage_status = self._storage_statuses(connection, evidence_rows)
 
         reviews = [self._review_record(row) for row in review_rows]
         evidence_refs = [self._evidence_ref(row) for row in evidence_rows]
@@ -256,6 +283,9 @@ class ReadOnlyEventStore:
                     "status": "available" if evidence.available else "unavailable",
                     "mime_type": evidence.mime_type,
                     "size": evidence.size,
+                    "storage_status": storage_status.get(evidence.artifact_id, "local")
+                    if evidence.artifact_id
+                    else "local",
                     **({"coverage": evidence.coverage} if row["coverage"] is not None else {}),
                 }
                 for row, evidence in zip(evidence_rows, evidence_refs, strict=True)
@@ -280,6 +310,7 @@ class ReadOnlyEventStore:
                 """,
                 (event_id, evidence_id),
             ).fetchmany(2)
+            artifact_row = self._artifact_row(connection, evidence_rows)
 
         if not evidence_rows:
             raise EvidenceNotFound
@@ -288,6 +319,17 @@ class ReadOnlyEventStore:
         evidence = self._evidence_ref(evidence_rows[0])
         if evidence.kind != "frame":
             raise EvidenceNotImage
+        if evidence.artifact_id is not None and artifact_row is None:
+            # 已建立产物关联时，远端/登记缺失不得回退到旧的本地路径。
+            raise EvidenceUnavailable
+        if artifact_row is not None:
+            artifact = self._artifact_record(artifact_row)
+            declared_mime = self._declared_image_mime(artifact.mime_type)
+            data = self._read_artifact_bytes(artifact)
+            return ImagePayload(
+                data=data,
+                content_type=self._validate_image(data, declared_mime),
+            )
         declared_mime = self._declared_image_mime(evidence.mime_type)
         if not evidence.available:
             raise EvidenceUnavailable
@@ -303,6 +345,144 @@ class ReadOnlyEventStore:
 
         content_type = self._validate_image(data, declared_mime)
         return ImagePayload(data=data, content_type=content_type)
+
+    @staticmethod
+    def _artifact_row(
+        connection: sqlite3.Connection,
+        evidence_rows: list[sqlite3.Row],
+    ) -> sqlite3.Row | None:
+        if not evidence_rows:
+            return None
+        artifact_id = evidence_rows[0]["artifact_id"]
+        if not artifact_id:
+            return None
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "artifacts" not in tables:
+            return None
+        return connection.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+
+    @staticmethod
+    def _artifact_record(row: sqlite3.Row) -> ArtifactRecord:
+        return ArtifactRecord(
+            artifact_id=row["artifact_id"],
+            event_id=row["event_id"],
+            kind=ArtifactKind(row["kind"]),
+            storage_backend=StorageBackend(row["storage_backend"]),
+            bucket=row["bucket"],
+            object_key=row["object_key"],
+            sha256=row["sha256"],
+            size_bytes=row["size_bytes"],
+            mime_type=row["mime_type"],
+            staging_path=row["staging_path"],
+            created_ms=row["created_ms"],
+            uploaded_ms=row["uploaded_ms"],
+            local_cleaned_ms=row["local_cleaned_ms"],
+        )
+
+    @staticmethod
+    def _storage_statuses(
+        connection: sqlite3.Connection,
+        evidence_rows: list[sqlite3.Row],
+    ) -> dict[str, str]:
+        artifact_ids = {
+            row["artifact_id"] for row in evidence_rows if row["artifact_id"]
+        }
+        if not artifact_ids:
+            return {}
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "artifact_upload_jobs" not in tables:
+            return {artifact_id: "local" for artifact_id in artifact_ids}
+        placeholders = ",".join("?" for _ in artifact_ids)
+        rows = connection.execute(
+            f"""
+            SELECT artifact_id, state, lease_expires_ms
+            FROM artifact_upload_jobs
+            WHERE artifact_id IN ({placeholders})
+            """,
+            tuple(sorted(artifact_ids)),
+        ).fetchall()
+        now_ms = int(time.time() * 1000)
+        statuses: dict[str, str] = {}
+        for row in rows:
+            state = row["state"]
+            if state == "completed":
+                statuses[row["artifact_id"]] = "uploaded"
+            elif state == "dead":
+                statuses[row["artifact_id"]] = "failed"
+            elif (
+                state == "processing"
+                and row["lease_expires_ms"] is not None
+                and row["lease_expires_ms"] > now_ms
+            ):
+                statuses[row["artifact_id"]] = "uploading"
+            else:
+                statuses[row["artifact_id"]] = "pending"
+        return statuses
+
+    def _read_artifact_bytes(self, artifact: ArtifactRecord) -> bytes:
+        from ssv_agent.artifact_storage import (
+            ArtifactAccessError,
+            ArtifactIntegrityError,
+            ArtifactNotFoundError,
+            ArtifactStoreUnavailableError,
+        )
+
+        try:
+            if artifact.uploaded_ms is not None:
+                with self._object_store().open(artifact) as stream:
+                    data = stream.read()
+            else:
+                data = self._read_staged_artifact(artifact)
+        except ArtifactStoreUnavailableError as exc:
+            raise ArtifactStoreUnavailable from exc
+        except (
+            ArtifactNotFoundError,
+            ArtifactIntegrityError,
+            ArtifactAccessError,
+        ) as exc:
+            raise EvidenceUnavailable from exc
+        if len(data) != artifact.size_bytes or hashlib.sha256(data).hexdigest() != artifact.sha256:
+            raise EvidenceUnavailable
+        return data
+
+    def _read_staged_artifact(self, artifact: ArtifactRecord) -> bytes:
+        if not artifact.staging_path:
+            raise EvidenceUnavailable
+        candidate = Path(artifact.staging_path).resolve(strict=False)
+        roots = [
+            root
+            for root in (self._outputs_root, *self._evidence_roots)
+            if root is not None
+        ]
+        for root in roots:
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            data, _ = self._read_without_symlinks(root, relative)
+            return data
+        raise EvidenceUnavailable
+
+    def _object_store(self) -> Any:
+        if self._object_store_instance is None:
+            if self._artifact_storage is None:
+                raise ArtifactStoreUnavailable
+            from ssv_agent.minio_store import MinioObjectStore
+
+            self._object_store_instance = MinioObjectStore(self._artifact_storage.minio)
+        return self._object_store_instance
 
     @staticmethod
     def _event_summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -449,9 +629,11 @@ class ReadOnlyEventStore:
 
     @staticmethod
     def _evidence_columns(connection: sqlite3.Connection) -> str:
-        """coverage 尚未登记的账本可读取；此处只检查 schema，不运行迁移。"""
+        """可选列按只读 schema 检查补齐；此处不运行迁移。"""
         names = {row["name"] for row in connection.execute("PRAGMA table_info(evidence)")}
-        return "coverage" if "coverage" in names else "NULL AS coverage"
+        columns = ["coverage" if "coverage" in names else "NULL AS coverage"]
+        columns.append("artifact_id" if "artifact_id" in names else "NULL AS artifact_id")
+        return ", ".join(columns)
 
     @staticmethod
     def _evidence_ref(row: sqlite3.Row) -> EvidenceRef:
@@ -468,6 +650,7 @@ class ReadOnlyEventStore:
             source_pts_end=row["source_pts_end"],
             stream_generation=row["stream_generation"],
             coverage=row["coverage"] or "unknown",
+            artifact_id=row["artifact_id"],
         )
 
     @classmethod

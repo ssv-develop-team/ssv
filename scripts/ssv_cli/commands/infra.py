@@ -25,16 +25,16 @@ def _infrastructure_config(context: ProjectContext, args: Namespace):
 
 
 def start(context: ProjectContext, args: Namespace) -> int:
-    header("启动 Docker Redis 和 Qdrant")
+    header("启动 Docker Redis、Qdrant 和 MinIO")
     settings = _infrastructure_config(context, args)
     return start_infrastructure(context, settings.redis, qdrant_url=settings.qdrant_url)
 
 
 def stop(context: ProjectContext, _args: Namespace) -> int:
-    header("停止 Docker Redis 和 Qdrant")
+    header("停止 Docker Redis、Qdrant 和 MinIO")
     return stop_infrastructure(context)
 
 
 def status(context: ProjectContext, _args: Namespace) -> int:
-    header("Docker Redis 和 Qdrant 状态")
+    header("Docker Redis、Qdrant 和 MinIO 状态")
     return status_infrastructure(context)

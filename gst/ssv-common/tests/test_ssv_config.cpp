@@ -366,6 +366,13 @@ agent:
   indexing:
     embedding_base_url: "http://127.0.0.1:8080/v1"
     query_text_type: "query"
+  storage:
+    backend: "minio"
+    minio:
+      endpoint: "http://127.0.0.1:9000"
+      bucket: "ssv-artifacts"
+    upload:
+      max_retries: 3
 )yaml");
     const auto config = ssv::ssv_config_load(valid_path.string());
     assert(config.sources.front().id == "camera-01");

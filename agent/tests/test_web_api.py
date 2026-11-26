@@ -889,3 +889,194 @@ def test_api_uses_read_only_connections_without_migrations_or_database_writes(
     assert seeded_api.db_path.read_bytes() == before
     assert connection_settings
     assert all("mode=ro" in database and use_uri for database, use_uri in connection_settings)
+
+
+def _seed_artifact_case(tmp_path: Path, monkeypatch, *, upload: bool) -> tuple[SeededApi, str]:
+    from ssv_agent.config import ArtifactStorageConfig
+    from ssv_agent.event_store import EventLedger, StagedArtifact  # noqa: F401
+    from ssv_agent.review_context import ReviewContext
+
+    monkeypatch.setenv("SSV_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("SSV_MINIO_SECRET_KEY", "secret")
+    storage = ArtifactStorageConfig(backend="minio")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    outputs = tmp_path / "outputs"
+    frame = evidence_root / "frame.png"
+    image_bytes = _png_bytes()
+    frame.write_bytes(image_bytes)
+    db_path = tmp_path / "events.db"
+
+    with EventLedger(
+        db_path,
+        evidence_roots=[str(evidence_root)],
+        artifact_storage=storage,
+        outputs_dir=outputs,
+    ) as ledger:
+        ledger.record(
+            ReviewContext(
+                event_id="Event-A",
+                source="Cam-A",
+                timestamp_ms=2000,
+                frame_id=1,
+                event_type="helmet",
+                severity="high",
+                frame_path=str(frame),
+            )
+        )
+        case = ledger.get_case("Event-A")
+        assert case is not None
+        evidence_id = case.evidence[0].evidence_id
+        artifact = ledger.get_artifact_for_evidence("Event-A", evidence_id)
+        assert artifact is not None
+        if upload:
+            job = ledger.claim_artifact_upload_job("uploader", lease_ms=30_000)
+            assert job is not None
+            ledger.complete_artifact_upload_job(job, "uploader")
+
+    config = SsvConfig.model_validate(
+        {
+            "evidence_cache": {"directory": str(evidence_root)},
+            "agent": {
+                "event_db_path": str(db_path),
+                "output_dir": str(outputs),
+                "evidence_roots": [str(evidence_root)],
+                "storage": {"backend": "minio"},
+            },
+        }
+    )
+    return (
+        SeededApi(
+            app=create_app(config),
+            config=config,
+            db_path=db_path,
+            evidence_root=evidence_root,
+            image_bytes=image_bytes,
+        ),
+        evidence_id,
+    )
+
+
+def test_web_lists_uploaded_status_but_remains_read_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seeded, evidence_id = _seed_artifact_case(tmp_path, monkeypatch, upload=True)
+
+    with _client(seeded.app) as client:
+        response = client.get("/api/v1/events/Event-A")
+
+    assert response.status_code == 200
+    evidence = response.json()["evidence"]
+    assert len(evidence) == 1
+    assert evidence[0]["evidence_id"] == evidence_id
+    assert evidence[0]["storage_status"] == "uploaded"
+
+    with sqlite3.connect(f"file:{seeded.db_path}?mode=ro", uri=True) as connection:
+        state = connection.execute(
+            "SELECT state FROM artifact_upload_jobs"
+        ).fetchone()[0]
+    assert state == "completed"
+
+
+def test_web_reports_pending_storage_status(tmp_path: Path, monkeypatch) -> None:
+    seeded, _evidence_id = _seed_artifact_case(tmp_path, monkeypatch, upload=False)
+
+    with _client(seeded.app) as client:
+        response = client.get("/api/v1/events/Event-A")
+
+    assert response.json()["evidence"][0]["storage_status"] == "pending"
+
+
+def test_web_reads_pending_artifact_from_verified_staging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seeded, evidence_id = _seed_artifact_case(tmp_path, monkeypatch, upload=False)
+
+    with _client(seeded.app) as client:
+        response = client.get(
+            f"/api/v1/events/Event-A/evidence/{evidence_id}/image"
+        )
+
+    assert response.status_code == 200
+    assert response.content == seeded.image_bytes
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def test_web_maps_minio_timeout_to_controlled_503(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ssv_agent.artifact_storage import ArtifactStoreUnavailableError
+
+    seeded, evidence_id = _seed_artifact_case(tmp_path, monkeypatch, upload=True)
+
+    class FailingStore:
+        def open(self, _artifact):
+            raise ArtifactStoreUnavailableError("timeout")
+
+    monkeypatch.setattr(
+        readonly_module.ReadOnlyEventStore,
+        "_object_store",
+        lambda _self: FailingStore(),
+    )
+
+    with _client(seeded.app) as client:
+        response = client.get(
+            f"/api/v1/events/Event-A/evidence/{evidence_id}/image"
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "artifact_store_unavailable"
+
+
+def test_web_reads_legacy_schema_without_artifact_registration(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    image_path = evidence_root / "legacy.png"
+    image_bytes = _png_bytes()
+    image_path.write_bytes(image_bytes)
+    db_path = tmp_path / "legacy.db"
+    store = SsvEventStore(db_path)
+    store.close()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE evidence DROP COLUMN artifact_id")
+        connection.execute("ALTER TABLE reviews DROP COLUMN artifact_id")
+        connection.execute("ALTER TABLE reports DROP COLUMN artifact_id")
+        connection.execute("DROP TABLE artifact_upload_jobs")
+        connection.execute("DROP TABLE artifacts")
+        _insert_event(
+            connection,
+            event_id="Legacy-A",
+            source="Cam-A",
+            timestamp_ms=2000,
+            event_type="helmet",
+            status="manual_review",
+        )
+        _register_evidence(
+            connection,
+            event_id="Legacy-A",
+            evidence_id="legacy-frame",
+            kind="frame",
+            path=image_path,
+            mime_type="image/png",
+        )
+
+    config = SsvConfig.model_validate(
+        {
+            "agent": {
+                "event_db_path": str(db_path),
+                "evidence_roots": [str(evidence_root)],
+            },
+            "evidence_cache": {"directory": str(evidence_root / "cache")},
+        }
+    )
+
+    with _client(create_app(config)) as client:
+        detail = client.get("/api/v1/events/Legacy-A")
+        image = client.get("/api/v1/events/Legacy-A/evidence/legacy-frame/image")
+
+    assert detail.status_code == 200
+    assert detail.json()["evidence"][0]["storage_status"] == "local"
+    assert image.status_code == 200
+    assert image.content == image_bytes

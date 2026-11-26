@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from typing import Any
 
 from ssv_agent.event_store import EventCase, ReviewRecord
-from ssv_agent.result import write_content_addressed_artifact
+from ssv_agent.result import write_content_addressed_artifact, write_staged_artifact
 
 
 REPORT_TEMPLATE_VERSION = "report-v1"
@@ -159,19 +159,24 @@ def write_analysis_report(
     event_id: str,
     review_id: str,
     markdown: str,
+    *,
+    artifact_id: str | None = None,
 ) -> ReportArtifact:
     """原子写入不可覆盖的内容寻址报告并返回其摘要。"""
     if not isinstance(review_id, str) or not review_id:
         raise ValueError("review_id must not be empty")
 
     content = markdown.encode("utf-8")
-    safe_review_id = _safe_review_component(review_id)
-    path = write_content_addressed_artifact(
-        event_id,
-        f"report-{safe_review_id}",
-        "md",
-        content,
-    )
+    if artifact_id is not None:
+        path = write_staged_artifact(event_id, artifact_id, "md", content)
+    else:
+        safe_review_id = _safe_review_component(review_id)
+        path = write_content_addressed_artifact(
+            event_id,
+            f"report-{safe_review_id}",
+            "md",
+            content,
+        )
     return ReportArtifact(
         path=path,
         sha256=hashlib.sha256(content).hexdigest(),
